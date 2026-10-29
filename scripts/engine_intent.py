@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -56,7 +57,7 @@ def validate_release(root: Path, release: Path, error) -> None:
     root = root.resolve()
     try:
         resolved = release.resolve(strict=True)
-        if resolved != release or resolved == root or root in resolved.parents:
+        if resolved != release or resolved == root or root in resolved.parents or resolved in root.parents:
             raise error("engine release must be stable and outside the workspace")
         if not resolved.is_dir():
             raise error("engine release must be a directory")
@@ -67,5 +68,12 @@ def validate_release(root: Path, release: Path, error) -> None:
                 path = Path(directory) / name
                 if path.is_symlink():
                     raise error(f"engine release must not contain symlinks: {path}")
-    except (OSError, RuntimeError) as exc:
+        requirements = resolved / "requirements.txt"
+        if requirements.exists():
+            for line in requirements.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and not re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9][A-Za-z0-9._+!-]*", line):
+                    raise error("engine release requirements must contain only pinned package versions")
+    except (OSError, RuntimeError, UnicodeError) as exc:
         raise error(f"invalid engine release: {exc}") from exc

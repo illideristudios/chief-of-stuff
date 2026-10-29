@@ -1,6 +1,7 @@
 """Select the installed release or a newer plugin-cache sibling requested for a workspace."""
 
 import json
+import sys
 from pathlib import Path
 
 import engine_intent
@@ -51,7 +52,11 @@ def explicit_release(root: Path, supervisor, *, completed_only: bool = False) ->
 
 def selected_release(root: Path, supervisor) -> Path:
     """Select from private intent or independently verified pointer and cache marker."""
-    explicit = explicit_release(root, supervisor)
+    try:
+        explicit = explicit_release(root, supervisor)
+    except supervisor.ServiceError as exc:
+        print(f"release selection: {exc}; keeping {supervisor.RELEASE}", file=sys.stderr, flush=True)
+        return supervisor.RELEASE
     if explicit is not None:
         return explicit
     current = supervisor.current_release()

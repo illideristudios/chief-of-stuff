@@ -1,6 +1,8 @@
 """Compatibility selection for releases running with the pre-selector supervisor."""
 import json
 import importlib.util
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -102,8 +104,10 @@ class ReleaseSelectionTest(unittest.TestCase):
             malicious = self.make_release(self.root / "malicious", "9.0.0")
             intent["release"] = str(malicious)
             (private / (label + ".json")).write_text(json.dumps(intent))
-            with self.assertRaises(supervisor.ServiceError):
-                release_selection.selected_release(self.root, supervisor)
+            output = io.StringIO()
+            with contextlib.redirect_stderr(output):
+                self.assertEqual(release_selection.selected_release(self.root, supervisor), self.new)
+            self.assertIn("invalid", output.getvalue())
 
     def test_rejects_any_symlink_in_external_release_tree(self):
         target = self.root / "payload"
@@ -116,6 +120,25 @@ class ReleaseSelectionTest(unittest.TestCase):
                 with self.assertRaises(supervisor.ServiceError):
                     release_selection.validate_handoff(self.root, self.new, supervisor)
                 link.unlink()
+
+    def test_release_and_workspace_must_be_disjoint_in_both_directions(self):
+        for release in (self.root, self.root.parent, self.root / "nested"):
+            release.mkdir(exist_ok=True)
+            with self.subTest(release=release), self.assertRaises(supervisor.ServiceError):
+                release_selection.validate_handoff(self.root, release, supervisor)
+
+    def test_requirements_cannot_reference_indirect_or_local_inputs(self):
+        requirements = self.new / "requirements.txt"
+        for value in ("-r ../../workspace/requirements.txt", "--constraint /tmp/constraints.txt",
+                      "example @ file:///tmp/workspace", "./workspace", "-e /tmp/workspace",
+                      "--find-links /tmp/workspace", "example==1\n-r${INPUT}",
+                      "example==1 --config-settings=x=y"):
+            with self.subTest(value=value):
+                requirements.write_text(value + "\n")
+                with self.assertRaises(supervisor.ServiceError):
+                    release_selection.validate_handoff(self.root, self.new, supervisor)
+        requirements.write_text("# pinned packages\nexample_pkg==1.2.3\n\n")
+        release_selection.validate_handoff(self.root, self.new, supervisor)
 
     def test_cached_selector_is_never_called(self):
         with mock.patch.object(supervisor, "selected_release", side_effect=AssertionError("untrusted selector"), create=True), \

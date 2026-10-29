@@ -32,7 +32,7 @@ class WorkerTranscriptPageTest(unittest.TestCase):
         (self.root / "CLAUDE.md").write_text("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n"
             "- Tracker: `daily/<date>-tracker.md`\n- Worktrees: `trees/`\n- Timezone: America/Chicago\n")
         self.sid = str(uuid.uuid4())
-        self.item = SimpleNamespace(issue_key="github:example/repo#9", title="Test <task>")
+        self.item = SimpleNamespace(issue_key="github:example/repo#9", title="Test <task>", forge_state="open")
         self.segment = SimpleNamespace(id=14, issue_key=self.item.issue_key, stage="implement", attempt=1,
             runtime="claude", model="sonnet", ended_at=None, outcome="done", started_at=datetime.now(timezone.utc).isoformat(), runner="worker")
         self.run_dir = self.root / ".chief-of-stuff" / "runs" / "9-implement-1"
@@ -113,6 +113,16 @@ class WorkerTranscriptPageTest(unittest.TestCase):
         self.assertIn("account used for this attempt could not be verified", body)
         self.assertNotIn("original account", body)
 
+    def test_default_login_transcript_uses_recorded_directory_without_environment_override(self):
+        self.log.write_text(self.line("default account"))
+        command = json.loads((self.run_dir / "command.json").read_text())
+        command["config_dir"] = command["env"].pop("CLAUDE_CONFIG_DIR")
+        (self.run_dir / "command.json").write_text(json.dumps(command))
+        self.assertIn("default account", self.get("/workers/sessions/14")[2])
+        command["env"]["CLAUDE_CONFIG_DIR"] = str(self.root / "wrong")
+        (self.run_dir / "command.json").write_text(json.dumps(command))
+        self.assertNotIn("default account", self.get("/workers/sessions/14")[2])
+
     def test_launch_identity_mismatch_is_not_shown(self):
         self.log.write_text(self.line("sensitive"))
         (self.run_dir / "command.json").write_text(json.dumps({"session_id": str(uuid.uuid4()), "cwd": str(self.tree),
@@ -130,7 +140,8 @@ class WorkerTranscriptPageTest(unittest.TestCase):
         link = re.search(r'href="(/workers/sessions/14\?cursor=[^"]+)"', first).group(1)
         last = self.get(link)[2]
         self.assertIn("entry-200", last)
-        self.assertIn('http-equiv="refresh"', last)
+        self.assertIn('setInterval', last)
+        self.assertNotIn('http-equiv="refresh"', last)
         self.assertEqual(self.get("/workers/sessions/14?cursor=bogus")[0], 400)
 
     def test_ended_worker_rows_link_to_the_same_attempt(self):

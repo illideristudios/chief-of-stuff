@@ -676,8 +676,33 @@ class CliTest(unittest.TestCase):
         self.assertIn(">PENDING<", (pages / "decision-deploy-window.html").read_text())
         self.assertEqual((pages / "decision-broken.html").exists(), False)
         # #208: detail stays on the Decisions page; the board's tab retains its pending count.
-        self.assertIn('<a href="/decisions" data-tone="pending">Decisions<span class="badge" title="1 pending">1</span></a>', board)
+        self.assertIn('<a href="/decisions#pending-decisions" data-tone="pending">Decisions<span class="badge" title="1 pending">1</span></a>', board)
         self.assertNotIn('id="decisions"', board)
+
+    def test_needs_input_tile_and_decisions_tab_link_to_the_pending_block(self) -> None:
+        # #1122: the tile and the tab name the id of the labelled PENDING block on /decisions, which exists, once,
+        # whether or not a decision is pending.
+        for pending in (True, False):
+            with self.subTest(pending=pending):
+                root = self.pages_root(free_port())
+                pages = root / "pages"
+                pages.mkdir()
+                if pending:
+                    (pages / "decision-deploy-window.json").write_text(json.dumps(
+                        {"ask": "Which window?", "options": [{"key": "A", "title": "Tonight"}], "recommended": "A",
+                         "why": "Quiet.", "default": "Nothing ships.", "headline": "Decide deploy-window"}))
+                    (pages / "decision-deploy-window.html").write_text("page")
+                (root / "daily" / "2026-09-16-tracker.md").write_text(TRACKER)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    board = rb.main(["--date", "2026-09-16", "--root", str(root)]).read_text()
+                page = (pages / "decisions.html").read_text()
+                target = "/decisions#pending-decisions"
+                self.assertRegex(board, rf'<a class="panels-tile" data-kind="blocked" href="{target}"><span class="panels-label">NEEDS INPUT')
+                self.assertRegex(board, rf'<a href="{target}"[^>]*>Decisions')
+                self.assertEqual(re.findall(r'id="pending-decisions"', page), ['id="pending-decisions"'])
+                heading = re.search(r'<section aria-labelledby="pending-decisions">\s*<h2 id="pending-decisions"[^>]*>PENDING', page)
+                self.assertTrue(heading, "the anchor is the PENDING heading, which labels its section")
+                self.assertRegex(page, rf'<a href="{target}"[^>]*aria-current="page"|<a [^>]*aria-current="page"[^>]*href="{target}"')
 
     def test_summary_line_counts_long_items(self) -> None:
         root = Path(tempfile.mkdtemp())

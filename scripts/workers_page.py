@@ -167,7 +167,7 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
     """RUNNING and ENDED TODAY rows from the store's segments, the human-review count and the running one-shot count."""
     running: list[list[str]] = []
     ended: list[tuple[tuple, list[str]]] = []
-    need = store_shots = 0
+    store_shots = 0
     all_segs = db.segments()
     fix_by_issue: dict[str, int] = {}
     for s in all_segs:
@@ -177,8 +177,15 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
     for s in all_segs:
         segs_by_key.setdefault(s.issue_key, []).append(s)
     exhausted_keys = {key for key, segs in segs_by_key.items()
-                      if retry_exhaustion(db.resume(key), segs, db.log(key))}
-    need += len(exhausted_keys)
+                      if (item := db.item(key)) is not None and item.forge_state != "closed"
+                      and retry_exhaustion(db.resume(key), segs, db.log(key))}
+    waiting_keys = set(exhausted_keys)
+    for item in db.items():
+        if item.forge_state == "closed":
+            continue
+        segs = segs_by_key.get(item.issue_key, ())
+        if getattr(item, "human_review", False) or (segs and segs[-1].outcome == "human_review"):
+            waiting_keys.add(item.issue_key)
     for seg in all_segs:
         item = db.item(seg.issue_key)
         runner = getattr(seg, "runner", "") or f"{seg.stage}-{seg.attempt}"
@@ -204,8 +211,6 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
                 continue
             reports = db.reports(seg.issue_key, stage=seg.stage, attempt=seg.attempt)
             summary = reports[-1].summary if reports else (seg.outcome or "")
-            if seg.outcome == "human_review":
-                need += 1
             action = f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a>'
             exhausted = seg.issue_key in exhausted_keys
             if exhausted:
@@ -223,7 +228,7 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
             ended.append(((ended_dt.hour * 60 + ended_dt.minute, ended_dt.second, len(ended)),
                           [f'{_end_chip(seg.outcome)} <b>{worker_name}</b>', f"{ended_dt:%H:%M}", task_link,
                            escape(summary), action]))
-    return running, ended, need, store_shots
+    return running, ended, len(waiting_keys), store_shots
 
 
 def render(tracker_text: str, sources: board_sources.Sources, now: datetime, trees: Path, cap: int | None,
@@ -241,7 +246,8 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
         store_running, store_ended, store_need, store_shots = _store_rows(db, seen_running, now, trees, claude_account)
         running += store_running
         ended += store_ended
-        need += store_need
+        # In a store-backed workspace, the store holds current status; tracker ends are historical rows.
+        need = store_need
     ended = [r for _, r in sorted(ended, key=lambda e: e[0], reverse=True)]  # by the time shown, newest first
     shots = sum(w.kind == "one-shot" for w in source_workers(sources)) + store_shots
     boxes = [("NEEDS INPUT", str(need), " hot" if need else ""), ("RUNNING", str(len(running)), "")]
@@ -263,7 +269,8 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
 
 
 def render_session(db: PageData, segment_id: int, trees: Path, *, config_dir: Path | None = None,
-                   cursor: session_logs.Cursor | None = None) -> str | None:
+                   cursor: session_logs.Cursor | None = None, messages=(), message_reason="Messaging from this page is not available yet.",
+                   csrf="", request_id="") -> str | None:
     """One engine attempt's recorded session; transcript content is returned, never written to pages dir."""
     seg = next((s for s in db.segments() if getattr(s, "id", None) == segment_id), None)
     if seg is None:
@@ -319,25 +326,92 @@ def render_session(db: PageData, segment_id: int, trees: Path, *, config_dir: Pa
         c = page.cursor
         token = f"{c.device},{c.inode},{c.offset},{c.tail_hash}"
         next_link = f'<p><a href="/workers/sessions/{segment_id}?cursor={escape(token, quote=True)}">Next transcript page</a></p>'
-    refresh = '<meta http-equiv="refresh" content="5">' if not seg.ended_at and not next_link else ""
+    pending = any(m.status in ("queued", "sending") for m in messages)
+    labels = {"queued": "Queued", "sending": "Sending / unconfirmed", "delivered": "Delivered to Claude CLI", "failed": "Failed"}
+    message_rows = "".join(
+        f'<div class="session-event"><span class="session-time">{escape(str(m.created_at))}</span>'
+        f'<div><b>Operator · {escape(labels.get(m.status, m.status))}</b>'
+        f'<div class="session-text">{escape(m.body)}</div><p class="meta">{escape(m.evidence or ("Delivery is unconfirmed; it will not be resent automatically." if m.status == "sending" else ""))}</p></div></div>'
+        for m in messages)
+    if csrf:
+        compose = (f'<form method="post" action="/workers/sessions/{segment_id}/messages" class="compose">'
+                   f'<label for="message">Message this worker</label><textarea id="message" name="message" rows="3" required maxlength="8192" '
+                   'placeholder="Send a correction, question, or additional context…"></textarea>'
+                   f'<input type="hidden" name="csrf" value="{escape(csrf, quote=True)}">'
+                   f'<input type="hidden" name="request_id" value="{escape(request_id, quote=True)}">'
+                   '<p class="meta">Up to 8 KiB. The engine must be running to deliver messages. Delivery means the CLI received the message, '
+                   'not that the worker acted on it.</p><button type="submit">Send message ↑</button></form>')
+    else:
+        compose = f'<p class="meta">{escape(message_reason)}</p>'
+    poll = """<script>
+(() => { const form = document.querySelector('.compose');
+  if (form) form.addEventListener('submit', event => {
+    if (new TextEncoder().encode(form.querySelector('textarea').value).length > 8192) {
+      event.preventDefault(); form.querySelector('.meta').textContent = 'Message exceeds 8 KiB. Shorten it before sending.';
+    }
+  });
+  // Keep equal nodes (including links and their focus); defer changes to a focused subtree.
+  function sync(current, fresh) {
+    if (current.isEqualNode(fresh)) return true;
+    if (current.nodeType !== fresh.nodeType || current.nodeName !== fresh.nodeName || current.nodeType !== 1) return replace(current, fresh);
+    if (current.attributes.length !== fresh.attributes.length ||
+        Array.from(current.attributes).some(a => fresh.getAttribute(a.name) !== a.value)) return replace(current, fresh);
+    let complete = true, i = 0;
+    while (i < fresh.childNodes.length || i < current.childNodes.length) {
+      const old = current.childNodes[i], next = fresh.childNodes[i];
+      if (!old) current.appendChild(next.cloneNode(true));
+      else if (!next) { if (old.contains(document.activeElement)) { complete = false; i++; continue; } old.remove(); continue; }
+      else if (!sync(old, next)) complete = false;
+      i++;
+    }
+    return complete;
+  }
+  function replace(old, next) {
+    if (old.contains(document.activeElement)) return false;
+    old.replaceWith(next.cloneNode(true)); return true;
+  }
+  let busy = false;
+  const timer = setInterval(async () => { if (busy) return; busy = true;
+    try { const response = await fetch(location.href, {cache:'no-store'});
+      if (!response.ok) return; const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+      const current = document.querySelector('#session-live'), fresh = doc.querySelector('#session-live');
+      const state = document.querySelector('#session-state'), freshState = doc.querySelector('#session-state');
+      const anchor = Array.from(document.querySelectorAll('#session-live .session-event')).find(e => e.getBoundingClientRect().bottom > 0);
+      const top = anchor && anchor.getBoundingClientRect().top;
+      let complete = !!(current && fresh);
+      if (complete) for (const id of ['session-notice', 'session-events', 'session-pagination', 'session-messages']) {
+        const old = current.querySelector('#' + id), next = fresh.querySelector('#' + id);
+        if (!old || !next || !sync(old, next)) complete = false;
+      }
+      if (state && freshState && state.textContent !== freshState.textContent) state.textContent = freshState.textContent;
+      if (anchor && anchor.isConnected) window.scrollBy(0, anchor.getBoundingClientRect().top - top);
+      if (form && !doc.querySelector('.compose')) { form.querySelector('button').disabled = true;
+        form.querySelector('textarea').readOnly = true; form.querySelector('.meta').textContent = 'This attempt is no longer accepting messages. Your draft was not sent.'; }
+      if (complete && fresh.dataset.ended === 'true' && fresh.dataset.pending === 'false') clearInterval(timer);
+    } catch (_) {} finally { busy = false; }
+  }, 5000);
+})();</script>""" if not seg.ended_at or pending else ""
     state = "Ended" if seg.ended_at else "Recorded as running"
     css = """<style>
 .session-event{display:grid;grid-template-columns:minmax(130px,180px) minmax(0,1fr);gap:12px;padding:10px 0}
 .session-event+.session-event{border-top:1px dotted var(--line)}
 .session-time{font:11px ui-monospace,monospace;color:var(--muted);overflow-wrap:anywhere}
 .session-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:4px}
+.compose{background:var(--surface);border:1px solid var(--line);border-radius:5px;padding:14px;margin-top:18px}
+.compose label{font-weight:600}.compose textarea{display:block;box-sizing:border-box;width:100%;margin-top:8px;padding:8px;color:var(--fg);background:var(--surface);border:1px solid var(--line);border-radius:4px}.compose button{padding:7px 12px;cursor:pointer}
 @media(max-width:600px){.session-event{grid-template-columns:1fr;gap:4px}}
 </style>"""
-    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">{refresh}'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>{escape(title)} · Worker</title>'
             f'{HEAD}{CSS}{css}</head><body><main>{tab_bar("Workers", 0, parent=True)}'
             f'<header class="top"><div><span class="eyebrow"><a href="/workers">Workers</a> · '
             f'{escape(seg.runtime or "unknown runtime")} · attempt {seg.attempt}</span>'
-            f'<h1>{escape(title)}</h1><span class="meta">{state}</span></div></header>'
-            f'<section><h2>Transcript</h2>{reset}{warning}<div class="card">{events}</div>{next_link}'
-            f'<p class="meta">{"This page refreshes every five seconds. " if refresh else ""}'
-            'Messaging from this page is not available yet.</p>'
-            '</section></main></body></html>')
+            f'<h1>{escape(title)}</h1><span class="meta" id="session-state">{state}</span></div></header>'
+            f'<section><div id="session-live" data-ended="{str(bool(seg.ended_at)).lower()}" data-pending="{str(pending).lower()}">'
+            f'<h2>Transcript</h2><div id="session-notice">{reset}{warning}</div><div class="card" id="session-events">{events}</div>'
+            f'<div id="session-pagination">{next_link}</div><h2>Operator messages</h2>'
+            f'<div class="card" id="session-messages">{message_rows or "<p class=meta>No messages for this attempt.</p>"}</div></div>'
+            f'{compose}{poll}</section></main></body></html>')
 
 
 def write(root: Path, pages_dir: Path, *, db: PageData | None = None, navigation: dict | None = None) -> Path:
