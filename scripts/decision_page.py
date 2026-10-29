@@ -49,7 +49,7 @@ import board_sources
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
 from clock import leading
 from decision_actions import DecisionState, OPEN_STATES, addresses, state_of, states, tab_counts as store_tab_counts
-from fragment import FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
+from fragment import DECISIONS_ANCHOR, FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
 from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
 from module_graph import section as _graph
@@ -939,7 +939,7 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
     meta.append('<a href="/">board</a>')
     words = f"{escape(ctx.user)}'s words" if ctx.user else "words"
     none = '      <div class="row"><span class="none">none</span></div>'
-    body = (f'  <section>\n    <h2 class="pend">PENDING · {total_pending}</h2>\n    <div class="list">\n'
+    body = (f'  <section aria-labelledby="{DECISIONS_ANCHOR}">\n    <h2 id="{DECISIONS_ANCHOR}" class="pend">PENDING · {total_pending}</h2>\n    <div class="list">\n'
             '      <div class="row pend head cap"><span>asked</span><span>decision</span><span>options</span><span>holding</span><span>if unanswered</span></div>\n'
             + ("\n".join(rows) or none) + "\n    </div>\n  </section>\n"
             f'  <section>\n    <h2>COMPLETED · {len(done)}</h2>\n    <div class="list fin">\n'

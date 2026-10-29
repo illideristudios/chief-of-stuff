@@ -509,7 +509,7 @@ class CardFactsTest(unittest.TestCase):
         for target in re.findall(r'class="panels-tile"[^>]+href="#([^"]+)"', html):
             self.assertIn(f'id="{target}"', html)
         self.assertIn('href="/workers"', html)
-        self.assertIn('href="/decisions"', html)
+        self.assertIn('href="/decisions#pending-decisions"', html)
         self.assertFalse('class="panels-panel"' in html)
 
 
@@ -676,10 +676,10 @@ class Page(unittest.TestCase):
 
     def test_each_tile_links_to_the_cards_that_carry_its_facts(self) -> None:
         # #208: the removed panels no longer have anchors; tiles reach BUILD, and tabs reach the detail pages.
-        links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="([#/][a-z]+)"><span class="panels-label">([A-Z ]+)</span>', self.body)
+        links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="([#/][a-z#-]+)"><span class="panels-label">([A-Z ]+)</span>', self.body)
         # #349 review: the kind is what the stylesheet colours a tile by, so each is pinned with its link and label.
         # #1122: NEEDS INPUT opens the decisions page.
-        self.assertEqual(links, [("all", "#flow", "ALL"), ("blocked", "/decisions", "NEEDS INPUT"), ("running", "#flow", "RUNNING"),
+        self.assertEqual(links, [("all", "#flow", "ALL"), ("blocked", "/decisions#pending-decisions", "NEEDS INPUT"), ("running", "#flow", "RUNNING"),
                                  ("approved", "#flow", "APPROVED"), ("orphaned", "#flow", "ORPHANED"), ("drift", "#flow", "DRIFT")])
 
     def test_every_tile_kind_has_a_colour_and_all_draws_in_the_artboards_ink(self) -> None:

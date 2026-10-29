@@ -740,7 +740,7 @@ class RenderOnRequestTest(unittest.TestCase):
         page = get(self.port, "/decisions/cache-ttl")
         self.assertEqual(page.status, 200)
         self.assertIn(b"Cache TTL", page.body)
-        self.assertIn(b'href="/decisions"', page.body)
+        self.assertIn(b'href="/decisions#pending-decisions"', page.body)
         self.assertIn(b'href="/decisions/cache-ttl"', get(self.port, "/decisions").body)
         # The user, 2026-09-26: "get rid of the .html versions entirely".
         for missing in ("/decisions/nope", "/decisions/../decisions", "/decisions/cache-ttl.json", "/decisions.html",
