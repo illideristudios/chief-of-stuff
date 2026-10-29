@@ -511,7 +511,6 @@ class DecisionGraphStoreAndAdapterTest(unittest.TestCase):
         self.assertEqual(self.dh.lookup_precedent(after, "early prototypes markdown tables"), ())
 
 
-
 class DecisionGraphMCPAndCLITest(unittest.TestCase):
     def setUp(self) -> None:
         from datetime import datetime, timezone
@@ -577,6 +576,16 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
         self.binding = guard_binding.Binding.from_env(self.env)
         self.tools = engine_mcp.EngineTools(self.binding, self.db)
 
+    @staticmethod
+    def _run_coordinator_cli(argv: list[str]) -> int:
+        import os
+        from unittest import mock
+        import decisions_cli
+
+        clean_env = {k: v for k, v in os.environ.items() if k not in ("CHIEF_ISSUE_KEY", "CHIEF_SESSION_ID")}
+        with mock.patch.dict("os.environ", clean_env, clear=True):
+            return decisions_cli.main(argv)
+
     def test_mcp_decisions_returns_only_current_leaves_by_default_and_refuses_unjustified_history(self) -> None:
         import asyncio
 
@@ -594,21 +603,112 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
         with self.assertRaises(TypeError):
             asyncio.run(self.tools.decisions(role="coordinator"))  # type: ignore[call-arg]
 
-    def test_stdio_mcp_blocks_worker_until_coordinator_judges_and_delivers_bounded_slice_without_model_polling(self) -> None:
+    def test_verdict_wait_handles_pre_recorded_and_mid_registration_verdicts_without_polling_or_lost_wakeup(self) -> None:
+        import asyncio
+        from unittest import mock
+        import decision_history as dh
+        import inbox
+
+        justification = (
+            f"Decision #{self.d4.id} requires the engine MCP tool to serve leaves, "
+            "which does not match what the code shows in scripts/engine_mcp.py:20."
+        )
+
+        # Race 1: Coordinator records verdict BEFORE the worker opens the FIFO or starts waiting.
+        pre_row = self.db.submit_history_request(
+            dh.HistoryRequest(
+                kind="ancestors",
+                leaf_id=self.d4.id,
+                requested_depth=1,
+                issue_key=self.issue_key,
+                worker_id="worker-1181",
+                justification=justification,
+            ),
+            stage="implement",
+            attempt=1,
+        )
+        self.assertFalse(self.store_mod.verdict_fifo_path(self.root, pre_row.id).exists())
+        self.db.judge_history_request(pre_row.id)
+        asyncio.run(
+            asyncio.wait_for(self.tools._await_verdict(pre_row.id, fallback_interval=None), timeout=0.5)
+        )
+        self.assertEqual(self.db.fulfill_history_request(pre_row.id)["status"], "approved")
+
+        # Race 2: Coordinator records verdict while `inbox.send_message` is still in flight (before wait() suspends),
+        # with fallback polling disabled so wakeup relies strictly on the pre-opened FIFO + pre-check.
+        orig_send = inbox.send_message
+
+        def fast_coordinator_during_send(*args, **kwargs):
+            result = orig_send(*args, **kwargs)
+            req_id = kwargs["payload"]["request_id"]
+            self.db.judge_history_request(req_id)
+            return result
+
+        self.tools._verdict_fallback_interval = None
+        try:
+            with mock.patch.object(inbox, "send_message", side_effect=fast_coordinator_during_send):
+                mid_payload = asyncio.run(
+                    asyncio.wait_for(
+                        self.tools.decisions(
+                            action="ancestors",
+                            leaf_id=self.d4.id,
+                            requested_depth=1,
+                            justification=justification,
+                        ),
+                        timeout=0.5,
+                    )
+                )
+        finally:
+            self.tools._verdict_fallback_interval = 1.0
+        self.assertEqual(mid_payload["status"], "approved")
+
+        # Race 3: Coordinator commits and signals right after `_await_verdict` observes `status == "pending"`
+        # and right before the event loop suspends on the FIFO reader (with fallback polling disabled).
+        race_row = self.db.submit_history_request(
+            dh.HistoryRequest(
+                kind="ancestors",
+                leaf_id=self.d4.id,
+                requested_depth=1,
+                issue_key=self.issue_key,
+                worker_id="worker-1181",
+                justification=justification,
+            ),
+            stage="implement",
+            attempt=1,
+        )
+        orig_history_request = self.db.history_request
+        triggered = False
+
+        def commit_right_after_pending_read(request_id: int):
+            nonlocal triggered
+            row = orig_history_request(request_id)
+            if request_id == race_row.id and not triggered and row is not None and row.status == "pending":
+                triggered = True
+                self.db.judge_history_request(request_id)
+            return row
+
+        with mock.patch.object(self.db, "history_request", side_effect=commit_right_after_pending_read):
+            asyncio.run(
+                asyncio.wait_for(self.tools._await_verdict(race_row.id, fallback_interval=None), timeout=0.5)
+            )
+        self.assertTrue(triggered)
+        self.assertEqual(self.db.fulfill_history_request(race_row.id)["status"], "approved")
+
+    def _run_stdio_ancestors_round_trip(self, server_env: dict[str, str]) -> dict:
         import asyncio
         import json
-        import decisions_cli
         import inbox
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
         mailbox_dir = self.root / ".chief-of-stuff" / "mailbox"
+        coord_incoming = mailbox_dir / "coordinator" / "incoming"
 
         async def run() -> dict:
             params = StdioServerParameters(
                 command=sys.executable,
                 args=[str(ROOT / "scripts/engine_mcp.py")],
-                env=self.env,
+                env=server_env,
                 cwd=str(self.root),
             )
             async with stdio_client(params) as (read, write):
@@ -616,42 +716,48 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
                     await client.initialize()
 
                     async def coordinator_side() -> None:
-                        for _ in range(200):
-                            if self.db.pending_history_requests():
+                        pending = []
+                        msg_files: list[Path] = []
+                        for _ in range(300):
+                            pending = self.db.pending_history_requests()
+                            msg_files = list(coord_incoming.glob("msg_*"))
+                            if pending and msg_files:
                                 break
                             await asyncio.sleep(0.02)
-                        pending = self.db.pending_history_requests()
                         self.assertEqual(len(pending), 1)
                         # Verify request reached coordinator mailbox without any ancestor history attached.
-                        coord_incoming = mailbox_dir / "coordinator" / "incoming"
-                        msg_files = list(coord_incoming.glob("msg_*"))
                         self.assertEqual(len(msg_files), 1)
                         msg = inbox.Message.from_file(msg_files[0])
                         self.assertNotIn("Keep decisions in markdown tables", repr(msg.to_dict()))
                         # Coordinator CLI judges pending requests without reading history.
                         rc = await asyncio.to_thread(
-                            decisions_cli.main, ["--root", str(self.root), "judge"]
+                            self._run_coordinator_cli, ["--root", str(self.root), "judge"]
                         )
                         self.assertEqual(rc, 0)
 
-                    coord_task = asyncio.create_task(coordinator_side())
-                    call_res = await client.call_tool(
-                        "decisions",
-                        {
-                            "action": "ancestors",
-                            "leaf_id": self.d4.id,
-                            "requested_depth": 1,
-                            "justification": (
-                                f"Decision #{self.d4.id} requires the engine MCP tool to serve leaves, "
-                                "which does not match what the code shows in scripts/engine_mcp.py:20."
-                            ),
-                        },
+                    call_res, _ = await asyncio.gather(
+                        client.call_tool(
+                            "decisions",
+                            {
+                                "action": "ancestors",
+                                "leaf_id": self.d4.id,
+                                "requested_depth": 1,
+                                "justification": (
+                                    f"Decision #{self.d4.id} requires the engine MCP tool to serve leaves, "
+                                    "which does not match what the code shows in scripts/engine_mcp.py:20."
+                                ),
+                            },
+                        ),
+                        coordinator_side(),
                     )
-                    await coord_task
                     self.assertFalse(call_res.is_error, call_res)
                     return json.loads(call_res.content[0].text)
 
-        payload = asyncio.run(run())
+        return asyncio.run(run())
+
+    def test_stdio_mcp_blocks_worker_until_coordinator_judges_and_delivers_bounded_slice_without_model_polling(self) -> None:
+        mailbox_dir = self.root / ".chief-of-stuff" / "mailbox"
+        payload = self._run_stdio_ancestors_round_trip(self.env)
         self.assertEqual(payload["status"], "approved")
         self.assertEqual(payload["approved_depth"], 1)
         self.assertEqual([a["id"] for a in payload["ancestors"]], [self.d2.id, self.d3.id])
@@ -661,10 +767,31 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
         arch_files = list((mailbox_dir / "architect" / "incoming").glob("msg_*"))
         self.assertEqual(len(arch_files), 1)
 
+    def test_stdio_mcp_survives_slow_mailbox_fsync_without_losing_coordinator_or_timing_out(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as shim:
+            Path(shim, "sitecustomize.py").write_text(
+                "import os, time\n"
+                "_orig_fsync = os.fsync\n"
+                "def _slow_fsync(fd):\n"
+                "    time.sleep(0.04)\n"
+                "    return _orig_fsync(fd)\n"
+                "os.fsync = _slow_fsync\n",
+                encoding="utf-8",
+            )
+            existing_pp = os.environ.get("PYTHONPATH", "")
+            slow_env = {
+                **self.env,
+                "PYTHONPATH": f"{shim}{os.pathsep}{existing_pp}" if existing_pp else shim,
+            }
+            payload = self._run_stdio_ancestors_round_trip(slow_env)
+        self.assertEqual(payload["status"], "approved")
+        self.assertEqual([a["id"] for a in payload["ancestors"]], [self.d2.id, self.d3.id])
+
     def test_stdio_mcp_was_rejected_and_denial_wake_blocked_worker_with_narrow_or_denied_verdict(self) -> None:
         import asyncio
         import json
-        import decisions_cli
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
@@ -680,11 +807,11 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
                     await client.initialize()
 
                     async def approve_narrow() -> None:
-                        for _ in range(200):
+                        for _ in range(300):
                             reqs = self.db.pending_history_requests()
                             if reqs:
                                 rc = await asyncio.to_thread(
-                                    decisions_cli.main,
+                                    self._run_coordinator_cli,
                                     [
                                         "--root", str(self.root),
                                         "decide",
@@ -698,27 +825,28 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
                             await asyncio.sleep(0.02)
                         self.fail("pending was_rejected request never arrived")
 
-                    t1 = asyncio.create_task(approve_narrow())
-                    res1 = await client.call_tool(
-                        "decisions",
-                        {
-                            "action": "was_rejected",
-                            "approach": "poll verdict in a model turn loop",
-                            "justification": (
-                                "I am about to build worker waiting by polling verdict in a model turn loop; "
-                                "not obvious because current leaf #4 does not state the waiting mechanism."
-                            ),
-                        },
+                    res1, _ = await asyncio.gather(
+                        client.call_tool(
+                            "decisions",
+                            {
+                                "action": "was_rejected",
+                                "approach": "poll verdict in a model turn loop",
+                                "justification": (
+                                    "I am about to build worker waiting by polling verdict in a model turn loop; "
+                                    "not obvious because current leaf #4 does not state the waiting mechanism."
+                                ),
+                            },
+                        ),
+                        approve_narrow(),
                     )
-                    await t1
                     self.assertFalse(res1.is_error, res1)
 
                     async def deny_fishing() -> None:
-                        for _ in range(200):
+                        for _ in range(300):
                             reqs = self.db.pending_history_requests()
                             if reqs:
                                 rc = await asyncio.to_thread(
-                                    decisions_cli.main,
+                                    self._run_coordinator_cli,
                                     ["--root", str(self.root), "judge", "--request", str(reqs[0].id)],
                                 )
                                 self.assertEqual(rc, 0)
@@ -726,16 +854,17 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
                             await asyncio.sleep(0.02)
                         self.fail("pending fishing request never arrived")
 
-                    t2 = asyncio.create_task(deny_fishing())
-                    res2 = await client.call_tool(
-                        "decisions",
-                        {
-                            "action": "ancestors",
-                            "leaf_id": self.d4.id,
-                            "justification": "Need more context on earlier decisions.",
-                        },
+                    res2, _ = await asyncio.gather(
+                        client.call_tool(
+                            "decisions",
+                            {
+                                "action": "ancestors",
+                                "leaf_id": self.d4.id,
+                                "justification": "Need more context on earlier decisions.",
+                            },
+                        ),
+                        deny_fishing(),
                     )
-                    await t2
                     self.assertFalse(res2.is_error, res2)
                     return json.loads(res1.content[0].text), json.loads(res2.content[0].text)
 
