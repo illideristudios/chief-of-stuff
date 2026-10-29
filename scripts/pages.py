@@ -53,6 +53,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import forge
 import page_reload
 import supervisor
+from backlog_ref import GitHubBacklog
 from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
 
 SERVER = "chief-of-stuff-pages"
@@ -133,6 +134,18 @@ def today_board(root: Path) -> str | None:
     cfg = read_config(root)
     day = datetime.now(cfg.zone).date().isoformat()
     return f"{day}-board.html" if (root / cfg.tracker_path(day)).is_file() or (root / "store.db").is_file() else None
+
+
+def workspace_label(root: Path) -> str:
+    """The name a served page carries: the Backlog repository or project the workspace's config names, else the root
+    folder's name marked as such (no Backlog line, or a config that does not read) so it is not taken for a project."""
+    try:
+        backlog = read_config(root).backlog
+    except (ConfigError, OSError):
+        backlog = None
+    if backlog is None:
+        return f"{root.name} (folder)"
+    return (backlog.repo if isinstance(backlog, GitHubBacklog) else backlog.project).rpartition("/")[2]
 
 
 def _page_data(root: Path):
@@ -433,8 +446,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _send_html(self, body: bool):
         """An HTML page with the shared reload check; with the banner set, the last good page plus one line saying the
         render failed (never a blank 500). HEAD's length is GET's, and Last-Modified stays the file's own.
-        A page over MAX_PAGE is refused without reading; HEAD without a banner never reads (#333)."""
+        A page over MAX_PAGE is refused without reading; HEAD without a banner never reads (#333), except a rendered
+        page of a rooted server, which carries the workspace's name (#967) and so needs its bytes to count."""
         path = Path(self.translate_path(self.path))
+        root = getattr(self.server, "root", None)
+        label = workspace_label(root) if root is not None and RENDERED.fullmatch(path.name) else None
         try:
             stat = path.stat()
             if not S_ISREG(stat.st_mode):
@@ -442,7 +458,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if stat.st_size > MAX_PAGE:
                 return self.send_error(413, f"a page is at most {MAX_PAGE} bytes")
             stamp = stat.st_mtime
-            if not body and not self.banner:
+            if not body and not self.banner and label is None:  # a labelled page's length needs its bytes
                 with path.open("rb"):  # GET would read it: an unreadable page is GET's 404, not a 200
                     pass
                 # The injected HTTP date is fixed length; count the snippet without reading the file.
@@ -463,6 +479,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     f'font:14px/1.4 system-ui,sans-serif">not re-rendered: {escape(self.banner)}</p>').encode()
             page = re.sub(rb"<body[^>]*>", lambda m: m[0] + note, page, count=1) if b"<body" in page else note + page
         last_modified = self.date_time_string(stamp)
+        if label is not None:
+            from page_common import identify  # not at the top: it loads the markdown parser, which `--ensure` does not need
+            page = identify(page, label)
         page = page_reload.inject(page, last_modified)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -511,7 +530,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_error(500, "could not read worker session")
         if page is None:
             return self.send_error(404, "no such worker session")
-        payload = page.encode("utf-8", errors="replace")
+        from page_common import identify
+        payload = identify(page.encode("utf-8", errors="replace"), workspace_label(root))
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))

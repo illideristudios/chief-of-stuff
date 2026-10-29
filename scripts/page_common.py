@@ -123,6 +123,15 @@ def drop_html_comments(text: str) -> str:
     return _HTML_COMMENT.sub(lambda m: m.group(0) if m.group("code") else "", text)
 
 
+def identify(page: bytes, label: str) -> bytes:
+    """Name the workspace in a served page's `<title>` and first `<h1>`, so a tab, history entry or screenshot says
+    which board it is. The label is escaped here; a page without either tag is left as it was."""
+    prefix = html.escape(label, quote=False).encode() + " · ".encode()
+    for tag in (rb"<title\b[^>]*>", rb"<h1\b[^>]*>"):
+        page = re.sub(tag, lambda m: m[0] + prefix, page, count=1, flags=re.I)
+    return page
+
+
 def markdown_inline(text: str, resolve: ReferenceResolver | None = None, *, links: bool = True) -> str:
     """Inline CommonMark with raw HTML escaped; `links=False` keeps a navigation label free of anchors."""
     with _MARKDOWN_LOCK:
