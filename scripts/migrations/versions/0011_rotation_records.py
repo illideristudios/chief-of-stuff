@@ -14,3 +14,9 @@ def upgrade() -> None:
     op.create_table("rotation_cursor", sa.Column("task_class", sa.String(), primary_key=True),
                     sa.Column("entry", sa.String(), nullable=False))
     op.add_column("segment", sa.Column("workflow", sa.String(), nullable=False, server_default=""))
+
+
+def downgrade() -> None:
+    op.drop_table("rotation_cursor")
+    with op.batch_alter_table("segment") as batch:
+        batch.drop_column("workflow")

@@ -3,11 +3,52 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import json
 from typing import Any
 
 import reconcile
 from forge_port import ForgeError
 from policy import Policies, PolicyError
+
+
+def architect_review(forge: Any, key: str, *, head: str | None = None) -> reconcile.ArchitectReview:
+    """Read the same issue thread used for requests, binding its replies to the forge's head."""
+    if head is None:
+        head = forge.closing_request(key).head
+    return reconcile.ArchitectReview(head, tuple(note.body for note in forge.comments(int(key.rpartition("#")[2]))))
+
+
+def consultations(forge: Any, store: Any, actions: Sequence[reconcile.Action], at: str) -> dict[str, reconcile.ArchitectReview]:
+    """Refresh only merge candidates waiting on the architect; request each unapproved head once."""
+    reviews = {}
+    for action in actions:
+        if not isinstance(action, reconcile.Wait) or action.reason != "architect consultation is required":
+            continue
+        key = action.issue_key
+        try:
+            review = architect_review(forge, key)
+            reviews[key] = review
+            data = dict(store.resume(key) or {})
+            if review.verdict == "CHANGES":
+                data["architect_changes"] = {"head": review.head, "reply": review.reply}
+            else:
+                data.pop("architect_changes", None)
+            store.set_resume(key, data)
+            header = f"Architect review requested: {review.head}"
+            if review.verdict or any(body.split("\n", 1)[0] == header for body in review.comments):
+                continue
+            latest = reconcile.latest_review(store.segments(key))
+            reports = store.segment_reports(key, "review", latest.attempt) if latest else []
+            findings = reports[-1].findings if reports else []
+            body = header + "\n\nFindings to dispose of:\n" + json.dumps(findings, ensure_ascii=False)
+            error = forge.comment(int(key.rpartition("#")[2]), body, commit=True)
+            if error:
+                raise ForgeError(error)
+        except ForgeError as exc:
+            message = f"architect consultation failed: {exc}"
+            if not store.log(key) or store.log(key)[-1].message != message:
+                store.add_log(key, message, at)
+    return reviews
 
 
 def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies, inputs: dict,
@@ -40,8 +81,17 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
             item.human_review = snap["human_review"]
         item.merge_state = request.verdict
         item.review_state = request.approval  # without an approver this is no approval, never a stale cached one
-        planned = reconcile.plan([item], policies=policies, free_slots=1, now=store.clock(),  # not `at`: a gate may expire mid-pass
-                                 hold_stages=hold_stages, **inputs)
+        # Discard any planning-time consultation snapshot. Only a fresh forge read can authorize this merge.
+        checks = {**inputs, "architect_reviews": {}}
+
+        def plan():
+            return reconcile.plan([item], policies=policies, free_slots=1, now=store.clock(),
+                                  hold_stages=hold_stages, **checks)
+
+        planned = plan()
+        if planned == [reconcile.Wait(action.issue_key, "architect consultation is required")]:
+            checks["architect_reviews"] = {action.issue_key: architect_review(forge, action.issue_key, head=request.head)}
+            planned = plan()
         if not planned or not isinstance(planned[0], reconcile.Merge):
             reason = (getattr(planned[0], "reason", f"{type(planned[0]).__name__.lower()} required")
                       if planned else "no eligible merge")
