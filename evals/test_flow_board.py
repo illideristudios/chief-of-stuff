@@ -28,6 +28,8 @@ from workspace import parse_coordinator  # noqa: E402
 import settings as st  # noqa: E402
 from test_render_board import CLAUDE_MD, NOW  # noqa: E402
 
+CLAUDE_MD = CLAUDE_MD.replace("- Human-only", "- Backlog: GitLab; host https://forge.example; project group/project\n- Human-only")
+
 
 def change(ref: str, *, state="open", draft=False, pipeline="passed", approved=False, merged_at=None,
            files=(), issues=(), title="") -> bs.Change:
@@ -37,8 +39,8 @@ def change(ref: str, *, state="open", draft=False, pipeline="passed", approved=F
 
 SOURCES = bs.Sources(
     fetched={"kanban": NOW - timedelta(minutes=2), "merge requests": NOW - timedelta(minutes=3), "workers": NOW},
-    issues={"#9": bs.Issue("#9", "https://forge/i/9", "Cut", "open", ("stage::review",)),
-            "#7": bs.Issue("#7", "https://forge/i/7", "README", "open", ("stage::implement",))},
+    issues={"#9": bs.Issue("#9", "https://forge.example/group/project/-/issues/9", "Cut", "open", ("stage::review",)),
+            "#7": bs.Issue("#7", "https://forge.example/group/project/-/issues/7", "README", "open", ("stage::implement",))},
     changes={c.ref: c for c in (
         change("!41", approved=True, files=("a.py",), issues=("#2",), title="Password reset copy"),
         change("!42", approved=True, files=("b.py", "c.py"), issues=("#3",), title="Health check timeout"),
@@ -62,7 +64,7 @@ Coordinator: coordinator. Board: board-7.
 | name | item | owner | state | since | due | size | lane | stage | issue | checklist |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Cut the release | Cut the release branch | impl-2 | running 10:30 | 10:30 | 23:00 | M | build | review | #9 | Checklist: cut |
-| Write README | Write eval README | Robin | open | 09:00 | 17:00 | S | build | triage | https://forge/i/7 | Checklist: readme |
+| Write README | Write eval README | Robin | open | 09:00 | 17:00 | S | build | triage | https://forge.example/group/project/-/issues/7 | Checklist: readme |
 | Webhook check | Check webhook signature | unassigned | orphaned | 09:00 |  | S | build | implement |  | Checklist: hook |
 | Console | Rotate the key in the console | Robin | open | 09:00 | 17:00 | S |  |  |  | Checklist: key |
 
@@ -288,7 +290,9 @@ class Build(unittest.TestCase):
         self.assertEqual(card.refs, (("#7", "/issues/7"),))
 
     def test_a_tracker_issue_url_links_without_sources(self) -> None:
-        card = next(c for col in rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES) for c in col.cards if c.name == "Write README")
+        card = next(c for col in rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES,
+                                                  sources=replace(bs.EMPTY, home=SOURCES.home))
+                    for c in col.cards if c.name == "Write README")
         self.assertEqual(card.refs, (("#7", "/issues/7"),))
         bare = next(c for col in self.cols() for c in col.cards if c.name == "Webhook check")
         self.assertEqual((bare.refs, bare.href), ((), ""))
@@ -532,7 +536,7 @@ class HomeProjectUrlTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.sources = bs.Sources({}, {"#8": bs.Issue("#8", self.CELL, "Locale", "open", ("stage::implement",))},
-                                  {"!60": change("!60", issues=("#8",))}, (), {}, self.HOME)
+                                  {"!60": replace(change("!60", issues=("#8",)), url="https://example.com/o/app/-/merge_requests/60")}, (), {}, self.HOME)
         tracker = TRACKER.replace("## Decisions", f"| Ship it | Ship | Robin | waiting | 09:00 |  | S | build | review | {self.CELL} | c |\n\n## Decisions")
         self.tasks = rb.parse_tracker(tracker).tasks
         self.task = next(t for t in self.tasks if t.name == "Ship it")
@@ -564,7 +568,7 @@ class CardLinkTest(unittest.TestCase):
         # "A card whose issue cell ends in a number links its name to `/issues/<number>`." "A card's `#N` ref
         # links to `/issues/N`, and its `!N` ref links to the change's page" — !48 names #9, so both land there.
         # Cut the release has an open change; Write README's issue cell is a URL.
-        for sources in (SOURCES, bs.EMPTY):
+        for sources in (SOURCES, replace(bs.EMPTY, home=SOURCES.home)):
             cols = rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, sources, NOW)
             with self.subTest(sources="some" if sources.changes else "none"):
                 self.assertEqual(card_named(cols, "Write README").href, "/issues/7")

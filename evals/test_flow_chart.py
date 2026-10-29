@@ -413,7 +413,8 @@ class BoardTest(unittest.TestCase):
     CLAUDE = "# W\n\n## Coordinator\n\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n- Settings: `cos.toml`\n"
 
     def cfg(self):
-        return parse_coordinator(self.CLAUDE, today=TODAY)
+        return replace(parse_coordinator(self.CLAUDE, today=TODAY),
+                       backlog=Backlog("https://forge.example", "grp/app"))
 
     def test_flow_sits_after_build(self):
         html = rb.render(TODAY_TRACKER, self.cfg(), NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
@@ -1273,14 +1274,13 @@ class HomeFlowReviewTest(unittest.TestCase):
         self.assertEqual([(g.start, g.end, g.title) for g in row.segments], [
             (at(TODAY, "00:10"), NOW, "w1"), (at(TODAY, "00:40"), NOW, "w2")])
 
-    def test_render_board_passes_sources_home_to_build_by_keyword(self):
+    def test_render_board_passes_configured_home_to_build_by_keyword(self):
         sources = bs.Sources({}, {}, {}, (), {}, home=self.HOME)
-        # Deliberately different: config.backlog must not replace the source cache's home.
         cfg = replace(BoardTest().cfg(), backlog=Backlog("https://forge.example", "other/project"))
         with mock.patch.object(rb.flow_chart, "build", wraps=fc.build) as build:
             rb.render(self.tracker(), cfg, NOW, lanes=LANES, tracker_day=TODAY, sources=sources)
         self.assertEqual(build.call_count, 1)
-        self.assertIs(build.call_args.kwargs.get("home"), sources.home)
+        self.assertIs(build.call_args.kwargs.get("home"), cfg.backlog)
 
     def test_build_without_home_preserves_the_existing_bare_issue_key(self):
         text = self.tracker()
@@ -1600,7 +1600,7 @@ class UnassignedOwnerTest(unittest.TestCase):
 
 def merged(issue: str, hhmm: str, n: int = 1) -> bs.Change:
     """A change the forge reports merged at `hhmm` today, closing `issue`, stamped in UTC as the forge cache holds it."""
-    return bs.Change(f"!{n}", "u", "t", "merged", False, "passed", True, 1, at(TODAY, hhmm).astimezone(timezone.utc),
+    return bs.Change(f"!{n}", f"https://forge.example/grp/app/-/merge_requests/{n}", "t", "merged", False, "passed", True, 1, at(TODAY, hhmm).astimezone(timezone.utc),
                      "main", (), (issue,))
 
 

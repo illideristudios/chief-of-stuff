@@ -45,7 +45,7 @@ import make_repo  # noqa: E402
 import pages as pg  # noqa: E402
 import task_forge  # noqa: E402
 from settings import Graph  # noqa: E402
-from test_flow_chart import LANES, NOW, TODAY, YESTERDAY  # noqa: E402
+from test_flow_chart import BoardTest, LANES, NOW, TODAY, YESTERDAY  # noqa: E402
 from test_issue_page import ISSUE, OTHER, ROUTE_TRACKER, TODAY_START, YESTERDAY_TRACKER, ZONE  # noqa: E402
 from test_pages import get  # noqa: E402
 
@@ -313,7 +313,8 @@ class TaskPageLinkTest(SourcePage):
     def test_the_files_changed_card_links_to_the_source_page(self):
         # "The task page's Files changed card links to the source page: `open source & diff` goes to
         # `/issues/<n>/source`, and each file path links to that file on the source page."
-        task = ip.render(109, TRACKERS, self.sources(), NOW, LANES)
+        task = ip.render(109, TRACKERS, self.sources(), NOW, LANES,
+                         replace(BoardTest().cfg(), backlog=self.sources().home))
         m = re.search(r"<h2[^>]*>\s*Files changed\b.*?(?=<h2|\Z)", task, re.S)
         self.assertIsNotNone(m, "the task page has no Files changed section")
         card = m[0]

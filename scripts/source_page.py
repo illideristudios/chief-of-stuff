@@ -383,7 +383,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
 def write(root: Path, pages_dir: Path, number: int | str, *, db: PageData | None = None, navigation: dict | None = None) -> Path | None:
     """Render `issue-<number>-source.html`; with no page, remove the file and return None."""
     cfg, now, trackers, settings = inputs(root)
-    sources = board_sources.load(pages_dir)
+    sources = board_sources.for_home(board_sources.load(pages_dir), cfg.backlog)
     identity = str(number)
     full_key = identity if "#" in identity else None
     numeric = int(identity.rpartition("#")[2]) if full_key else int(identity)
