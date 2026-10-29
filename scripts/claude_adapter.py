@@ -279,8 +279,8 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
         _send(process, prompt, session_id)
     except OSError as exc:
         print(f"assignment stdin write failed: {exc}", file=sys.stderr)
-        _close_intake(run_dir)
         _stop_after_write_failure(process)
+        _close_intake(run_dir)
         raise InputWriteError("assignment stdin write failed") from exc
     (box / "open").touch()
     while True:
@@ -327,8 +327,8 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
                     _send(process, message["body"], session_id, path.stem)
                 except OSError as exc:
                     print(f"message stdin write failed: {exc}", file=sys.stderr)
-                    _close_intake(run_dir)
                     _stop_after_write_failure(process)
+                    _close_intake(run_dir)
                     raise InputWriteError("message stdin write failed") from exc
                 inflight[path.stem] = time.monotonic() + ECHO_WAIT_S
         elif not closed and all(deadline <= time.monotonic() for deadline in inflight.values()):

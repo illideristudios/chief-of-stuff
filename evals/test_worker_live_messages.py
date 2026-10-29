@@ -356,6 +356,20 @@ class LiveMessagesTest(unittest.TestCase):
         self.assertIsNone(process_status.identity(child, str(self.root)))
         self.assertIsNone(unrelated.poll())
 
+    def test_failed_write_stops_host_before_waiting_for_mailbox_lock(self):
+        self.host.write_text(STALL_HOST)
+        runner = self.start()
+        child = int(wait_for(lambda: (self.root / "child.pid").read_text() if (self.root / "child.pid").exists() else ""))
+        self.addCleanup(self.kill_pid, child)
+        delivery = str(uuid.uuid4())
+        with claude_adapter.mailbox_lock(self.run_dir):
+            claude_adapter.post(self.run_dir, {"delivery_id": delivery, "session_id": self.session, "body": "x" * 1000000})
+            wait_for(lambda: not process_status.process_exists(self.host_pid), timeout=10)
+            self.assertIsNone(process_status.identity(child, str(self.root)))
+            self.assertIsNone(runner.poll())  # the runner is waiting to close intake
+        self.assertEqual(runner.wait(timeout=5), 0)
+        self.assertNotEqual(json.loads((self.run_dir / "exit.json").read_text())["exit_code"], 0)
+
     def test_host_crash_closes_intake_and_records_failure(self):
         self.host.write_text("import os, sys\nsys.stdin.readline()\nos._exit(23)\n")
         runner = claude_adapter.spawn([sys.executable, str(self.host)],
