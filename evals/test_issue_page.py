@@ -485,6 +485,35 @@ class AcceptanceTest(unittest.TestCase):
         for unwanted in ("hidden", "example", "outside"):
             self.assertNotIn(unwanted, got)
 
+    def test_quoted_headings_and_bullets_do_not_replace_or_truncate_criteria(self):
+        body = """> ## Acceptance
+> - [x] Quoted example
+
+## Acceptance
+- [ ] Actual requirement
+
+> ## Other heading
+> - [x] Quoted item
+> > - [x] Nested quoted item
+
+- [x] Another requirement
+
+## Other
+- [ ] Outside criterion
+"""
+        got = text(page_section(page(src=sources(issue=replace(ISSUE, body=body))), "Acceptance"))
+        self.assertIn("1 of 2 met", got)
+        self.assertIn("Actual requirement", got)
+        self.assertIn("Another requirement", got)
+        for unwanted in ("Quoted example", "Quoted item", "Nested quoted item", "Outside criterion"):
+            self.assertNotIn(unwanted, got)
+
+    def test_only_a_quoted_acceptance_heading_does_not_create_a_section(self):
+        issue = replace(ISSUE, body="> ## Acceptance\n> - [x] Quoted example\n")
+        got = text(page_section(page(src=sources(issue=issue)), "Acceptance"))
+        self.assertIn("No acceptance criteria", got)
+        self.assertNotIn("Quoted example", got)
+
     def test_tracker_issue_references_set_body_and_acceptance_link_context(self):
         cases = (
             ("GitHub issues; repo example/repo", "other/repo#109", "https://github.com/other/repo/issues/109", "https://github.com/other/repo"),

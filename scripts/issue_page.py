@@ -274,7 +274,16 @@ def _acceptance(issue: board_sources.Issue | None, linker: Linker = Linker(), *,
     body = drop_html_comments(issue.body)
     tokens = MarkdownIt("commonmark", {"html": True}).parse(body)
     met, in_acceptance = [], False
+    quote_depth = 0
     for i, token in enumerate(tokens):
+        if token.type == "blockquote_open":
+            quote_depth += 1
+            continue
+        if token.type == "blockquote_close":
+            quote_depth -= 1
+            continue
+        if quote_depth:
+            continue
         if token.type == "heading_open":
             if in_acceptance:
                 break
