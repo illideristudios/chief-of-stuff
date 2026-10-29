@@ -322,6 +322,42 @@ github_scan.scan(p, board_sources.backlog.GitHubBacklog('o/app'), {'o/app': set(
         self.assertEqual(recovered.errors, {})
         self.assertEqual(recovered.fetched['kanban'], newer_at + timedelta(minutes=2))
 
+    def test_unreadable_checkpoint_cannot_replace_newer_cached_panels(self):
+        import shutil
+        root = workspace('GitHub issues; repo o/app')
+        self.addCleanup(shutil.rmtree, root, True)
+        gh = FakeGh()
+        with mock.patch.object(bs, '_write', side_effect=OSError('cache full')):
+            old = bs.refresh(root, NOW, gh=gh)
+        newer_at = NOW + timedelta(minutes=10)
+        newer_issue = bs.Issue('#118', 'https://github.com/o/app/issues/118', 'Newer', 'open', ())
+        newer_change = __import__('dataclasses').replace(next(iter(old.changes.values())), title='Newer change')
+        cached = bs.Sources({'kanban': newer_at, 'merge requests': newer_at},
+                            {'#118': newer_issue}, {newer_change.ref: newer_change}, (), {}, old.home)
+        bs._write(root / 'pages' / bs.CACHE, cached, newer_at)
+        checkpoint = root / 'pages' / scan.CHECKPOINT
+        original_forge, original_read = bs.forge, Path.read_text
+        after_forge = [False]
+        def forge(*args, **kwargs):
+            result = original_forge(*args, **kwargs)
+            after_forge[0] = True
+            return result
+        def read(path, *args, **kwargs):
+            if after_forge[0] and path == checkpoint:
+                raise OSError('temporary checkpoint read failure')
+            return original_read(path, *args, **kwargs)
+        with mock.patch.object(bs, 'forge', side_effect=forge), mock.patch.object(Path, 'read_text', read):
+            got = bs.refresh(root, newer_at + timedelta(minutes=1), gh=gh)
+        self.assertEqual(got.issues, cached.issues)
+        self.assertEqual(got.changes, cached.changes)
+        self.assertIn('revalidating', got.errors['kanban'])
+        self.assertIn('revalidating', got.errors['merge requests'])
+        self.assertEqual((bs.load(root / 'pages').issues, bs.load(root / 'pages').changes),
+                         (cached.issues, cached.changes))
+        recovered = bs.refresh(root, newer_at + timedelta(minutes=2), gh=gh)
+        self.assertNotIn('kanban', recovered.errors)
+        self.assertNotIn('merge requests', recovered.errors)
+
     def test_cache_recovery_with_incomparable_and_invalid_panel_times(self):
         import shutil
         for affected, malformed in (('kanban', False), ('merge requests', False),

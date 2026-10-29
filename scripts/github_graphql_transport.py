@@ -156,7 +156,13 @@ class GitHubGraphQL:
             rate = data.get('rateLimit') if isinstance(data, dict) else None
             cost = rate.get('cost') if isinstance(rate, dict) else None
             remaining = rate.get('remaining') if isinstance(rate, dict) else None
-            low = type(remaining) is int and 0 <= remaining < self.reserve
+            header_remaining = next((v.strip() for k, v in headers.items()
+                                     if isinstance(k, str) and k.lower() == 'x-ratelimit-remaining'
+                                     and isinstance(v, str)), None)
+            header_low = (header_remaining is not None and header_remaining.isascii()
+                          and header_remaining.isdecimal() and len(header_remaining) <= 12
+                          and int(header_remaining) < self.reserve)
+            low = header_low or (type(remaining) is int and 0 <= remaining < self.reserve)
             reset = rate.get('resetAt') if isinstance(rate, dict) else None
             return admission.Response((status, body, cost), cost, status, headers,
                                       secondary_limit=_limited(body), reserve_low=low, reserve_reset=reset)

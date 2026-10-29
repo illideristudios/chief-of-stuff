@@ -856,6 +856,30 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
             checkpoint = json.loads(checkpoint_path.read_text())
         except (OSError, ValueError, TypeError):
             checkpoint = None
+        if not isinstance(checkpoint, dict) and (complete_issues or complete_changes):
+            # Completed results without their observation times cannot safely
+            # supersede the previous panels. Discard the unusable checkpoint so
+            # a later refresh can gather new evidence, even if this read failed.
+            for panel, complete in (('kanban', complete_issues), ('merge requests', complete_changes)):
+                if not complete:
+                    continue
+                if panel == 'kanban':
+                    issues = prev.issues
+                    keys = ('kanban',)
+                else:
+                    changes = prev.changes
+                    keys = ('merge requests', 'github sweep')
+                for key in keys:
+                    if key in prev.fetched:
+                        fetched[key] = prev.fetched[key]
+                    else:
+                        fetched.pop(key, None)
+                errors[panel] = ('GitHub checkpoint unavailable; revalidating'
+                                 + ('; ' + errors[panel] if errors.get(panel) else ''))
+            try:
+                checkpoint_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         if isinstance(checkpoint, dict):
             def panel_signature(panel):
                 values = prev.issues if panel == 'kanban' else prev.changes

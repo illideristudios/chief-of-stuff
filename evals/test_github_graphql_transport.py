@@ -41,6 +41,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if mode == 'errors': body = {'data': {'rateLimit': {'cost': 1}}, 'errors': [{'type': 'RATE_LIMITED', 'message': 'secondary rate limit'}]}
         if mode == 'secret': body = {'data': {'rateLimit': {'cost': 1}, TOKEN: 'echo ' + TOKEN}}
         if mode == 'large': body = {'payload': 'x' * 10000}
+        if mode in ('header-low', 'header-zero-no-reset'):
+            headers['X-RateLimit-Remaining'] = '12' if mode == 'header-low' else '0'
+            if mode == 'header-low': headers['X-RateLimit-Reset'] = '1200'
+            body = {'data': {'rateLimit': {'cost': 1, 'remaining': 999}}}
         if mode in ('reserve', 'reserve-missing', 'reserve-edge'):
             rate = {'cost': 1, 'remaining': 500 if mode == 'reserve-edge' else 499}
             if mode == 'reserve': rate['resetAt'] = '1970-01-01T00:20:00Z'
@@ -184,6 +188,23 @@ class TransportTest(unittest.TestCase):
         self.now = 1200
         self.server.mode = 'reserve-edge'
         self.client.request(QUERY)
+
+    def test_http_low_remaining_is_shared_even_when_graphql_balance_is_higher(self):
+        self.server.mode = 'header-low'
+        self.client.request(QUERY)
+        self.assertEqual(self.client.status()['cooldown_until'], 1200)
+        with self.assertRaises(admission.CooldownActive):
+            self.make().request(QUERY)
+        self.assertEqual(len(self.server.calls), 1)
+
+    def test_http_zero_without_reset_requires_verification(self):
+        self.server.mode = 'header-zero-no-reset'
+        with self.assertRaises(admission.UnsupportedCooldown):
+            self.client.request(QUERY)
+        self.now += 3600
+        with self.assertRaises(admission.UnsupportedCooldown):
+            self.make().request(QUERY)
+        self.assertEqual(len(self.server.calls), 1)
 
     def test_reserve_without_reset_is_persistently_unavailable(self):
         self.server.mode = 'reserve-missing'
