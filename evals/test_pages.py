@@ -309,6 +309,55 @@ class ReloadSnippetTest(unittest.TestCase):
                 with self.subTest(path=path, method=method):
                     self.assertEqual(get(self.port, path, method=method).status, 404)
 
+    def test_trailing_slash_tab_routes_match_the_bare_routes(self):
+        # #988: a pasted or typed `/workers/` or `/decisions/` must not be a dead end; the query string stays ignored.
+        for bare, needle in (("/workers", b"<p>workers.html</p>"), ("/decisions", b"<p>decisions.html</p>")):
+            for suffix in ("", "/", "?x=1", "/?x=1"):
+                path = bare + suffix
+                for method in ("GET", "HEAD"):
+                    with self.subTest(path=path, method=method):
+                        resp = get(self.port, path, method=method)
+                        self.assertEqual(resp.status, 200)
+                        if method == "GET":
+                            self.assertIn(needle, resp.body)
+                        else:
+                            self.assertEqual(resp.body, b"")
+                            bare_get = get(self.port, bare)
+                            self.assertEqual(resp.getheader("Content-Length"), str(len(bare_get.body)))
+
+    def test_unsafe_paths_beside_tab_routes_still_404(self):
+        # #988 must not weaken #340: only the exact tab routes gain a trailing slash, not lookalikes or escapes.
+        (self.dir / "sub").mkdir()
+        for path in ("/workers//", "/decisions//", "/workers/../workers", "/decisions/../decisions",
+                     "/workers/extra", "/decisions/extra/", "/Workers/", "/Decisions/",
+                     "/workers%2F%2F", "/sub/", "/%00", "/favicon.ico/"):
+            for method in ("GET", "HEAD"):
+                with self.subTest(path=path, method=method):
+                    self.assertEqual(get(self.port, path, method=method).status, 404)
+
+    def test_a_missing_favicon_is_204_and_a_present_one_is_served(self):
+        # #988: browsers ask for /favicon.ico; a 404 console noise is worse than an empty 204.
+        for method in ("GET", "HEAD"):
+            with self.subTest(missing=True, method=method):
+                resp = get(self.port, "/favicon.ico", method=method)
+                self.assertEqual(resp.status, 204)
+                self.assertEqual(resp.body, b"")
+                self.assertEqual(resp.getheader("Content-Length"), "0")
+            with self.subTest(missing=True, method=method, query=True):
+                self.assertEqual(get(self.port, "/favicon.ico?v=1", method=method).status, 204)
+        icon = b"\x00\x00\x01\x00fake-ico"
+        (self.dir / "favicon.ico").write_bytes(icon)
+        for method in ("GET", "HEAD"):
+            with self.subTest(missing=False, method=method):
+                resp = get(self.port, "/favicon.ico", method=method)
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.getheader("Content-Length"), str(len(icon)))
+                if method == "GET":
+                    self.assertEqual(resp.body, icon)
+                else:
+                    self.assertEqual(resp.body, b"")
+        self.assertEqual(get(self.port, "/favicon.ico", host="evil.test").status, 403)
+
     def test_a_case_folded_rendered_name_is_not_served_by_file_name(self):
         # #335: workerſ.html (U+017F) case-folds to workers.html; the route-only rule must use casefold, not lower.
         (self.dir / "workers.html").write_text("<!doctype html><body><p>workers</p></body>")
