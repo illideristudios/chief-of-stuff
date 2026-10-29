@@ -1,8 +1,6 @@
 """Compatibility selection for releases running with the pre-selector supervisor."""
 import json
 import importlib.util
-import contextlib
-import io
 import os
 import sys
 import tempfile
@@ -104,10 +102,8 @@ class ReleaseSelectionTest(unittest.TestCase):
             malicious = self.make_release(self.root / "malicious", "9.0.0")
             intent["release"] = str(malicious)
             (private / (label + ".json")).write_text(json.dumps(intent))
-            output = io.StringIO()
-            with contextlib.redirect_stderr(output):
-                self.assertEqual(release_selection.selected_release(self.root, supervisor), self.new)
-            self.assertIn("invalid", output.getvalue())
+            with self.assertRaises(supervisor.ServiceError):
+                release_selection.selected_release(self.root, supervisor)
 
     def test_rejects_any_symlink_in_external_release_tree(self):
         target = self.root / "payload"
@@ -145,3 +141,28 @@ class ReleaseSelectionTest(unittest.TestCase):
              mock.patch.object(supervisor, "RELEASE", self.old):
             self.marker.write_text(str(self.new))
             self.assertEqual(release_selection.selected_release(self.root, supervisor), self.new)
+
+    def test_legacy_supervisor_obeys_durable_explicit_cache_choice(self):
+        from types import SimpleNamespace
+        legacy = SimpleNamespace(RELEASE=self.new, current_release=lambda: self.new,
+                                 state_dir=supervisor.state_dir, label=supervisor.label, ServiceError=supervisor.ServiceError)
+        data = self.root.parent / "data"
+        legacy.data_dir = lambda: data
+        with mock.patch.object(supervisor, "data_dir", return_value=data):
+            supervisor._write_intent(self.root, {"operation": "install", "release": str(self.old), "pending": False,
+                                                "job": {"Label": supervisor.label("engine", self.root),
+                                                        "WorkingDirectory": str(self.root)}})
+        self.marker.write_text(str(self.new))
+        self.assertEqual(release_selection.selected_release(self.root, legacy), self.old)
+
+    def test_cached_supervisor_with_unsafe_selector_is_not_called(self):
+        from types import SimpleNamespace
+        legacy = SimpleNamespace(RELEASE=self.old, current_release=lambda: self.old,
+                                 data_dir=lambda: self.root.parent / "data", ServiceError=supervisor.ServiceError,
+                                 state_dir=supervisor.state_dir,
+                                 selected_release=mock.Mock(side_effect=AssertionError("unsafe selector")),
+                                 _explicit_intent=mock.Mock(side_effect=AssertionError("unsafe reader")))
+        self.marker.write_text(str(self.new))
+        self.assertEqual(release_selection.selected_release(self.root, legacy), self.new)
+        legacy.selected_release.assert_not_called()
+        legacy._explicit_intent.assert_not_called()

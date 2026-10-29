@@ -28,7 +28,7 @@ from module_graph import section as _graph
 from clock import dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
 from tracker import TRAILING_NUMBER, Task, issue_number, parse_tracker, resolve_due as _resolve_due
-from workspace import Config, ConfigError, daily_trackers, read_config
+from workspace import Config, ConfigError, EngineStatus, daily_trackers, engine_health, read_config, read_engine_status
 from settings import Graph, Kanban, SettingsError, load as load_settings
 
 # A worker's outcome by its last launcher move's stage (tracker_log.moves: completed → pr, HUMAN REVIEW → review).
@@ -40,6 +40,7 @@ CSS = """<style>
 .meta{color:var(--muted);font-size:12px}
 header .chip.running{color:var(--surface);background:var(--stage-implement);border-color:var(--stage-implement)}
 header .chip.needs-input,header .chip.retries-exhausted{color:var(--dl);border-color:var(--dl)}
+.engine-warn{border:1px solid var(--dl);border-radius:3px;padding:6px 10px;color:var(--dl);font-size:12.5px;margin:0 0 12px}
 .chk,.wk{display:grid;grid-template-columns:96px 74px minmax(0,1fr);gap:0 10px;align-items:baseline;padding:6px 0;font-size:13px}
 .wk{grid-template-columns:minmax(0,1fr) 64px auto;padding:5px 0}
 .chk+.chk,.wk+.wk{border-top:1px dotted var(--line)}
@@ -217,7 +218,8 @@ def _next(rows, change: board_sources.Change | None, changes, why_not: str, now:
 def render(number: int | str, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            lanes: dict | None = None, cfg: Config | None = None, graph: Graph | None = None, pages: Path | None = None,
            root: Path | None = None, pending: int = 0, kanban: Kanban | None = None,
-           pending_refs: Container[str] = frozenset(), navigation: dict | None = None, db: PageData | None = None) -> str | None:
+           pending_refs: Container[str] = frozenset(), navigation: dict | None = None, db: PageData | None = None,
+           engine_status: EngineStatus | None = None) -> str | None:
     """The page, or None when no task in `trackers` or the store names issue `number`. `cfg` resolves a task's due (the
     board's deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
     identity = str(number)
@@ -375,9 +377,14 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
               " · ".join(filter(None, (c.state, c.pipeline)))) for c in changes]
     refs_html = "\n".join(f'      <span class="cap">{cap}</span><span>{what}</span><span class="st">{escape(st)}</span>' for cap, what, st in refs)
 
+    health = engine_health(engine_status, now, cfg.zone) if engine_status is not None else None
     lane = next((t.lane.strip() for t in reversed(mine) if t.lane.strip()), "")
     eyebrow = " · ".join(["Task", f'<a class="ref" data-k="issue" {href(issue.url)}>{ref}</a>' if issue else ref,
-                          *([f"lane {escape(lane)}"] if lane else []), '<a href="/">board</a>'])  # (#215) no render clock
+                          *([f"lane {escape(lane)}"] if lane else []),
+                          *(tuple(escape(m) for m in health.meta) if health is not None else ()),
+                          '<a href="/">board</a>'])  # (#215) no render clock
+    warn_html = (f'  <p class="engine-warn" role="alert">{escape(health.warning)}</p>\n'
+                 if health is not None and health.warning else "")
     flow = flow_chart.section(rows, now)
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
@@ -386,6 +393,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             f"      <h1>{escape(name)}</h1>\n    </div>\n"
             f'    <div><span class="chip {escape(status.replace(" ", "-"))}">{escape(status.upper())}</span>'
             + (' <span class="chip running">RUNNING</span>' if header_live and status != "running" else '') + '</div>\n  </header>\n\n'
+            + warn_html
             + (_section("Issue", f'<div class="card prose">{markdown_blocks(issue.body, linker.resolve)}</div>') if issue and issue.body else "")
             + cards + (f"  <section>\n{flow}{worked_line}  </section>\n" if flow else "") + ahead
             + '  <div class="cols">\n  <div class="col">\n'
@@ -428,5 +436,5 @@ def write(root: Path, pages_dir: Path, number: int | str, *, db: PageData | None
     pending = entries(pages_dir, ctx) if ctx else []
     page = render(number, trackers, board_sources.load(pages_dir), now, settings.lanes, cfg, settings.graph, pages_dir, root,
                   sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx),
-                  navigation, db=db)
+                  navigation, db=db, engine_status=read_engine_status(root))
     return put(pages_dir / issue_page_name(number), page)

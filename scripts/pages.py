@@ -65,8 +65,9 @@ import page_reload
 import release_selection
 import supervisor
 from backlog_ref import GitHubBacklog
-from workspace import (LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, looked_before, pages_address,
-                       read_config, record_look, unrecord_look, with_workspace_decision_deadlines)
+from workspace import (ENGINE_STATUS_FILE, LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers,
+                       engine_health, looked_before, pages_address, read_config, read_engine_status, record_look,
+                       unrecord_look, with_workspace_decision_deadlines)
 
 SERVER = "chief-of-stuff-pages"
 PID = ".pid"
@@ -208,17 +209,21 @@ class PagesError(RuntimeError):
 
 def _sources(root: Path, cfg, pages_dir: Path, day: str) -> list[Path]:
     return [root / "CLAUDE.md", *([root / cfg.settings_path] if cfg.settings_path else []), root / cfg.log_path(day),
-            root / "store.db", root / "store.db-wal", *(path for _, path in daily_trackers(root, cfg)), *pages_dir.glob("decision-*.json"),
+            root / "store.db", root / "store.db-wal", supervisor.state_dir(root) / ENGINE_STATUS_FILE,
+            *(path for _, path in daily_trackers(root, cfg)), *pages_dir.glob("decision-*.json"),
             pages_dir / CACHE]
 
 
-def _digest(sources: list[Path]) -> str:
-    """sha256 of the sources' bytes, for a render record: content, not times, says whether a render's inputs changed."""
+def _digest(sources: list[Path], extra: str = "") -> str:
+    """sha256 of the sources' bytes and live state token, for a render record: content, not times, says whether a render's inputs changed."""
     h = hashlib.sha256()
     for p in sources:
         if p.is_file():
             h.update(str(p).encode())
             h.update(p.read_bytes())
+    if extra:
+        h.update(b"\0engine\0")
+        h.update(extra.encode())
     return h.hexdigest()
 
 
@@ -485,6 +490,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             day = name[:10]
             if not (root / cfg.tracker_path(day)).is_file() and not (root / "store.db").is_file():
                 return ""
+        shows_engine = name.endswith("-board.html") or (name.startswith("issue-") and not name.endswith("-source.html"))
         with publication_lock(root, key):  # check and record the identity under the cross-process lock
             board = board_name(root, pages_dir) if not name.endswith("-board.html") else None
             if (name == "decisions.html" or (name.startswith("decision-") and not store_decision)) and board:
@@ -494,15 +500,16 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                 sources.append(pages_dir / board)
             newest = max(RENDERER_MTIME_NS, max((p.stat().st_mtime_ns for p in sources if p.is_file()), default=0))
             identity = _file_identity(target)
-            digest = _digest(sources)
+            engine_token = ""
+            if shows_engine and (status := read_engine_status(root)) is not None:
+                now_min = datetime.now(cfg.zone).replace(second=0, microsecond=0)
+                engine_token = repr(engine_health(status, now_min, cfg.zone))
+            digest = _digest(sources, extra=engine_token)
             record = RENDERED_AT.get(key)
             if record and identity is not None and record[1] == identity and record[0] >= newest and name != "workers.html":
                 # The filesystem's mtime clock reads behind the wall clock by more than a render takes under load
                 # here, so a source saved after that render began can carry an mtime from before it. Where the
-                # record is this server's render of this file, the sources' bytes settle it: fresh only if they
-                # are still exactly what that render consumed. A source touched without a change keeps the mtime
-                # path's one confirming render — it re-renders, records the same digest, and the polls after it
-                # are fresh.
+                # The digest includes engine liveness, which can change without a file write.
                 if record[2] == digest:
                     return ""
             started = time.time_ns()
@@ -1390,26 +1397,21 @@ def _version_tuple(value: str) -> tuple[int, ...] | None:
 
 
 def _authoritative_release(root: Path | None, *, completed_only: bool = False) -> Path | None:
-    """Return only an explicit selection, never the selector's fallback to this release."""
+    """Return an explicit selection; a workspace marker is never rollback authority."""
     release = supervisor.RELEASE.resolve()
     if root is not None:
-        try:
-            explicit = release_selection.explicit_release(root, supervisor, completed_only=completed_only)
-        except supervisor.ServiceError as exc:
-            print(f"pages: invalid release selection: {exc}; keeping {release}", file=sys.stderr, flush=True)
-            return None
-        if explicit is not None:
-            return explicit
+        intent = release_selection.explicit_intent(root, supervisor)
+        if intent is not None:
+            return release_selection.explicit_release(root, supervisor, completed_only=completed_only)
     pointer = release.parent.parent / "current"
     try:
-        if release.parent.name == "versions":
-            if pointer.is_symlink():
-                selected = pointer.resolve(strict=True)
-                if (selected / "chief_of_stuff.py").is_file():
-                    if root is not None:
-                        release_selection.validate_handoff(root, selected, supervisor)
-                    return selected
-        if root is not None:
+        if release.parent.name == "versions" and pointer.is_symlink():
+            selected = pointer.resolve(strict=True)
+            if (selected / "chief_of_stuff.py").is_file():
+                if root is not None:
+                    release_selection.validate_handoff(root, selected, supervisor)
+                return selected
+        if root is not None and not completed_only:
             return release_selection.marker_release(root, release, supervisor)
     except (OSError, RuntimeError, ValueError, supervisor.ServiceError):
         pass
@@ -1562,6 +1564,20 @@ def _pre_handoff_cli(entry: Path) -> bool:
 def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> None:
     """Monitor the successor and resume supervision if its startup or later execution fails."""
     retry_at, delay, failed_release = 0.0, 30.0, None
+    last_selection_error = None
+
+    def selected():
+        nonlocal last_selection_error
+        try:
+            result = _selected_release(root)
+            last_selection_error = None
+            return result
+        except supervisor.ServiceError as exc:
+            if str(exc) != last_selection_error:
+                print(f"pages: invalid release selection: {exc}; keeping {supervisor.RELEASE}", file=sys.stderr, flush=True)
+                last_selection_error = str(exc)
+            return None
+
     while not stop.is_set():
         board_stop = threading.Event()
         thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
@@ -1572,7 +1588,10 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                 if not thread.is_alive():
                     thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
                     thread.start()
-                release = _selected_release(root)
+                release = selected()
+                if release is None:
+                    stop.wait(POLL)
+                    continue
                 if release != supervisor.RELEASE:
                     if release != failed_release:
                         retry_at, delay, failed_release = 0.0, 30.0, release
@@ -1582,7 +1601,7 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                             with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
                                 acquired = True
                                 release_selection.validate_handoff(root, release, supervisor)
-                                if _selected_release(root) != release:
+                                if selected() != release:
                                     continue
                                 entry = release / "scripts/pages.py"
                                 if not entry.is_file():
@@ -1594,7 +1613,7 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                                           file=sys.stderr, flush=True)
                                     continue
                                 python = supervisor.ensure_venv(supervisor.data_dir(), release=release, timeout=60)
-                            if not stop.is_set() and _selected_release(root) == release:
+                            if not stop.is_set() and selected() == release:
                                 handoff = (python, entry)
                                 break
                         except Exception as exc:
@@ -1610,20 +1629,19 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
         finally:
             board_stop.set()
             thread.join()
-        if handoff is not None and not stop.is_set() and _selected_release(root) == release:
+        if handoff is not None and not stop.is_set() and selected() == release:
             child = None
             try:
                 python, entry = handoff
                 release_selection.validate_handoff(root, release, supervisor)
-                if _selected_release(root) != release:
+                if selected() != release:
                     continue
                 read_fd, write_fd = os.pipe()
                 try:
-                    # Retain the trusted script directory while ignoring Python environment and user site.
                     child = subprocess.Popen(
-                        [str(python), "-E", "-s", str(entry), "--root", str(root), "--handoff-ready-fd",
-                         str(write_fd), "supervise"], pass_fds=(write_fd,),
-                        env={key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")})
+                        release_selection.isolated_release_argv(python, entry, "--root", str(root),
+                                                        "--handoff-ready-fd", str(write_fd), "supervise"),
+                        pass_fds=(write_fd,), cwd="/", env=release_selection.python_environment())
                 except BaseException:
                     os.close(read_fd)
                     raise
@@ -1634,7 +1652,7 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                     # keep reporting and report failure if it later cannot take over the board.
                     deadline = time.monotonic() + 15
                     while (not stop.is_set() and child.poll() is None and
-                           _selected_release(root) == release):
+                           selected() == release):
                         if select.select([read_fd], [], [], min(POLL, 0.1))[0]:
                             report = os.read(read_fd, 4096)
                             if not report or b"0" in report or any(c not in b"1W" for c in report):

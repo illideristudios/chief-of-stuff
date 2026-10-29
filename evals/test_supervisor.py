@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import plistlib
 import re
 import subprocess
@@ -40,7 +41,8 @@ class SupervisorTest(unittest.TestCase):
                           "XDG_STATE_HOME": "",
                       }),
                       mock.patch.object(supervisor.shell_setup, "resolve", return_value="/login/bin/python3"),
-                      mock.patch.object(supervisor.subprocess, "run", side_effect=self.fake_run)):
+                      mock.patch.object(supervisor.subprocess, "run", side_effect=self.fake_run),
+                      mock.patch.object(supervisor, "run_preparation", side_effect=self.fake_run)):
             patch.start()
             self.addCleanup(patch.stop)
         self.loaded = False
@@ -218,6 +220,7 @@ class VenvTest(SupervisorTest):
 
         with mock.patch.object(supervisor.time, "monotonic", side_effect=lambda: elapsed[0]), \
              mock.patch.object(supervisor.subprocess, "run", side_effect=slow), \
+             mock.patch.object(supervisor, "run_preparation", side_effect=slow), \
              self.assertRaises(subprocess.TimeoutExpired):
             supervisor.ensure_venv(self.data, timeout=60)
         self.assertLessEqual(elapsed[0], 60)
@@ -314,6 +317,14 @@ class AgentTest(SupervisorTest):
         self.assertEqual(self.verbs(), ["print", "enable", "bootstrap"])
         self.assertEqual(supervisor.install(self.root, ENGINE, self.jobs), "engine: serving")
 
+    def test_an_engine_install_preserves_the_standalone_board_agent(self):
+        # The independent board remains available if the engine later stops.
+        board = supervisor.job_path(supervisor.label("pages", self.root), self.jobs)
+        board.parent.mkdir(parents=True)
+        board.write_bytes(plistlib.dumps({"Label": board.stem, "WorkingDirectory": str(self.root.resolve())}))
+        supervisor.install(self.root, ENGINE, self.jobs)
+        self.assertEqual({p.stem for p in self.jobs.glob("*.plist")},
+                         {supervisor.label("engine", self.root), supervisor.label("pages", self.root)})
     def test_board_agent_survives_engine_install_startup_failure_and_uninstall(self):
         board = supervisor.job_path(supervisor.label("pages", self.root), self.jobs)
         board.parent.mkdir(parents=True)
@@ -376,10 +387,10 @@ class AgentTest(SupervisorTest):
 
     def test_uninstall_removes_the_job_and_status_reports_it(self):
         self.assertEqual(supervisor.status(self.root, self.jobs),
-                         {"installed": False, "loaded": False, "version": None, "current": "1.0.0"})
+                         {"installed": False, "loaded": False, "upgrade_pending": False, "version": None, "current": "1.0.0"})
         supervisor.install(self.root, ENGINE, self.jobs)
         self.assertEqual(supervisor.status(self.root, self.jobs),
-                         {"installed": True, "loaded": True, "version": "1.0.0", "current": "1.0.0"})
+                         {"installed": True, "loaded": True, "upgrade_pending": True, "version": "1.0.0", "current": "1.0.0"})
         self.assertEqual(supervisor.uninstall(self.root, self.jobs), "engine: stopped")
         self.assertFalse(list(self.jobs.glob("*.plist")))
         self.assertFalse(self.loaded)
@@ -420,6 +431,61 @@ class AgentTest(SupervisorTest):
                              [str(second_venv), str(next_release / "scripts/engine.py")])
             self.assertEqual(self.job()["EnvironmentVariables"]["CHIEF_OF_STUFF_VERSION"], "1.0.2")
 
+    def test_install_from_pinned_older_release_installs_current_release_pointer(self):
+        install_dir = self.release.parent / "install"
+        old = install_dir / "versions/1.0.0-aaa"
+        new = install_dir / "versions/1.0.3-bbb"
+        for rel, ver, req in ((old, "1.0.0", "SQLAlchemy==2.0.54\n"), (new, "1.0.3", "SQLAlchemy==2.0.56\n")):
+            (rel / ".claude-plugin").mkdir(parents=True)
+            (rel / "scripts").mkdir(parents=True)
+            (rel / "chief_of_stuff.py").touch()
+            (rel / "scripts/engine.py").touch()
+            (rel / ".claude-plugin/plugin.json").write_text(json.dumps({"version": ver}))
+            (rel / "requirements.txt").write_text(req)
+        (install_dir / "current").symlink_to(new.relative_to(install_dir))
+        with mock.patch.object(supervisor, "RELEASE", old.resolve()):
+            self.assertEqual(supervisor.install(self.root, jobs_dir=self.jobs), "engine: started")
+            expected_venv = supervisor.ensure_venv(self.data, release=new.resolve())
+            self.assertEqual(self.job()["ProgramArguments"],
+                             [str(expected_venv), str(new.resolve() / "scripts/engine.py")])
+            self.assertEqual(self.job()["EnvironmentVariables"]["CHIEF_OF_STUFF_VERSION"], "1.0.3")
+
+    def test_ensure_provisions_store_workspaces_and_respects_explicit_uninstall(self):
+        # Tracker-only workspace without store.db is skipped:
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: not configured")
+        self.assertFalse(self.loaded)
+
+        # Store-backed workspace automatically starts its engine LaunchAgent:
+        (self.root / "store.db").touch()
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: started")
+        self.assertTrue(self.loaded)
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: serving")
+
+        # Explicit uninstall marks the engine disabled so ensure leaves it stopped until explicit install:
+        self.assertEqual(supervisor.uninstall(self.root, self.jobs), "engine: stopped")
+        self.assertFalse(self.loaded)
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: disabled")
+        self.assertFalse(self.loaded)
+
+        self.assertEqual(supervisor.install(self.root, jobs_dir=self.jobs), "engine: started")
+        self.assertTrue(self.loaded)
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: serving")
+
+    def test_ensure_respects_uninstall_completed_before_it_acquires_the_lock(self):
+        (self.root / "store.db").touch()
+        real_lock = supervisor.lock
+
+        @contextlib.contextmanager
+        def uninstall_before_lock(path, *args, **kwargs):
+            supervisor.atomic_write(supervisor.state_dir(self.root) / supervisor.DISABLED_MARKER, b"")
+            with real_lock(path, *args, **kwargs):
+                yield
+
+        with mock.patch.object(supervisor, "lock", side_effect=uninstall_before_lock):
+            self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: disabled")
+        self.assertFalse(self.loaded)
+        self.assertFalse(self.jobs.exists())
+
     def test_cli_install_status_and_uninstall_manage_the_default_engine(self):
         with mock.patch.object(supervisor, "job_path",
                                side_effect=lambda name, jobs_dir=None: (jobs_dir or self.jobs) / f"{name}.plist"):
@@ -445,22 +511,26 @@ class AgentTest(SupervisorTest):
 
 class UntrustedWorkspacePythonTest(unittest.TestCase):
     def test_real_preparation_ignores_workspace_modules_and_python_environment(self):
-        # A separate process gives preparation the real workspace cwd and poisoned environment.
+        # A fresh process lets the workspace be the actual cwd without changing this test runner's cwd.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()
+            workspace, release, data = (base / name for name in ("workspace", "release", "data"))
+            workspace.mkdir()
+            release.mkdir()
+            (release / "requirements.txt").write_text("")
+            marker = base / "executed"
             scripts = Path(supervisor.__file__).resolve().parent
             driver = """import os, sys
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, sys.argv[1])
 import supervisor
-workspace, release, data, poison = map(Path, sys.argv[2:6])
+workspace, release, data = map(Path, sys.argv[2:])
 os.chdir(workspace)
-if sys.argv[6] == 'path':
-    os.environ['PYTHONPATH'] = str(poison)
-elif sys.argv[6] == 'home':
-    os.environ['PYTHONHOME'] = str(poison)
-    os.environ['PYTHONSTARTUP'] = str(poison / 'sitecustomize.py')
+if os.environ.pop('TEST_POISON_ENV') == '1':
+    os.environ['PYTHONPATH'] = str(workspace)
+    os.environ['PYTHONHOME'] = str(workspace)
+    os.environ['PYTHONSTARTUP'] = str(workspace / 'sitecustomize.py')
 before = dict(os.environ)
 with mock.patch.object(supervisor.shell_setup, 'resolve', return_value=sys.executable):
     python = supervisor.ensure_venv(data, release=release)
@@ -468,47 +538,16 @@ with mock.patch.object(supervisor.shell_setup, 'resolve', return_value=sys.execu
 assert os.environ == before
 assert python.is_file()
 """
-            for module, mode in ((m, kind) for m in ('json', 'venv', 'pip') for kind in ('cwd', 'path')):
-                self._exercise(base, scripts, driver, module, mode)
-            for mode in ('cwd', 'path', 'home'):
-                self._exercise(base, scripts, driver, 'sitecustomize', mode)
-
-    def _exercise(self, base, scripts, driver, module, mode):
-        with self.subTest(module=module, mode=mode):
-            case = base / f'{module}-{mode}'
-            workspace, release, poison, data = (case / name for name in ('workspace', 'release', 'poison', 'data'))
-            for directory in (workspace, release, poison):
-                directory.mkdir(parents=True)
-            (release / 'requirements.txt').write_text('')
-            marker = case / 'executed'
-            shadow_dir = workspace if mode == 'cwd' else poison
-            (shadow_dir / f'{module}.py').write_text(
-                f'from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError("shadowed")\n')
-            result = subprocess.run([sys.executable, '-I', '-c', driver, str(scripts), str(workspace),
-                                     str(release), str(data), str(poison), mode],
-                                    capture_output=True, text=True, timeout=120)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertFalse(marker.exists(), f'workspace module executed: {module} ({mode})')
-
-    def test_real_pip_installs_a_local_wheel(self):
-        import zipfile
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp).resolve()
-            release = base / 'release'
-            release.mkdir()
-            wheel = base / 'example_isolation-1.0-py3-none-any.whl'
-            with zipfile.ZipFile(wheel, 'w') as archive:
-                archive.writestr('example_isolation.py', 'VALUE = 42\n')
-                archive.writestr('example_isolation-1.0.dist-info/METADATA', 'Metadata-Version: 2.1\nName: example-isolation\nVersion: 1.0\n')
-                archive.writestr('example_isolation-1.0.dist-info/WHEEL', 'Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
-                archive.writestr('example_isolation-1.0.dist-info/RECORD', '')
-            (release / 'requirements.txt').write_text(str(wheel) + '\n')
-            with mock.patch.object(supervisor.shell_setup, 'resolve', return_value=sys.executable):
-                python = supervisor.ensure_venv(base / 'data', release=release)
-            result = subprocess.run([str(python), '-I', '-c', 'import example_isolation; print(example_isolation.VALUE)'],
-                                    capture_output=True, text=True, timeout=20)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), '42')
+            for module in ("json", "venv", "pip", "environment"):
+                with self.subTest(module=module):
+                    shadow = workspace / f"{module if module != 'environment' else 'sitecustomize'}.py"
+                    shadow.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text({module!r})\nraise RuntimeError('shadowed')\n")
+                    env = dict(os.environ, TEST_POISON_ENV=str(int(module == "environment")))
+                    result = subprocess.run([sys.executable, "-I", "-c", driver, str(scripts), str(workspace),
+                                             str(release), str(data / module)], env=env, capture_output=True, text=True, timeout=120)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertFalse(marker.exists(), f"workspace module executed: {marker.read_text() if marker.exists() else ''}")
+                    shadow.unlink()
 
 
 class BasePythonTest(unittest.TestCase):

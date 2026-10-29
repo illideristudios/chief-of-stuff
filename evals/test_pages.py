@@ -567,10 +567,10 @@ class EnsureTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "selected upgrade"):
                         pg.ensure(self.dir, self.port, self.log, root)
 
-    def test_forged_marker_equal_to_caller_does_not_authorize_replacement(self):
+    def test_plugin_marker_alone_does_not_authorize_same_version_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
-            release = Path(tmp) / "plugins/cache/market/chief/1.2.3"
+            release = Path(tmp).resolve() / "plugins/cache/market/chief/1.2.3"
             (release / "scripts").mkdir(parents=True)
             (release / "scripts/engine.py").touch()
             (release / "requirements.txt").touch()
@@ -579,35 +579,11 @@ class EnsureTest(unittest.TestCase):
             marker = pg.supervisor.state_dir(root) / "engine-plugin-release"
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(str(release))
-            for version in ("1.2.3", "2.0.0"):
-                for identity in ("", " release-" + "a" * 24):
-                    with self.subTest(version=version, identity=identity), \
-                         mock.patch.object(pg.supervisor, "RELEASE", release), \
-                         mock.patch.object(pg.supervisor, "current_release", return_value=release), \
-                         mock.patch.object(pg, "VERSION", "1.2.3"), \
-                         mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/{version}{identity}"), \
-                         mock.patch.object(pg, "_stop", side_effect=AssertionError("forged marker stopped server")):
-                        self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
-
-    def test_selected_newer_marker_protects_legacy_server_without_identity(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp).resolve() / "workspace"
-            cache = Path(tmp).resolve() / "plugins/cache/market/chief"
-            old, new = cache / "old", cache / "new"
-            for release, version in ((old, "1.0.0"), (new, "2.0.0")):
-                (release / "scripts").mkdir(parents=True)
-                (release / "scripts/engine.py").touch()
-                (release / "requirements.txt").touch()
-                (release / ".claude-plugin").mkdir()
-                (release / ".claude-plugin/plugin.json").write_text(json.dumps({"version": version}))
-            marker = pg.supervisor.state_dir(root) / "engine-plugin-release"
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(str(new))
-            with mock.patch.object(pg.supervisor, "RELEASE", old), \
-                 mock.patch.object(pg.supervisor, "current_release", return_value=old), \
-                 mock.patch.object(pg, "VERSION", "1.0.0"), \
-                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/0.9.0"), \
-                 mock.patch.object(pg, "_stop", side_effect=AssertionError("selected server stopped")):
+            with mock.patch.object(pg.supervisor, "RELEASE", release), \
+                 mock.patch.object(pg.supervisor, "current_release", return_value=release), \
+                 mock.patch.object(pg, "VERSION", "1.2.3"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.2.3"), \
+                 mock.patch.object(pg, "_stop", side_effect=AssertionError("marker is not authority")):
                 self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
 
     def test_authoritative_installed_rollback_replaces_newer_server(self):
@@ -648,6 +624,21 @@ class EnsureTest(unittest.TestCase):
                 intent["pending"] = False
                 (private / (label + ".json")).write_text(json.dumps(intent))
                 with self.assertRaisesRegex(RuntimeError, "rollback selected"):
+                    pg.ensure(self.dir, self.port, self.log, root)
+
+    def test_invalid_private_intent_does_not_replace_a_working_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "workspace"
+            root.mkdir()
+            data = Path(tmp) / "data"
+            private = data / "engine-intents"
+            private.mkdir(parents=True, mode=0o700)
+            (private / (pg.supervisor.label("engine", root) + ".json")).write_text("invalid json")
+            with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": str(data)}), \
+                 mock.patch.object(pg, "VERSION", "2.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=AssertionError("working server stopped")):
+                with self.assertRaises(pg.supervisor.ServiceError):
                     pg.ensure(self.dir, self.port, self.log, root)
 
     def test_stale_newer_caller_preserves_selected_legacy_server_without_identity(self):
@@ -705,7 +696,8 @@ class EnsureTest(unittest.TestCase):
     def test_explicit_selection_protects_legacy_server_from_stale_newer_caller(self):
         root = self.dir.parent / "workspace"
         selected = root / "selected-old"
-        with mock.patch.object(pg.release_selection, "explicit_release", return_value=selected), \
+        with mock.patch.object(pg.release_selection, "explicit_intent", return_value={"operation": "install", "pending": False}), \
+             mock.patch.object(pg.release_selection, "explicit_release", return_value=selected), \
              mock.patch.object(pg, "VERSION", "2.0.0"), \
              mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.0.0"), \
              mock.patch.object(pg, "_stop", side_effect=AssertionError("selected server stopped")):
@@ -713,9 +705,10 @@ class EnsureTest(unittest.TestCase):
 
     def test_explicit_rollback_replaces_newer_server_only_for_selected_release(self):
         root = self.dir.parent / "workspace"
-        for selected, should_stop in ((pg.supervisor.RELEASE, True), (root / "other", False)):
+        for selected, should_stop in ((pg.supervisor.RELEASE, False), (root / "other", False)):
             with self.subTest(selected=selected), \
-                 mock.patch.object(pg.release_selection, "explicit_release", return_value=selected), \
+                 mock.patch.object(pg.release_selection, "explicit_intent", return_value={"operation": "install", "pending": True, "release": str(selected)}), \
+                 mock.patch.object(pg.release_selection, "explicit_release", side_effect=lambda root, sup, completed_only=False: None if completed_only else selected), \
                  mock.patch.object(pg, "VERSION", "1.0.0"), \
                  mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
                  mock.patch.object(pg, "_stop", side_effect=RuntimeError("selected rollback")) as stopped:
@@ -725,6 +718,31 @@ class EnsureTest(unittest.TestCase):
                 else:
                     self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
                     stopped.assert_not_called()
+
+    def test_completed_explicit_cache_rollback_replaces_newer_server(self):
+        root = self.dir.parent / "workspace"
+        with mock.patch.object(pg.release_selection, "explicit_intent", return_value={"operation": "install", "release": str(pg.supervisor.RELEASE), "pending": False}), \
+             mock.patch.object(pg, "VERSION", "1.0.0"), \
+             mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
+             mock.patch.object(pg, "_stop", side_effect=RuntimeError("selected rollback")):
+            with self.assertRaisesRegex(RuntimeError, "selected rollback"):
+                pg.ensure(self.dir, self.port, self.log, root)
+
+    def test_legacy_supervisor_honors_completed_explicit_cache_rollback(self):
+        root = self.dir / "workspace"
+        root.mkdir(exist_ok=True)
+        state = pg.supervisor.state_dir(root)
+        state.mkdir(exist_ok=True)
+        release = pg.supervisor.RELEASE
+        data = self.dir / "data"
+        with mock.patch.object(pg.supervisor, "data_dir", return_value=data):
+            pg.supervisor._write_intent(root, {
+                "operation": "install", "release": str(release), "pending": False,
+                "job": {"Label": pg.supervisor.label("engine", root), "WorkingDirectory": str(root.resolve())}})
+        legacy = SimpleNamespace(RELEASE=release, state_dir=pg.supervisor.state_dir,
+                                 data_dir=lambda: data, label=pg.supervisor.label, ServiceError=pg.supervisor.ServiceError)
+        with mock.patch.object(pg, "supervisor", legacy):
+            self.assertTrue(pg._selected_for_rollback(root))
 
     def test_versions_compare_numerically_and_unordered_versions_are_preserved(self):
         with mock.patch.object(pg, "VERSION", "1.9.0"):
@@ -2440,7 +2458,8 @@ class StandaloneBoardTest(unittest.TestCase):
         self.assertIsNone(proc.poll())
 
     def test_old_supervisor_keeps_the_selected_newer_server(self):
-        selected = self.root.parent / "newer"
+        selected = self.root.parent.resolve() / "newer"
+        selected.mkdir()
         selected_id = hashlib.sha256(os.fsencode(selected.resolve())).hexdigest()[:24]
         with mock.patch.object(pg, "_selected_release", return_value=selected), \
              mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0 release-{selected_id}"), \
@@ -2450,7 +2469,7 @@ class StandaloneBoardTest(unittest.TestCase):
         stopped.assert_not_called()
 
     def test_standalone_follows_plugin_selected_release(self):
-        release = self.root.parent / "new"
+        release = self.root.parent.resolve() / "new"
         (release / "scripts").mkdir(parents=True)
         (release / "scripts/pages.py").touch()
         stop, attempted = threading.Event(), threading.Event()
@@ -2533,12 +2552,18 @@ class StandaloneBoardTest(unittest.TestCase):
         private.mkdir(parents=True, mode=0o700)
         intent = private / (pg.supervisor.label("engine", self.root) + ".json")
         intent.write_text("invalid json")
-        stop, served = threading.Event(), threading.Event()
+        stop, served, retried = threading.Event(), threading.Event(), threading.Event()
         errors = io.StringIO()
+        original_select = pg._selected_release
+        def select(root):
+            result = original_select(root)
+            retried.set()
+            return result
         def ensure(*args, **kwargs):
             served.set()
             return "pages: serving"
-        with mock.patch.object(pg, "ensure", side_effect=ensure), \
+        with mock.patch.object(pg, "_selected_release", side_effect=select), \
+             mock.patch.object(pg, "ensure", side_effect=ensure), \
              mock.patch.object(pg, "POLL", 0.05), \
              mock.patch.object(pg.subprocess, "Popen") as popen, contextlib.redirect_stderr(errors):
             thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
@@ -2551,13 +2576,16 @@ class StandaloneBoardTest(unittest.TestCase):
                 self.assertIn("cannot read explicit intent", errors.getvalue())
                 self.assertTrue(thread.is_alive())
                 popen.assert_not_called()
+                intent.unlink()
+                self.assertTrue(retried.wait(2), "selection was not retried after repair")
+                self.assertTrue(thread.is_alive())
             finally:
                 stop.set()
                 thread.join(timeout=5)
             self.assertFalse(thread.is_alive())
 
     def test_failed_upgrade_keeps_supervising_and_shutdown_releases_the_lock(self):
-        release = self.root.parent / "new"
+        release = self.root.parent.resolve() / "new"
         (release / "scripts").mkdir(parents=True)
         (release / "scripts" / "pages.py").touch()
         stop, failed, serving = threading.Event(), threading.Event(), threading.Event()
@@ -2586,9 +2614,10 @@ class StandaloneBoardTest(unittest.TestCase):
                 pass
 
     def test_failed_child_launch_resumes_supervision(self):
-        release = self.root.parent / "new"
+        release = self.root.parent.resolve() / "new"
         (release / "scripts").mkdir(parents=True)
-        (release / "scripts" / "pages.py").write_text('import json, os\nassert not any(k.upper().startswith("PYTHON") for k in os.environ)\nprint(json.dumps({"ready": True}))\n')
+        (release / "scripts" / "trusted_module.py").write_text('VALUE = 42\n')
+        (release / "scripts" / "pages.py").write_text('import json, os, trusted_module\nassert trusted_module.VALUE == 42\nassert os.getcwd() == "/"\nassert not any(k.upper().startswith("PYTHON") for k in os.environ)\nprint(json.dumps({"ready": True}))\n')
         marker = self.root / "workspace-code-executed"
         for name in ("json", "sitecustomize"):
             (self.root / (name + ".py")).write_text(f'from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError("workspace code")\n')
@@ -2601,7 +2630,7 @@ class StandaloneBoardTest(unittest.TestCase):
             return "pages: serving"
         def fail_start(argv, **kwargs):
             attempted.set()
-            child = real_popen(argv, **kwargs, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            child = real_popen(argv, **kwargs, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             out, err = child.communicate(timeout=10)
             launched.append((argv, kwargs, child.returncode, out, err))
             raise OSError("exec failed")
@@ -2621,7 +2650,8 @@ class StandaloneBoardTest(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertTrue(launched)
             argv, kwargs, returncode, out, err = launched[0]
-            self.assertEqual(argv[1:3], ["-E", "-s"])
+            self.assertEqual(argv[1:3], ["-I", "-c"])
+            self.assertEqual(kwargs["cwd"], "/")
             self.assertFalse(any(key.upper().startswith("PYTHON") for key in kwargs["env"]))
             self.assertEqual(returncode, 0, err)
             self.assertIn('"ready": true', out)
