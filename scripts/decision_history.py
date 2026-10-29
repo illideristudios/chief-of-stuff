@@ -177,7 +177,7 @@ def _justified_depth(text: str) -> int | None:
     return max(depths) if depths else None
 
 
-def _approved_depth_for(req: HistoryRequest) -> int:
+def approved_depth_for(req: HistoryRequest) -> int:
     """Grant only as far up as the justification requires (and never past requested_depth)."""
     requested = max(1, req.requested_depth)
     if requested == 1:
@@ -228,7 +228,7 @@ def judge_justification(req: HistoryRequest, current_leaves: Sequence[DecisionLe
                     f"Approved: current leaves #{referenced[0]} and #{referenced[1]} state "
                     "mutually incompatible requirements."
                 ),
-                approved_depth=_approved_depth_for(req),
+                approved_depth=approved_depth_for(req),
                 report_to_architect=False,
             )
 
@@ -240,7 +240,7 @@ def judge_justification(req: HistoryRequest, current_leaves: Sequence[DecisionLe
                     f"Approved: current leaf #{req.leaf_id} mismatches cited code evidence; "
                     "reporting mismatch to the architect."
                 ),
-                approved_depth=_approved_depth_for(req),
+                approved_depth=approved_depth_for(req),
                 report_to_architect=True,
             )
 

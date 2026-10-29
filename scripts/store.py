@@ -1119,6 +1119,13 @@ class Store:
             .order_by(DecisionHistoryRequest.id)
         )
 
+    @staticmethod
+    def _history_depth_cap(row: DecisionHistoryRequest) -> int:
+        return decision_history.approved_depth_for(decision_history.HistoryRequest(
+            kind=row.kind, requested_depth=row.requested_depth,
+            justification=row.justification, evidence=row.evidence,
+        ))
+
     def decide_history_request(
         self,
         request_id: int,
@@ -1152,7 +1159,7 @@ class Store:
                     depth = approved_depth if approved_depth is not None else row.requested_depth
                     if type(depth) is not int or depth < 1:
                         raise ValueError("approved_depth must be a positive integer")
-                    row.approved_depth = depth
+                    row.approved_depth = min(depth, self._history_depth_cap(row))
                     row.grant_case = grant_case.strip() or "coordinator_approved"
                 else:
                     row.approved_depth = None
@@ -1239,6 +1246,9 @@ class Store:
             if row.kind == "ancestors":
                 if row.leaf_id is None or row.leaf_id not in nodes_by_id:
                     raise KeyError(f"unknown decision leaf on request {row.id}: {row.leaf_id!r}")
+                # Older releases allowed hand-recorded verdicts wider than the justification.
+                cap = self._history_depth_cap(row)
+                row.approved_depth = cap if row.approved_depth is None else min(row.approved_depth, cap)
                 slice_nodes = decision_graph.ancestor_slice(
                     nodes_by_id, row.leaf_id, max_depth=row.approved_depth
                 )
