@@ -978,6 +978,11 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
         self.assertIsNone(data.exhaustion(KEY_A))
         _, _, need, _ = workers_page._store_rows(data, set(), NOW, self.root / "trees", "")
         self.assertEqual(need, 0)
+        tracker = "# Tracker\n\n## Log\n\n- 00:30 one-shot old-review: HUMAN REVIEW NEEDED — stuck. Changes: none.\n"
+        navigation = decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+        workers = workers_page.render(tracker, bs.EMPTY, NOW, self.root / "trees", 4, db=data, navigation=navigation)
+        self.assertRegex(workers, r'<b>0</b><span class="cap">NEEDS INPUT')
+        self.assertNotIn('title="1 need input"', workers)
         body = issue_page.render(KEY_A, [], bs.EMPTY, NOW, root=self.root, db=data)
         self.assertNotIn('class="chip retries-exhausted"', body)
         self.assertIn("Nothing happens next: the issue is closed", body)

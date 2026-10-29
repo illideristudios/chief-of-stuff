@@ -246,7 +246,8 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
         store_running, store_ended, store_need, store_shots = _store_rows(db, seen_running, now, trees, claude_account)
         running += store_running
         ended += store_ended
-        need += store_need
+        # In a store-backed workspace, the store holds current status; tracker ends are historical rows.
+        need = store_need
     ended = [r for _, r in sorted(ended, key=lambda e: e[0], reverse=True)]  # by the time shown, newest first
     shots = sum(w.kind == "one-shot" for w in source_workers(sources)) + store_shots
     boxes = [("NEEDS INPUT", str(need), " hot" if need else ""), ("RUNNING", str(len(running)), "")]
