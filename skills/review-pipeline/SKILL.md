@@ -25,7 +25,7 @@ The engine owns merges, protected pushes and stage writes. Workers never bypass 
 
 ### Review threads
 
-Run `chief-of-stuff review-threads --root .` when checking review state. Treat unresolved concrete findings as fix work, send them to the worker, and verify the new head. Replies and resolution follow the forge's rules; a coordinator-imposed owner yes is never added between fixes and merge.
+Run `chief-of-stuff review-threads --root .` when checking review state. Treat unresolved concrete findings as fix work, send them to the worker, and verify the new head. The coordinator verifies fixes against the reviewed head and resolves addressed threads through the forge; no owner yes is added between fixes and merge. Workers report their fixes and leave resolution to the coordinator.
 
 ### Budgets
 

@@ -320,7 +320,7 @@ def commit_rule(workflow: Workflow, root: Path) -> str:
     rule += (" When your task names a review thread (`#12/<id>` or `!5/<id>`), push the fix, then answer the "
              f"thread with `chief-of-stuff review-threads --root {shlex.quote(str(root.resolve()))} --reply <ref> "
              "--body \"<sha>: <what changed>\"`. Answer it even when you disagree, saying why; never resolve a "
-             "thread, resolving is the user's.")
+             "thread yourself; the coordinator verifies fixes and resolves addressed threads without an owner wait.")
     return rule + (f" Review goes to the configured session {workflow.reviewer_session}; report findings "
                    "to the coordinator for automated triage." if workflow.reviewer_session else
                    " No reviewer session is configured; the coordinator launches the policy review panel.")

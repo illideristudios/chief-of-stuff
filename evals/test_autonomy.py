@@ -88,6 +88,7 @@ class AutonomyTest(unittest.TestCase):
             self.assertNotIn("user approves", text)
             self.assertNotIn("user's alone", text)
             self.assertNotIn("asks the user", text)
+            self.assertNotIn("resolving is the user's", text)
 
     def test_retry_moves_to_the_next_agent_after_a_failure(self):
         first = settings.ModelEntry("claude", "first")
