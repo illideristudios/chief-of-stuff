@@ -217,15 +217,41 @@ def _home_of(d: dict | None):
     return None if not d else backlog.Backlog(**d) if "host" in d else backlog.GitHubBacklog(**d)
 
 
+def _cached_issues(values: dict, home) -> dict[str, Issue]:
+    """Rekey legacy entries only when their URL proves their forge and issue identity."""
+    result: dict[str, Issue] = {}
+    collisions: set[str] = set()
+    for key, v in values.items():
+        issue = Issue(**{**v, "labels": tuple(v["labels"]), "closed_at": _when(v.get("closed_at")),
+                         "milestone": _milestone_of(v.get("milestone"))})
+        ref = backlog.issue_ref(issue.url, home, any_host=True)
+        if ref and not (home is None and re.fullmatch(r"#\d+", key)):
+            canonical = ref.label(home)
+            legacy = {canonical, f"{ref.repo}#{ref.number}", f"{ref.host}/{ref.repo}#{ref.number}"}
+            if key not in legacy:
+                continue
+            key = canonical
+            issue = replace(issue, ref=key)
+        elif (home is None or isinstance(home, backlog.Backlog)) and (
+                GH_REPO.fullmatch(key.rpartition("#")[0]) or ambiguous_gitlab_label(key)):
+            continue  # an unverified old GitLab key could otherwise masquerade as GitHub
+        if key in collisions:
+            continue
+        if key in result and result[key] != issue:
+            del result[key]
+            collisions.add(key)
+        else:
+            result[key] = issue
+    return result
+
+
 def load(pages_dir: Path) -> Sources:
     """The cache, or EMPTY when it is absent or unreadable."""
     try:
         d = json.loads((pages_dir / CACHE).read_text())
         home = _home_of(d.get("home"))
         return Sources({k: datetime.fromisoformat(v) for k, v in d["fetched"].items()},
-                       {k: Issue(**{**v, "labels": tuple(v["labels"]), "closed_at": _when(v.get("closed_at")),
-                                    "milestone": _milestone_of(v.get("milestone"))})
-                        for k, v in d["issues"].items()},
+                       _cached_issues(d["issues"], home),
                        {k: _change_of(v, home) for k, v in d["changes"].items()},
                        tuple(Worker(**{**w, "started": _when(w["started"]), "last": _when(w["last"])})
                              for w in d["workers"]),

@@ -181,10 +181,10 @@ def parse(diff: str) -> list[File]:
 
 
 def diff(change: board_sources.Change, clone: Path, pages: Path) -> tuple[str, str]:
-    """(merge base, `git diff` of the change's head against it), read once per head commit."""
-    out = pages / CACHE / f"{change.head}.diff"
+    """(merge base, `git diff` of the change's head against it), cached for that comparison."""
+    base = module_graph.fetch(change, clone)
+    out = pages / CACHE / f"{module_graph.cache_key(change, clone, base)}.diff"
     if not out.is_file():
-        base = module_graph.fetch(change, clone)
         # ponytail: the whole diff, however big; cap it per file if a change's page gets slow.
         text = module_graph.run(["git", "-C", str(clone), "diff", "--no-color", "--no-renames", "--no-ext-diff",
                                  "--end-of-options", base, change.head])
