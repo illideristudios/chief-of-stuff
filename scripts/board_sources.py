@@ -225,13 +225,17 @@ def _cached_issues(values: dict, home) -> dict[str, Issue]:
         issue = Issue(**{**v, "labels": tuple(v["labels"]), "closed_at": _when(v.get("closed_at")),
                          "milestone": _milestone_of(v.get("milestone"))})
         ref = backlog.issue_ref(issue.url, home, any_host=True)
-        if ref and not (home is None and re.fullmatch(r"#\d+", key)):
+        if ref:
             canonical = ref.label(home)
             legacy = {canonical, f"{ref.repo}#{ref.number}", f"{ref.host}/{ref.repo}#{ref.number}"}
+            if home is None:
+                legacy.add(f"#{ref.number}")
             if key not in legacy:
                 continue
             key = canonical
             issue = replace(issue, ref=key)
+        elif home is None and re.fullmatch(r"#\d+", key):
+            continue  # no home or URL proves what a bare key names
         elif (home is None or isinstance(home, backlog.Backlog)) and (
                 GH_REPO.fullmatch(key.rpartition("#")[0]) or ambiguous_gitlab_label(key)):
             continue  # an unverified old GitLab key could otherwise masquerade as GitHub
@@ -720,12 +724,21 @@ def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call) ->
     except Exception as e:  # a forge answer shaped unlike its schema; the page still renders
         issues, changes, errors = None, None, dict.fromkeys(("kanban", "merge requests"), f"{type(e).__name__}: {e}")
     home = cfg.backlog
+    # Both failed panels may be carried together under their old home. When only one
+    # succeeded under a different home, the other panel cannot safely share its keys.
+    changed_home = prev.home != home and (issues is not None or changes is not None)
     if issues is None:
-        issues, home = prev.issues, prev.home  # the home follows the issues: their keys were written under it
+        if changed_home:
+            issues = {}
+            fetched.pop("kanban", None)
+        else:
+            issues, home = prev.issues, prev.home
     elif cfg.backlog is not None:
         fetched["kanban"] = now
     if changes is None:
-        changes = prev.changes
+        changes = {} if changed_home else prev.changes
+        if changed_home:
+            fetched.pop("merge requests", None)
     elif cfg.backlog is not None:
         fetched["merge requests"] = now
     try:

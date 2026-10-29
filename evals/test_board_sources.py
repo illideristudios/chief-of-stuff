@@ -1192,7 +1192,8 @@ class CarriedStateKeepsItsHomeTest(unittest.TestCase):
         old.pop("home")  # a cache written before the home was stored
         cache.write_text(json.dumps(old))
         got = bs.refresh(root, NOW, gh=FakeGh(fail=True))
-        self.assertEqual(got.issues["#115"].state, "closed")
+        self.assertEqual(got.issues["o/app#115"].state, "closed")
+        self.assertNotIn("#115", got.issues)
         self.assertIsNone(got.home)
         self.assertIsNone(bs.load(root / "pages").home)
 

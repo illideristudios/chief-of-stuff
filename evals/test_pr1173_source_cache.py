@@ -124,3 +124,50 @@ class OfflineIssueMigration(unittest.TestCase):
                       'gitlab:labs.example.test/team/other#7': bs.Issue('gitlab:labs.example.test/team/other#7', url, 'New', 'closed', ())}
             bs._write(Path(tmp) / bs.CACHE, bs.Sources({}, issues, {}, (), {}, home))
             self.assertNotIn('gitlab:labs.example.test/team/other#7', bs.load(Path(tmp)).issues)
+
+class PartialRefreshIdentity(unittest.TestCase):
+    def test_home_change_does_not_mix_panels_even_after_offline_reload(self):
+        import shutil
+        import task_forge
+        from settings import Lane
+        from tracker import Task
+        from test_board_sources import workspace
+        old_home = bs.backlog.GitHubBacklog('o/old')
+        new_home = bs.backlog.GitHubBacklog('o/new')
+        old_issue = bs.Issue('#7', 'https://github.com/o/old/issues/7', 'old issue', 'open', ())
+        new_issue = bs.Issue('#7', 'https://github.com/o/new/issues/7', 'new issue', 'open', ())
+        old_change = replace(change('#42', 'https://github.com/o/old/pull/42'), issues=('#7',), state='merged')
+        new_change = replace(change('#42', 'https://github.com/o/new/pull/42'), issues=('#7',), state='merged')
+        task = Task('item', '', '', '', '', '', issue='#7', lane='build', stage='merge')
+        lanes = {'build': Lane(('merge', 'done'))}
+        for fresh_issues, fresh_changes in (({'#7': new_issue}, None), (None, {'#42': new_change})):
+            with self.subTest(issues=fresh_issues is not None):
+                root = workspace('GitHub issues; repo o/new')
+                self.addCleanup(shutil.rmtree, root, True)
+                bs._write(root / 'pages' / bs.CACHE, bs.Sources(
+                    {'kanban': NOW, 'merge requests': NOW}, {'#7': old_issue}, {'#42': old_change}, (), {}, old_home))
+                with mock.patch.object(bs, 'forge', return_value=(fresh_issues, fresh_changes, {})):
+                    got = bs.refresh(root, NOW)
+                self.assertEqual(got.home, new_home)
+                self.assertEqual(got.issues, fresh_issues or {})
+                self.assertEqual(got.changes, fresh_changes or {})
+                self.assertEqual(task_forge.task_changes(task, got), (new_change,) if fresh_changes else ())
+                self.assertEqual(task_forge.effective_stage(task, got, lanes), 'done' if fresh_changes else 'merge')
+                self.assertNotIn('merge requests' if fresh_changes is None else 'kanban', got.fetched)
+                self.assertEqual(bs.load(root / 'pages').issues, got.issues)
+                self.assertEqual(bs.load(root / 'pages').changes, got.changes)
+                with mock.patch.object(bs, 'forge', return_value=(None, None, {'kanban': 'offline'})):
+                    offline = bs.refresh(root, NOW)
+                self.assertEqual((offline.home, offline.issues, offline.changes), (got.home, got.issues, got.changes))
+
+    def test_homeless_bare_issue_is_only_kept_under_verified_full_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = {
+                '#7': bs.Issue('#7', 'https://github.com/foreign/repo/issues/7', 'foreign', 'open', ()),
+                '#8': bs.Issue('#8', '', 'unknown', 'open', ()),
+                '#9': bs.Issue('#9', 'https://github.com/foreign/repo/issues/10', 'mismatch', 'open', ()),
+            }
+            bs._write(Path(tmp) / bs.CACHE, bs.Sources({}, issues, {}, (), {}))
+            loaded = bs.load(Path(tmp))
+            self.assertEqual(set(loaded.issues), {'foreign/repo#7'})
+            self.assertEqual(loaded.issues['foreign/repo#7'].ref, 'foreign/repo#7')
