@@ -631,7 +631,7 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
         admission = github_scan.Admission(gh, GH_MAX_REQUESTS, GH_POINT_BUDGET, GH_RESERVE)
         issues, changes, errors, _ = github_scan.scan(
             pages / github_scan.CHECKPOINT, home, wanted, since, approver, every_open, admission,
-            _SCAN_NOW.get() or datetime.now().astimezone())
+            _SCAN_NOW.get() or datetime.now().astimezone(), sys.modules[__name__])
         return issues, changes, errors
     return gitlab(home, wanted, changes, since, approver, call, every_open)
 
@@ -798,10 +798,43 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
                 checkpoint = json.loads((pages / github_scan.CHECKPOINT).read_text())
                 observed = _when(checkpoint.get("observed"))
                 if observed:
-                    fetched["merge requests"] = observed
+                    fetched["merge requests"] = min(observed, _when(checkpoint.get("named_observed")) or observed)
                     fetched["github sweep"] = observed
             except (OSError, ValueError, TypeError, AttributeError):
                 pass
+    # A resumable scan may predate a newer cache (for example after a cache
+    # write failure). Never replace newer facts with an older observation.
+    # Invalidate only the stale component so the next refresh can revalidate it.
+    if same_home and isinstance(cfg.backlog, backlog.GitHubBacklog) and not skip:
+        try:
+            import github_scan
+            checkpoint_path = pages / github_scan.CHECKPOINT
+            checkpoint = json.loads(checkpoint_path.read_text())
+            named_at = _when(checkpoint.get('named_observed'))
+            inventory_at = _when(checkpoint.get('observed'))
+            named_old = bool(named_at and any(
+                panel not in errors and prev.fetched.get(panel) and named_at < prev.fetched[panel]
+                for panel in ('kanban', 'merge requests')))
+            inventory_old = bool(inventory_at and 'merge requests' not in errors and
+                                 prev.fetched.get('merge requests') and inventory_at < prev.fetched['merge requests'])
+            if named_old:
+                checkpoint.update(named={}, named_times={}, named_index=0, named_observed=None)
+                if 'kanban' not in errors and prev.fetched.get('kanban') and named_at < prev.fetched['kanban']:
+                    issues, fetched['kanban'] = prev.issues, prev.fetched['kanban']
+                    errors['kanban'] = 'GitHub named observations older than cache; revalidating'
+            if inventory_old:
+                github_scan._inventory_reset(checkpoint)
+            if (named_old or inventory_old) and 'merge requests' not in errors:
+                changes, fetched['merge requests'] = prev.changes, prev.fetched['merge requests']
+                if 'github sweep' in prev.fetched:
+                    fetched['github sweep'] = prev.fetched['github sweep']
+                else:
+                    fetched.pop('github sweep', None)
+                errors['merge requests'] = 'GitHub observations older than cache; revalidating'
+            if named_old or inventory_old:
+                github_scan._save(checkpoint_path, checkpoint)
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
+            pass  # The cache remains authoritative if checkpoint recovery fails.
     try:
         found = workers(root, cfg, tracker, text, day)
         fetched["workers"] = now

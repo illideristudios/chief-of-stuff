@@ -90,7 +90,7 @@ class HomeAccessTests(unittest.TestCase):
             path = Path(tmp) / github_scan.CHECKPOINT
             def run(accessible):
                 admission = github_scan.Admission(gh(accessible), 40, 200, 500)
-                return github_scan.scan(path, bs.backlog.GitHubBacklog('o/app'), {}, NOW, '', False, admission, NOW)
+                return github_scan.scan(path, bs.backlog.GitHubBacklog('o/app'), {}, NOW, '', False, admission, NOW, bs)
             issues, changes, errors, _ = run(False)
             self.assertIsNone(issues)
             self.assertIsNone(changes)

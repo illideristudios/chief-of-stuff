@@ -205,18 +205,22 @@ class StoreBoardOpenChangesTest(unittest.TestCase):
         self.addCleanup(db.engine.dispose)
         (root / "CLAUDE.md").write_text(CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n", encoding="utf-8")
         db.upsert_item(KEY, workflow="build", stage="review", forge_state="open", title="Upload size limit")
-        pr = {"number": 21, "url": "https://github.com/example/repo/pull/21", "title": "Upload size limit",
-              "state": "OPEN", "baseRefName": "develop", "body": "Fixes #12"}
+        from test_board_sources import gh_pr
+        pr = {**gh_pr(21), 'url': 'https://github.com/example/repo/pull/21',
+              'title': 'Upload size limit', 'baseRefName': 'develop', 'body': 'Fixes #12',
+              'updatedAt': NOW.isoformat()}
 
         def gh(args, input_text=None):  # answers only what the query asks for, as GitHub does
-            query = args[args.index("-f") + 1]
-            info = {"hasNextPage": False, "endCursor": None}
-            data = {"rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000},
-                    "merged": {"nodes": [], "pageInfo": info},
-                    **({"open": {"nodes": [pr], "pageInfo": info}} if "is:open" in query else {})}
-            if "r0: repository" in query:
-                data["r0"] = {f"n{n}": None for n in re.findall(r"n(\d+): issueOrPullRequest", query)}
-            return 0, json.dumps({"data": data}), ""
+            query = args[args.index('-f') + 1]
+            data = {'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}
+            if 'inventory: repository' in query:
+                nodes = [{k: pr[k] for k in ('number', 'state', 'updatedAt', 'mergedAt')}] if 'states: [OPEN]' in query else []
+                data['inventory'] = {'pullRequests': {'nodes': nodes, 'pageInfo': {'hasNextPage': False, 'endCursor': None}}}
+            elif 'issueOrPullRequest' in query:
+                data['r0'] = {f'n{n}': None for n in re.findall(r'n(\d+): issueOrPullRequest', query)}
+            else:
+                data['r0'] = {'n21': pr}
+            return 0, json.dumps({'data': data}), ''
 
         bs.refresh(root, NOW, gh=gh)
         html = pg.write_board(root, now=NOW)[0].read_text(encoding="utf-8")

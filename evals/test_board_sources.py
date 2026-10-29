@@ -102,7 +102,7 @@ class FakeGh:
         merged = {**gh_pr(41, "2026-09-26T05:41:00Z", "MERGED"), "updatedAt": "2026-09-26T05:41:00Z"}
         data = {"r0": {n: repo.get(n) for n in re.findall(r"(n\d+): issueOrPullRequest", query)},
                 "rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000},
-                "inventory": {"pullRequests": {"nodes": [{k: merged[k] for k in ("number", "state", "mergedAt", "updatedAt")}],
+                "inventory": {"pullRequests": {"nodes": ([{k: merged[k] for k in ("number", "state", "mergedAt", "updatedAt")}] if "states: [MERGED]" in query else []),
                                                 "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
         if 'pullRequest(number:' in query:
             data['r0'] = {'n41': merged}
@@ -116,13 +116,13 @@ class GitHubTest(unittest.TestCase):
         self.got = bs.refresh(self.root, NOW, gh=self.gh)
 
     def test_named_and_merged_are_separate_bounded_queries(self):
-        self.assertEqual(len(self.gh.calls), 4)
+        self.assertEqual(len(self.gh.calls), 6)
         queries = [args[args.index("-f") + 1] for args in self.gh.calls]
         for asked in ("n118: issueOrPullRequest(number: 118)", "n115:", "n58:"):
             self.assertIn(asked, queries[0])
         self.assertIn("pullRequests(first: 100", queries[1])
         self.assertIn("pullRequests(first: 100", queries[2])
-        self.assertIn("pullRequest(number: 41)", queries[3])
+        self.assertIn("pullRequest(number: 41)", queries[5])
 
     def test_issues_and_changes_by_ref(self):
         self.assertEqual(self.got.issues["#118"].labels, ("stage:2-implement",))
@@ -1466,7 +1466,8 @@ class StoreWorkspaceSourcesTest(unittest.TestCase):
             prs = [{**open_pr, "updatedAt": updated}, {**recent_merged, "updatedAt": updated}]
             if 'inventory: repository' in query:
                 result = {"inventory": {"pullRequests": {"nodes": [
-                    {k: p[k] for k in ("number", "state", "mergedAt", "updatedAt")} for p in prs],
+                    {k: p[k] for k in ("number", "state", "mergedAt", "updatedAt")} for p in prs
+                    if p["state"] == ("OPEN" if "states: [OPEN]" in query else "MERGED")],
                     "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
             elif 'issueOrPullRequest' in query:
                 if 'owner: "acme"' in query:

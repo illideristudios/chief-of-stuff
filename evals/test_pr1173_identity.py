@@ -1,5 +1,6 @@
 """Regression coverage for task and forge identity across projects and hosts."""
 import json
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -15,6 +16,20 @@ import task_forge
 from tracker import parse_tracker
 from test_board_sources import gl_mr
 
+
+def github_identity_fixture(args):
+    from test_board_sources import gh_issue, gh_pr
+    q = args[-1]
+    data = {'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}
+    if 'inventory: repository' in q:
+        data['inventory'] = {'pullRequests': {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}}
+    else:
+        sibling = 'name: "sibling"' in q
+        pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7',
+              'closingIssuesReferences': {'nodes': [{'number': 7, 'repository': {'name': 'sibling', 'owner': {'login': 'o'}}}]}}
+        data['r0'] = {f'n{n}': (pr if sibling and n == '42' else gh_pr(58) if n == '58' else gh_issue(int(n)))
+                      for n in re.findall(r'n(\d+): issueOrPullRequest', q)}
+    return 0, json.dumps({'data': data}), ''
 
 def configured(home):
     return replace(tip.BoardTest().cfg(), backlog=home)
@@ -155,9 +170,11 @@ class IdentityTest(unittest.TestCase):
         home = bs.backlog.GitHubBacklog('o/app')
         pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7',
               'closingIssuesReferences': {'nodes': [{'number': 7, 'repository': {'name': 'sibling', 'owner': {'login': 'o'}}}]}}
-        def gh(args):
-            return 0, json.dumps({'data': {'r0': {'n7': gh_issue(7)}, 'r1': {'n42': pr}, 'merged': {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}, 'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}}), ''
-        issues, changes, error = bs.github(home, {'o/app': {7}, 'o/sibling': {42}}, NOW, '', gh)
+        import github_scan
+        with tempfile.TemporaryDirectory() as tmp:
+            issues, changes, error, _ = github_scan.scan(Path(tmp) / 'scan.json', home,
+                {'o/app': {7}, 'o/sibling': {42}}, NOW, '', False,
+                github_scan.Admission(github_identity_fixture, 40, 200, 500), NOW, bs)
         self.assertEqual(error, {})
         self.assertEqual(changes['o/sibling#42'].issues, ('o/sibling#7',))
         src = bs.Sources({}, issues, changes, (), {}, home=home)
@@ -276,11 +293,8 @@ class ReviewFindingsTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         calls = []
         def gh(args):
-            query = args[-1]
-            calls.append(query)
-            pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7'}
-            return 0, json.dumps({'data': {'r0': {'n118': gh_issue(118), 'n58': gh_pr(58)},
-                                             'r1': {'n7': gh_issue(7), 'n42': pr}, 'merged': {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}, 'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}}), ''
+            calls.append(args[-1])
+            return github_identity_fixture(args)
         src = bs.refresh(root, NOW, gh=gh)
         self.assertTrue(any('n42: issueOrPullRequest(number: 42)' in query for query in calls))
         self.assertEqual(src.changes['o/sibling#42'].issues, ('o/sibling#7',))
@@ -371,10 +385,7 @@ class IndependentReviewRegressions(unittest.TestCase):
         import shutil
         root = workspace('GitHub issues; repo o/app', issue='o/sibling#7', mr='https://github.com/o/sibling/pull/42')
         self.addCleanup(shutil.rmtree, root, True)
-        def gh(args):
-            pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7'}
-            return 0, json.dumps({'data': {'r0': {'n118': gh_issue(118), 'n58': gh_pr(58)},
-                                             'r1': {'n7': gh_issue(7), 'n42': pr}, 'merged': {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}, 'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}}), ''
+        gh = github_identity_fixture
         bs.refresh(root, NOW, gh=gh)
         tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
         queries = []

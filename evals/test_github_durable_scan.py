@@ -33,10 +33,12 @@ class Forge:
         if 'inventory: repository' in q:
             cursor = re.search(r'after: "(\d+)"', q)
             offset = int(cursor[1]) if cursor else 0
-            nodes = list(self.nodes.values())[offset:offset + scan.INVENTORY_PAGE]
+            phase = 'OPEN' if 'states: [OPEN]' in q else 'MERGED'
+            entries = sorted((n for n in self.nodes.values() if n['state'] == phase), key=(lambda n: n['number']) if phase == 'OPEN' else (lambda n: (n['updatedAt'], n['number'])), reverse=phase == 'MERGED')
+            nodes = entries[offset:offset + scan.INVENTORY_PAGE]
             end = offset + len(nodes)
             data['inventory'] = {'pullRequests': {'nodes': [{k: n[k] for k in ('number', 'state', 'updatedAt', 'mergedAt')} for n in nodes],
-                'pageInfo': {'hasNextPage': end < len(self.nodes), 'endCursor': str(offset if self.repeat and offset else end)}}}
+                'pageInfo': {'hasNextPage': end < len(entries), 'endCursor': str(offset if self.repeat and offset else end)}}}
             if self.shift_after_page and not offset:
                 self.shift_after_page = False
                 self.nodes = {999: {**gh_pr(999), 'updatedAt': UPDATED}, **self.nodes}
@@ -66,7 +68,7 @@ class DurableScan(unittest.TestCase):
     def run_scan(self, budget=7, *, wanted=None, home=None, since=None, every_open=True):
         admission = scan.Admission(self.gh, budget, 200, 500)
         result = scan.scan(self.path, home or self.home, self.wanted if wanted is None else wanted,
-                           since or NOW, '', every_open, admission, self.now)
+                           since or NOW, '', every_open, admission, self.now, bs)
         self.now += timedelta(minutes=10)
         return result
 
@@ -97,7 +99,7 @@ class DurableScan(unittest.TestCase):
         self.gh.mutate_after_page = True
         result = self.until_done()
         sweeps = sum('inventory: repository' in q and 'after:' not in q for q in self.gh.calls)
-        self.assertGreaterEqual(sweeps, 3)
+        self.assertGreaterEqual(sweeps, 2)
         self.assertEqual(len(result[1]), 110)
 
     def test_shifted_pages_with_duplicate_restart_and_converge(self):
@@ -106,7 +108,7 @@ class DurableScan(unittest.TestCase):
         self.gh.shift_after_page = True
         first = self.run_scan()
         self.assertIsNone(first[1])
-        self.assertIn('shifted', first[2]['merge requests'])
+        self.assertIn('merge requests', first[2])
         self.assertEqual(len(self.until_done()[1]), 151)
 
     def test_checkpoint_survives_new_interpreter_processes(self):
@@ -119,7 +121,7 @@ from test_github_durable_scan import Forge, NOW
 import github_scan, board_sources
 p = Path(sys.argv[1])
 github_scan.scan(p, board_sources.backlog.GitHubBacklog('o/app'), {'o/app': set(range(1, 501))},
-                 NOW, '', True, github_scan.Admission(Forge(), 7, 200, 500), NOW + timedelta(minutes=int(sys.argv[2])))
+                 NOW, '', True, github_scan.Admission(Forge(), 7, 200, 500), NOW + timedelta(minutes=int(sys.argv[2])), board_sources)
 """
         import os
         env = {**os.environ, 'PYTHONPATH': os.pathsep.join((str(Path(__file__).parent), str(Path(bs.__file__).parent)))}
@@ -176,14 +178,13 @@ github_scan.scan(p, board_sources.backlog.GitHubBacklog('o/app'), {'o/app': set(
         self.wanted = {}
         self.run_scan(budget=2)
         self.gh.nodes[1001]['updatedAt'] = '2026-09-26T06:02:00Z'
-        self.assertIsNone(self.run_scan()[1])
-        self.assertEqual(len(self.until_done()[1]), 10)
+        self.assertEqual(len(self.run_scan()[1]), 10)
 
     def test_identity_changes_discard_incompatible_checkpoints(self):
         self.run_scan(budget=3)
         before = json.loads(self.path.read_text())['fingerprint']
         self.run_scan(budget=1, wanted={'o/app': {999}})
-        self.assertNotEqual(before, json.loads(self.path.read_text())['fingerprint'])
+        self.assertEqual(before, json.loads(self.path.read_text())['fingerprint'])
         self.run_scan(budget=1, wanted={'o/app': {999}}, since=NOW + timedelta(days=1))
         self.assertEqual(json.loads(self.path.read_text())['named_index'], 1)
         self.run_scan(budget=1, wanted={'o/app': {999}}, home=bs.backlog.GitHubBacklog('o/other'))
@@ -199,6 +200,78 @@ github_scan.scan(p, board_sources.backlog.GitHubBacklog('o/app'), {'o/app': set(
         with mock.patch.object(bs, 'GH_ISSUE', bs.GH_ISSUE + ' '):
             self.run_scan(budget=1)
         self.assertEqual(json.loads(self.path.read_text())['named_index'], 5)
+
+    def test_target_add_remove_preserves_inventory_and_completed_named_observations(self):
+        self.gh = Forge(110)
+        self.wanted = {'o/app': set(range(1, 11))}
+        self.run_scan(budget=3)
+        before = json.loads(self.path.read_text())
+        self.assertTrue(before['inventory'])
+        self.wanted = {'o/app': {1, 2, 3, 4, 5, 11}}
+        self.run_scan(budget=1)
+        after = json.loads(self.path.read_text())
+        self.assertEqual(after['inventory'][:len(before['inventory'])], before['inventory'])
+        self.assertEqual(after['named']['o/app#1'], before['named']['o/app#1'])
+        self.assertNotIn('o/app#6', after['named'])
+        result = self.until_done()
+        self.assertIn('o/app#11', json.loads(self.path.read_text())['named'])
+        self.assertEqual(len(result[0]), 6)
+
+    def test_detail_churn_completes_without_restarting_or_losing_prior_details(self):
+        self.gh = Forge(30)
+        self.wanted = {}
+        self.run_scan(budget=5)
+        for _ in range(20):
+            for node in self.gh.nodes.values():
+                node['updatedAt'] = self.now.isoformat()
+            result = self.run_scan(budget=1)
+            if result[1] is not None:
+                break
+        self.assertEqual(len(result[1]), 30)
+        self.assertEqual(sum('inventory: repository' in q for q in self.gh.calls), 4)
+
+    def test_irrelevant_merged_history_does_not_exhaust_item_cap(self):
+        self.gh = Forge(0)
+        self.wanted = {}
+        for n in range(1, 20051):
+            self.gh.nodes[n] = {**gh_pr(n, '2020-01-01T00:00:00Z', 'MERGED'), 'updatedAt': '2020-01-01T00:00:00Z'}
+        self.gh.nodes[30001] = {**gh_pr(30001), 'updatedAt': UPDATED, 'baseRefName': 'release',
+                                 'body': 'Fixes #118'}
+        self.gh.nodes[30002] = {**gh_pr(30002, UPDATED, 'MERGED'), 'updatedAt': UPDATED}
+        _, changes, errors, _ = self.until_done()
+        self.assertEqual(errors, {})
+        self.assertIn('#30001', changes)
+        self.assertEqual(changes['#30001'].issues, ('#118',))
+        self.assertIn('#30002', changes)
+        self.assertEqual(len(changes), 51)
+        self.assertLess(sum('inventory: repository' in q for q in self.gh.calls), 10)
+
+    def test_named_freshness_is_oldest_contributor_across_batches_and_target_changes(self):
+        self.gh = Forge(0)
+        self.wanted = {'o/app': set(range(1, 11))}
+        self.run_scan(budget=1)
+        first = self.now - timedelta(minutes=10)
+        self.until_done()
+        state = json.loads(self.path.read_text())
+        self.assertEqual(state['named_observed'], first.isoformat())
+        self.wanted = {'o/app': {1, 11}}
+        self.run_scan(budget=1)
+        state = json.loads(self.path.read_text())
+        self.assertEqual(state['named_observed'], first.isoformat())
+        self.wanted = {'o/app': {11}}
+        self.run_scan(budget=1)
+        state = json.loads(self.path.read_text())
+        self.assertGreater(state['named_observed'], first.isoformat())
+
+    def test_malformed_nested_details_are_retried_without_poisoning_checkpoint(self):
+        self.gh = Forge(1)
+        self.wanted = {}
+        self.gh.nodes[1001]['files'] = {'nodes': [{}]}
+        self.assertIsNone(self.run_scan()[1])
+        self.assertNotIn('1001', json.loads(self.path.read_text())['details'])
+        self.gh.nodes[1001]['files'] = {'nodes': [{'path': 'fixed.py'}]}
+        result = self.until_done()
+        self.assertEqual(result[1]['#1001'].files, ('fixed.py',))
 
     def test_checkpoint_write_failure_does_not_publish(self):
         self.gh = Forge(0)
@@ -225,6 +298,29 @@ github_scan.scan(p, board_sources.backlog.GitHubBacklog('o/app'), {'o/app': set(
         self.assertEqual(len(gh.calls), calls)
         self.assertFalse(checkpoint.exists())
         self.assertEqual(recovered.fetched['merge requests'], NOW)
+
+    def test_completed_older_checkpoint_cannot_replace_newer_cached_panels(self):
+        root = workspace('GitHub issues; repo o/app')
+        import shutil
+        self.addCleanup(shutil.rmtree, root, True)
+        gh = FakeGh()
+        with mock.patch.object(bs, '_write', side_effect=OSError('cache full')):
+            old = bs.refresh(root, NOW, gh=gh)
+        self.assertIn('cache', old.errors)
+        newer_at = NOW + timedelta(minutes=10)
+        newer_issue = bs.Issue('#118', 'https://github.com/o/app/issues/118', 'Newer', 'open', ())
+        newer = bs.Sources({'kanban': newer_at, 'merge requests': newer_at, 'github sweep': newer_at},
+                           {'#118': newer_issue}, {}, (), {}, home=old.home)
+        bs._write(root / 'pages' / bs.CACHE, newer, newer_at)
+        got = bs.refresh(root, newer_at + timedelta(minutes=1), gh=gh)
+        self.assertEqual(got.issues['#118'].title, 'Newer')
+        self.assertEqual(got.fetched['kanban'], newer_at)
+        self.assertEqual(got.fetched['merge requests'], newer_at)
+        self.assertIn('revalidating', got.errors['kanban'])
+        self.assertIn('revalidating', got.errors['merge requests'])
+        recovered = bs.refresh(root, newer_at + timedelta(minutes=2), gh=gh)
+        self.assertEqual(recovered.errors, {})
+        self.assertEqual(recovered.fetched['kanban'], newer_at + timedelta(minutes=2))
 
     def test_bounded_targets_and_disk(self):
         self.wanted = {'o/app': set(range(scan.MAX_TARGETS + 1))}
@@ -256,7 +352,7 @@ github_scan.scan(p, board_sources.backlog.GitHubBacklog('o/app'), {'o/app': set(
         import render_board
         cfg = bs.read_config(root)
         tracker = (root / cfg.tracker_path(NOW.date().isoformat())).read_text()
-        self.assertIn('GitHub inventory last observed 2026-09-26 02:10 (non-atomic sweep)', render_board.render(tracker, cfg, NOW, sources=later))
+        self.assertIn('GitHub inventory observation interval began 2026-09-26 02:10 (non-atomic sweeps)', render_board.render(tracker, cfg, NOW, sources=later))
 
 
 if __name__ == '__main__':
