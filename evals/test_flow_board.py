@@ -282,6 +282,13 @@ class Build(unittest.TestCase):
         other = next(c for col in cols for c in col.cards if c.name == "Write README")
         self.assertNotIn("T3 thread", [text for text, _ in other.refs])
 
+    def test_board_thread_uses_start_time_instead_of_json_key_order(self):
+        from types import SimpleNamespace
+        runs = {"fix-2": {"thread_link": "t3code://threads/e/latest", "started_at": "2026-01-02T00:00:00+00:00"},
+                "review-1": {"thread_link": "t3code://threads/e/old", "started_at": "2026-01-01T00:00:00+00:00"}}
+        db = SimpleNamespace(items=lambda: [SimpleNamespace(issue_key="github:o/r#1")], resume=lambda key: {"runs": runs})
+        self.assertEqual(rb._worker_threads(db), {"github:o/r#1": "t3code://threads/e/latest"})
+
     def test_a_bare_issue_does_not_match_a_change_without_a_home(self) -> None:
         sources = replace(SOURCES, home=None)
         card = next(c for col in self.cols(sources) for c in col.cards if c.name == "Cut the release")

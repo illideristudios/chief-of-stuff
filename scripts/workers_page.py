@@ -22,7 +22,7 @@ import session_logs
 from clock import parse_stamp
 from task_forge import EXHAUSTED_CHIP, PageData, retry_exhaustion, segment_worker_key, source_workers
 from decision_page import HEAD, context, pending_count, write_if_changed
-from fragment import tab_bar, issue_href
+from fragment import tab_bar, issue_href, href, latest_thread_link
 from md import section as _section
 from tracker import TRAILING_NUMBER, launcher, parse_tracker
 from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STAGE, STARTED
@@ -144,12 +144,13 @@ def _running_row(lead: str, task: str, started: datetime, now: datetime, tree: P
 
 
 def _session_rows(sources: board_sources.Sources, row_of, fix_counts: dict[str, int], by_name: dict, now: datetime,
-                  trees: Path, account: str, sessions: dict[str, int] | None = None) -> tuple[list[list[str]], set[str]]:
+                  trees: Path, account: str, sessions: dict[str, int] | None = None,
+                  remote: dict | None = None) -> tuple[list[list[str]], set[str]]:
     """RUNNING rows from the board's worker sources, and the names they cover."""
     running: list[list[str]] = []
     seen_running: set[str] = set()
     try:
-        session_logs.retain_activity(account, [trees / w.tree for w in sources.workers if w.tree])
+        session_logs.retain_activity(account, [trees / w.tree for w in sources.workers if w.tree and w.name not in (remote or {})])
     except (ValueError, OSError):
         pass
     for w in source_workers(sources):
@@ -157,8 +158,11 @@ def _session_rows(sources: board_sources.Sources, row_of, fix_counts: dict[str, 
         t = by_name.get(w.task.strip().casefold()) or row_of(w.task)[0]
         key = (t.name.strip() if t and t.name.strip() else w.task.strip()).casefold()
         is_looping = fix_counts.get(key, 0) >= 2 or bool(t and t.stage.strip().casefold() == "looping")
-        running.append(_running_row(_worker_lead(w, is_looping, (sessions or {}).get(w.name)), _task_stage(t, w.task), w.started, now,
-                                    trees / w.tree if w.tree else None, account))
+        task = _task_stage(t, w.task)
+        if link := latest_thread_link({"attempt": (remote or {}).get(w.name)}):
+            task += f' · <a {href(link)}>T3 thread</a>'
+        running.append(_running_row(_worker_lead(w, is_looping, (sessions or {}).get(w.name)), task, w.started, now,
+                                    trees / w.tree if w.tree and w.name not in (remote or {}) else None, account))
     return running, seen_running
 
 
@@ -192,6 +196,12 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
         title = item.title if item and item.title else seg.issue_key
         num = seg.issue_key.rsplit("#", 1)[1] if "#" in seg.issue_key else seg.issue_key
         task_link = f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a> {escape(title)}'
+        resume = db.resume(seg.issue_key)
+        runs = resume.get("runs", {}) if isinstance(resume, dict) else {}
+        record = runs.get(f"{seg.stage}-{seg.attempt}", {}) if isinstance(runs, dict) else {}
+        remote = isinstance(record, dict) and record.get("launcher") == "t3"
+        if link := latest_thread_link({"attempt": record}):
+            task_link += f' · <a {href(link)}>T3 thread</a>'
         if seg.ended_at is None:
             identity = segment_worker_key(seg)
             if identity in seen_running:
@@ -204,7 +214,7 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
             stage_chip = f' <span class="chip stage">{escape(seg.stage)}</span>' if seg.stage else ""
             tree = trees / runner
             running.append(_running_row(_worker_lead(w_obj, is_looping, getattr(seg, "id", None)), f"{task_link}{stage_chip}", started_dt, now,
-                                        tree if tree.exists() else None, account))
+                                        tree if tree.exists() and not remote else None, account))
         else:
             ended_dt = parse_stamp(seg.ended_at, now)
             if ended_dt.date() != now.date():
@@ -240,7 +250,14 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
     fix_counts, ended, need = _tracker_ends(tracker_text, row_of)
     sessions = {s.runner: s.id for s in db.segments() if getattr(s, "runner", "") and s.ended_at is None
                 and type(getattr(s, "id", None)) is int and s.id > 0} if db is not None else {}
-    running, seen_running = _session_rows(sources, row_of, fix_counts, by_name, now, trees, claude_account, sessions)
+    remote = {}
+    for seg in db.segments() if db is not None else ():
+        data = db.resume(seg.issue_key)
+        runs = data.get("runs", {}) if isinstance(data, dict) else {}
+        record = runs.get(f"{seg.stage}-{seg.attempt}", {}) if isinstance(runs, dict) else {}
+        if isinstance(record, dict) and record.get("launcher") == "t3" and seg.ended_at is None:
+            remote[seg.runner] = record
+    running, seen_running = _session_rows(sources, row_of, fix_counts, by_name, now, trees, claude_account, sessions, remote)
     store_shots = 0
     if db is not None:
         store_running, store_ended, store_need, store_shots = _store_rows(db, seen_running, now, trees, claude_account)
@@ -282,7 +299,11 @@ def render_session(db: PageData, segment_id: int, trees: Path, *, config_dir: Pa
     record = runs.get(f"{seg.stage}-{seg.attempt}") if isinstance(runs, dict) else None
     page = None
     why = ""
-    if seg.runtime != "claude":
+    thread = latest_thread_link({"attempt": record})
+    remote = isinstance(record, dict) and record.get("launcher") == "t3"
+    if remote:
+        why = "Read this worker's conversation in its T3 thread."
+    elif seg.runtime != "claude":
         why = "Transcript not available for this runtime yet."
     elif config_dir is None:
         why = "Transcript unavailable: the account used for this attempt could not be verified."
@@ -406,7 +427,8 @@ def render_session(db: PageData, segment_id: int, trees: Path, *, config_dir: Pa
             f'{HEAD}{CSS}{css}</head><body><main>{tab_bar("Workers", 0, parent=True)}'
             f'<header class="top"><div><span class="eyebrow"><a href="/workers">Workers</a> · '
             f'{escape(seg.runtime or "unknown runtime")} · attempt {seg.attempt}</span>'
-            f'<h1>{escape(title)}</h1><span class="meta" id="session-state">{state}</span></div></header>'
+            f'<h1>{escape(title)}</h1><span class="meta" id="session-state">{state}</span>'
+            + (f' · <a {href(thread)}>T3 thread</a>' if thread else '') + '</div></header>'
             f'<section><div id="session-live" data-ended="{str(bool(seg.ended_at)).lower()}" data-pending="{str(pending).lower()}">'
             f'<h2>Transcript</h2><div id="session-notice">{reset}{warning}</div><div class="card" id="session-events">{events}</div>'
             f'<div id="session-pagination">{next_link}</div><h2>Operator messages</h2>'

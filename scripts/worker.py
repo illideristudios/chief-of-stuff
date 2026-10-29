@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import subprocess
 import time
 import uuid
 from datetime import datetime
@@ -152,8 +153,10 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                 raise RuntimeError("existing worker start is unverified; preserving its evidence")
             return None
         record = json.loads(started.read_text())
-        if (run_dir / "thread.json").is_file():
-            record.update(_thread_fields(run_dir), runtime="claude", launcher="t3")
+        if (run_dir / "t3.json").is_file() or (run_dir / "thread.json").is_file():
+            record.update(runtime="claude", launcher="t3")
+            if (run_dir / "thread.json").is_file():
+                record.update(_thread_fields(run_dir))
             heads = json.loads((run_dir / "branch_heads.json").read_text()) if (run_dir / "branch_heads.json").is_file() else None
             if isinstance(heads, dict) and all(isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}", v) for v in heads.values()):
                 record["branch_heads"] = heads
@@ -174,6 +177,9 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
             or not Path(record["tree"]).resolve().is_relative_to(trees.resolve())
             or run_dir.resolve().is_relative_to(Path(record["tree"]).resolve())):
         raise RuntimeError("existing worker identity is incomplete; preserving its evidence")
+    if record.get("launcher") == "t3":
+        # A dead poller says nothing about the remote worker. Keep its reservation and adopt its evidence.
+        return record
     try:
         _exit_code(run_dir)
     except (OSError, ValueError, KeyError, TypeError):
@@ -218,6 +224,8 @@ def _model(store: Any, key: str, stage: str, data: dict, actor: Any,
         store.add_log(key, f"skipped {', '.join(capped)}: account near its configured limit", at)
     if not usable:
         fallback = ModelEntry("claude", actor.model, actor.effort or None)
+        if not launchable(fallback.runtime):
+            raise RuntimeError("no rotation entry is launchable here")
         if capped or not available(fallback):
             raise RuntimeError("no rotation entry available below its account limit")
         usable = (fallback,)
@@ -297,6 +305,13 @@ def _clear_tree(root: Path, tree: Path, store: Any, key: str, at: str) -> None:
         session = prior.get("session_id") if isinstance(prior, dict) else None
         if prior.get("cwd") != str(tree) or not isinstance(session, str) or not session:
             continue
+        if (command.parent / "t3.json").exists():
+            try:
+                state = t3_adapter.observe(command.parent)
+            except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+                raise RuntimeError(f"T3 run {command.parent.name} is unverified; preserving its tree") from exc
+            if t3_adapter.outcome(state) is None:
+                raise RuntimeError(f"T3 run {command.parent.name} is still live in {tree.name}")
         live = process_status.carriers(session)
         if not live:
             continue
@@ -434,6 +449,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     protects: list[bool] = []  # the forge is asked once, and only when a non-Claude entry is considered
 
     def launchable(runtime: str) -> bool:
+        if launcher == "t3":
+            return t3_adapter.available(runtime) and _guarded(forge, issue_key)
         if runtime == "claude":
             return True
         if not host_adapter.available(runtime):
@@ -452,10 +469,17 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         return capacity[entry.runtime]
 
     workflow = policies.workflow_for(data.get("issue_type") or getattr(row, "issue_type", None)).name
+    rotation = loaded.models.get(TASK_CLASS.get(stage, stage), ())
+    if launcher == "t3" and rotation and not any(entry.runtime in t3_adapter.PROVIDERS for entry in rotation):
+        raise RuntimeError("T3 has no engine channel for any runtime in this rotation")
     chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
                     how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
                     attempt=attempt, available=available, workflow=workflow)
     try:
+        if launcher == "t3" and chosen.runtime not in t3_adapter.PROVIDERS:
+            raise RuntimeError(f"T3 has no engine channel for {chosen.runtime}; refusing a local fallback")
+        if launcher == "t3" and claude_as_profile:
+            raise RuntimeError("T3 cannot map claude_as_profile to a provider instance; refusing the default account")
         request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                           cwd=str(tree), worker=True, agent=agent,
                           plugin_dirs=plugin_dirs)
@@ -473,6 +497,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             host = {"runtime": chosen.runtime, "branch_heads": host_adapter.branch_heads(tree, forge.protected_branches())}
             if via_t3:
                 host["launcher"] = "t3"
+                (run_dir / "branch_heads.json").write_text(json.dumps(host["branch_heads"]))
                 runner = t3_adapter.start(request, run_dir, env=env)
             else:
                 runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
@@ -484,8 +509,17 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                 time.sleep(0.01)
             pid = json.loads((run_dir / "started.json").read_text())["pid"]
             if via_t3:  # the thread id is the worker's identity under T3, beside the session id (§13)
-                host.update(_thread(run_dir, runner))
-                (run_dir / "branch_heads.json").write_text(json.dumps(host["branch_heads"]))  # adoption has no `host`
+                if (run_dir / "thread.json").exists():
+                    host.update(_thread_fields(run_dir))
+                record = {"pid": pid, "session_id": session_id, "identity": "t3",
+                          "runner_pid": runner.pid, "runner_identity": "t3", "run_dir": str(run_dir),
+                          "started_at": clock().isoformat(), "tree": str(tree), "branch": branch,
+                          "starting_head": starting_head, **host}
+                if stage == "review":
+                    record["reviewed_head"] = request_head.head
+                _save_run(store, issue_key, stage, attempt, record, model=str(chosen))
+                _runners[str(run_dir)] = runner
+                return chosen.model, chosen.effort or ""
             while True:
                 identity = process_status.identity(pid, session_id, host=True)
                 if identity is None:
@@ -507,6 +541,14 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                 record["reviewed_head"] = request_head.head
             _save_run(store, issue_key, stage, attempt, record, model=str(chosen))
         except Exception as start_error:
+            if via_t3:
+                # A remote start may have succeeded. Preserve its files and tree even if the engine's
+                # own verification or store write failed; the next pass adopts it rather than relaunching.
+                try:
+                    t3_adapter.cancel(runner, run_dir)
+                except Exception as cancel_error:
+                    store.add_log(issue_key, f"T3 start unverified; preserved for recovery: {cancel_error}", clock().isoformat())
+                raise start_error
             try:
                 claude_adapter.cancel(runner)
             except Exception as cancel_error:
@@ -538,23 +580,10 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         raise StartFailed(chosen, exc) from exc
 
 
-THREAD_WAIT_S = 60.0  # project registration and thread start are two CLI calls to the running T3
-
-
 def _thread_fields(run_dir: Path) -> dict:
     """Only the thread's id and link from the runner's `thread.json`, as strings: nothing else it holds is taken."""
     found = json.loads((run_dir / "thread.json").read_text())
     return {key: str(found[key]) for key in ("thread_id", "thread_link")}
-
-
-def _thread(run_dir: Path, runner: Any) -> dict:
-    """The T3 thread the runner started, within THREAD_WAIT_S."""
-    deadline = time.monotonic() + THREAD_WAIT_S
-    while not (run_dir / "thread.json").exists():
-        if runner.poll() is not None or time.monotonic() >= deadline:
-            raise RuntimeError("could not verify worker start: T3 started no thread")
-        time.sleep(0.05)
-    return _thread_fields(run_dir)
 
 
 NEVER_WRITTEN = "it was never written to the worker session"
@@ -696,6 +725,17 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 _save_run(store, key, segment.stage, segment.attempt, record)
                 data = _resume(store, key)
                 record = data["runs"][f"{segment.stage}-{segment.attempt}"]
+            if record.get("launcher") == "t3":
+                try:
+                    remote = t3_adapter.refresh(run_dir)
+                except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+                    store.add_log(key, f"T3 state unverified; preserving worker: {exc}", now.isoformat())
+                    continue
+                if (run_dir / "thread.json").is_file():
+                    record.update(_thread_fields(run_dir))
+                    _save_run(store, key, segment.stage, segment.attempt, record)
+                if t3_adapter.outcome(remote) is None:
+                    continue
             runner = _runners.get(str(run_dir))
             if runner is not None and runner.poll() is not None:
                 _runners.pop(str(run_dir))
@@ -722,6 +762,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             via_t3 = record.get("launcher") == "t3"  # a thread's reply is plain text, never a Claude envelope
             if runtime == "claude" and not via_t3:
                 reply = claude_adapter.classify(code, stdout, stderr)
+            elif via_t3:
+                reply = t3_adapter.classify(code, stdout, stderr)
             else:
                 reply = host_adapter.classify(runtime, code, stdout, stderr)
                 host_adapter.cleanup(record)

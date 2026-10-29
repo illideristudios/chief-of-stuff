@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -40,6 +41,24 @@ def href(url: str) -> str:
         return 'href="#"'
     safe = "#" if scheme in ("javascript", "data", "vbscript") else url
     return f'href="{esc(safe)}"'
+
+
+def latest_thread_link(runs: dict) -> str:
+    """The latest recorded T3 attempt, independent of the JSON object's key order."""
+    candidates = []
+    for index, record in enumerate(runs.values() if isinstance(runs, dict) else ()):
+        if not isinstance(record, dict):
+            continue
+        link = record.get("thread_link", "")
+        if not isinstance(link, str) or not re.fullmatch(r't3code://threads/[^/\s?#"<>]+/[^/\s?#"<>]+', link):
+            continue
+        try:
+            started = datetime.fromisoformat(record.get("started_at", ""))
+            stamp = started.timestamp() if started.tzinfo else float("-inf")
+        except (TypeError, ValueError, OverflowError, OSError):
+            stamp = float("-inf")
+        candidates.append((stamp, index, link))
+    return max(candidates)[2] if candidates else ""
 
 
 def kind(name: str) -> str:

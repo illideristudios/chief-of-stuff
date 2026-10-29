@@ -364,6 +364,85 @@ class WorkerTest(unittest.TestCase):
             self.t3_launched(protected=False)
         self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
 
+    def test_t3_selection_never_silently_launches_an_unsupported_runtime_locally(self):
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.object(worker, "_model", return_value=worker.ModelEntry("codex", "gpt-6.1-sol")), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "start") as local:
+            with self.assertRaisesRegex(RuntimeError, "T3.*codex"):
+                worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                              policies=self.p, forge=self.forge, clock=lambda: NOW, launcher="t3")
+        local.assert_not_called()
+
+    def test_t3_does_not_ignore_a_configured_account_profile(self):
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.object(worker, "_model", return_value=worker.ModelEntry("claude", "sonnet")), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.t3_adapter, "start") as start:
+            with self.assertRaisesRegex(RuntimeError, "provider instance"):
+                worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                              policies=self.p, forge=self.forge, clock=lambda: NOW, launcher="t3", claude_as_profile="alternate")
+        start.assert_not_called()
+
+    def test_a_t3_rotation_with_only_unsupported_hosts_does_not_invent_a_claude_entry(self):
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high"]\n')
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.t3_adapter, "available", side_effect=lambda runtime: runtime == "claude"), \
+             mock.patch.object(worker, "below_limit", return_value=True), \
+             mock.patch.object(worker.t3_adapter, "start") as start:
+            with self.assertRaisesRegex(RuntimeError, "T3.*rotation"):
+                worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                              policies=self.p, forge=self.forge, clock=lambda: NOW, launcher="t3")
+        start.assert_not_called()
+
+    def test_dead_t3_runner_is_adopted_without_starting_a_second_worker(self):
+        self.t3_launched()
+        data = self.db.resume(KEY)
+        run = Path(data["runs"]["implement-1"]["run_dir"])
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker.t3_adapter, "observe", return_value={"status": "running"}):
+            adopted = worker._existing_run(data, run, "implement", 1, self.trees, lambda: NOW)
+        self.assertIsNotNone(adopted)
+
+    def test_t3_remote_liveness_wins_over_runner_exit_and_defers_teardown(self):
+        self.t3_launched()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run / "exit.json").write_text('{"exit_code": -15}')
+        with mock.patch.object(worker.t3_adapter, "refresh", return_value={"status": "running"}), \
+             mock.patch.object(worker.t3_adapter, "observe", return_value=worker.t3_adapter.Evidence(alive=False, launcher="t3")), \
+             mock.patch.object(worker, "teardown_once") as teardown:
+            worker.collect(self.db, self.root, lambda: NOW)
+        teardown.assert_not_called()
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+
+    def test_incomplete_terminal_t3_evidence_preserves_the_attempt_before_refresh(self):
+        self.t3_launched()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run / "t3.json").write_text(json.dumps({"cli": "/t3", "home": ""}))
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        shown = json.dumps({"thread": {"threadId": "mcp:t-1", "status": "completed"}})
+        with mock.patch.object(worker.t3_adapter, "_t3", return_value=subprocess.CompletedProcess([], 0, shown, "")), \
+             mock.patch.object(worker.t3_adapter, "refresh") as refresh, \
+             mock.patch.object(worker, "teardown_once") as teardown:
+            worker.collect(self.db, self.root, lambda: NOW)
+        refresh.assert_not_called()
+        teardown.assert_not_called()
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+
+    def test_clearing_a_tree_cannot_kill_a_runner_and_abandon_its_remote_thread(self):
+        run = self.root / ".chief-of-stuff/runs/old"
+        run.mkdir(parents=True)
+        (run / "command.json").write_text(json.dumps({"cwd": str(self.tree), "session_id": "old"}))
+        (run / "t3.json").write_text("{}")
+        with mock.patch.object(worker.t3_adapter, "observe", return_value={"status": "running"}), \
+             mock.patch.object(worker.process_status, "carriers", return_value=[]), \
+             mock.patch.object(worker.process_status, "stop_session") as stop:
+            with self.assertRaisesRegex(RuntimeError, "T3.*live"):
+                worker._clear_tree(self.root, self.tree, self.db, KEY, NOW.isoformat())
+        stop.assert_not_called()
+
     def test_a_t3_run_is_classified_as_a_host_without_a_claude_envelope_and_checked_for_outside_merges(self):
         self.t3_launched()
         run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
@@ -372,6 +451,7 @@ class WorkerTest(unittest.TestCase):
         self.report(run)
         (run / "exit.json").write_text(json.dumps({"exit_code": 0}))
         with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker.t3_adapter, "refresh", return_value={"status": "completed"}), \
              mock.patch.object(worker.t3_adapter, "observe", return_value=worker.t3_adapter.Evidence(alive=False, launcher="t3")), \
              mock.patch.object(worker.host_adapter, "moved_outside_engine", return_value="trunk moved") as moved:
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))

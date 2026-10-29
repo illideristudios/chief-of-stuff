@@ -8,7 +8,10 @@ import tempfile
 import time
 import unittest
 import uuid
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import guard_binding
@@ -76,6 +79,18 @@ class T3AdapterTest(unittest.TestCase):
     def test_a_thread_link_is_the_deep_link_form(self):
         self.assertEqual(t3_adapter.thread_link("env-1", "mcp:abc"), "t3code://threads/env-1/mcp:abc")
 
+    def test_the_adapter_contract_classifies_plain_replies_and_cancels_by_process(self):
+        from model_port import Reply
+        self.assertIsInstance(t3_adapter.classify(0, "plain T3 reply", ""), Reply)
+        (self.dir / "t3.json").write_text("{}")
+        (self.dir / "thread.json").write_text('{"thread_id":"t1","thread_run_id":"r1"}')
+        process = mock.Mock(t3_run_dir=self.dir)
+        with mock.patch.object(t3_adapter, "_mcp", return_value={}), \
+             mock.patch.object(t3_adapter, "observe", return_value={"status": "interrupted"}), \
+             mock.patch.object(t3_adapter.claude_adapter, "cancel") as stop:
+            t3_adapter.cancel(process)
+        stop.assert_called_once_with(process)
+
     def test_a_thread_ends_when_it_is_idle_and_has_nothing_pending(self):
         running = {"status": "running", "activeRunId": "r", "pendingRequestCount": 0}
         self.assertIsNone(t3_adapter.outcome(running))
@@ -83,6 +98,221 @@ class T3AdapterTest(unittest.TestCase):
         self.assertEqual(t3_adapter.outcome({**running, "status": "error", "activeRunId": None}), 1)
         # A thread waiting on a request is waiting, not finished.
         self.assertIsNone(t3_adapter.outcome({"status": "completed", "activeRunId": None, "pendingRequestCount": 1}))
+
+    def test_incomplete_and_nonterminal_states_never_count_as_success(self):
+        for status in (None, "queued", "preparing", "waiting", "new-state"):
+            self.assertIsNone(t3_adapter.outcome({"status": status}), status)
+        self.assertEqual(t3_adapter.outcome({"status": "cancelled"}), 1)
+
+    def test_links_encode_each_path_component(self):
+        self.assertEqual(t3_adapter.thread_link("env/x?#", "mcp:t/1?x#y"),
+                         "t3code://threads/env%2Fx%3F%23/mcp:t%2F1%3Fx%23y")
+
+    def test_hook_paths_are_shell_arguments_even_with_command_substitution_characters(self):
+        import shlex
+        guard = self.dir / 'guard$(touch injected)"'
+        (guard / "hooks").mkdir(parents=True)
+        (guard / "hooks/hooks.json").write_text((guard_binding.guard_plugin_dir() / "hooks/hooks.json").read_text())
+        hooks = t3_adapter._hooks(guard, BINDING)
+        command = hooks["Stop"][0]["hooks"][0]["command"]
+        args = shlex.split(command)
+        self.assertIn(str(guard / "../scripts/worker_guard.py"), args)
+        # Parse and execute with a harmless Python stand-in that only prints argv.
+        stop = command[command.index(shlex.quote(sys.executable)):]
+        marker = self.dir / "injected"
+        subprocess.run(["/bin/zsh", "-fc", stop], cwd=self.dir, capture_output=True)
+        self.assertFalse(marker.exists())
+
+    def test_missing_environment_does_not_poison_the_worker_tree(self):
+        tree, run = self.git_tree(), self.dir / "run"
+        run.mkdir()
+        request = Request("x", cwd=str(tree), plugin_dirs=(str(guard_binding.guard_plugin_dir()),))
+        with self.assertRaises(ShellError):
+            t3_adapter.start(request, run, env=BINDING, cli=str(self.fake_cli()), home=self.dir)
+        self.assertFalse((tree / ".mcp.json").exists())
+        self.assertFalse((tree / ".claude").exists())
+
+    def test_owned_channel_can_be_rebound_but_modified_files_are_refused(self):
+        tree = self.git_tree()
+        kwargs = dict(agent="", guard=guard_binding.guard_plugin_dir(), state=self.dir)
+        t3_adapter.write_channel(tree, BINDING, **kwargs)
+        rebound = {**BINDING, "CHIEF_SESSION_ID": "next"}
+        t3_adapter.write_channel(tree, rebound, **kwargs)
+        self.assertEqual(json.loads((tree / ".mcp.json").read_text())["mcpServers"]["engine"]["env"], rebound)
+        (tree / ".claude/settings.local.json").write_text("{}")
+        with self.assertRaises(ShellError):
+            t3_adapter.write_channel(tree, BINDING, **kwargs)
+
+    def test_swapping_the_claude_directory_during_write_cannot_escape(self):
+        tree = self.git_tree()
+        outside = self.dir / "outside"
+        outside.mkdir()
+        original = Path.mkdir
+        def swap(path, *args, **kwargs):
+            result = original(path, *args, **kwargs)
+            if path == tree / ".claude":
+                path.rename(tree / ".moved")
+                path.symlink_to(outside)
+            return result
+        with mock.patch.object(Path, "mkdir", swap):
+            with self.assertRaises((ShellError, OSError)):
+                t3_adapter.write_channel(tree, BINDING, agent="", guard=guard_binding.guard_plugin_dir())
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_start_registers_the_exact_tree_even_when_a_parent_project_matches(self):
+        spec = {"tree": "/parent/worker", "model": "sonnet", "provider": "claudeAgent", "title": "x", "prompt": "x"}
+        def cli(spec, *args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, '{"threadId":"t1"}', "")
+        with mock.patch.object(t3_adapter, "_t3", side_effect=cli) as call:
+            self.assertEqual(t3_adapter._start_thread(spec), "t1")
+        self.assertEqual(call.call_args_list[0].args[1:3], ("project", "add"))
+        self.assertFalse(any("--force" in c.args for c in call.call_args_list))
+
+    def test_cancel_interrupts_the_remote_thread_before_stopping_its_runner(self):
+        run = self.dir / "run"
+        run.mkdir()
+        (run / "t3.json").write_text('{"home":"/t3"}')
+        (run / "thread.json").write_text('{"thread_id":"t1","thread_run_id":"r1"}')
+        order = []
+        with mock.patch.object(t3_adapter, "_mcp", side_effect=lambda *a: order.append(a[1]) or {}) as mcp, \
+             mock.patch.object(t3_adapter, "observe", return_value={"status": "interrupted"}), \
+             mock.patch.object(t3_adapter.claude_adapter, "cancel", side_effect=lambda p: order.append("runner")):
+            t3_adapter.cancel(mock.Mock(), run)
+        self.assertEqual(order, ["t3_thread_interrupt", "runner"])
+        self.assertEqual(mcp.call_args.args[2], {"threadId": "t1", "runId": "r1"})
+
+    def test_failed_remote_cancel_keeps_the_runner_and_evidence(self):
+        run = self.dir / "run"
+        run.mkdir()
+        (run / "t3.json").write_text('{"home":"/t3"}')
+        (run / "thread.json").write_text('{"thread_id":"t1","thread_run_id":"r1"}')
+        with mock.patch.object(t3_adapter, "_mcp", side_effect=RuntimeError("offline")), \
+             mock.patch.object(t3_adapter.claude_adapter, "cancel") as stop:
+            with self.assertRaises(RuntimeError):
+                t3_adapter.cancel(mock.Mock(), run)
+        stop.assert_not_called()
+
+    def test_an_unconfirmed_run_id_cannot_interrupt_a_later_run_in_the_thread(self):
+        (self.dir / "t3.json").write_text("{}")
+        (self.dir / "thread.json").write_text('{"thread_id":"t1"}')
+        with mock.patch.object(t3_adapter, "observe", return_value={"status": "running"}), \
+             mock.patch.object(t3_adapter, "_mcp") as interrupt, \
+             mock.patch.object(t3_adapter.claude_adapter, "cancel") as stop:
+            with self.assertRaisesRegex(RuntimeError, "run id is unconfirmed"):
+                t3_adapter.cancel(mock.Mock(), self.dir)
+        interrupt.assert_not_called()
+        stop.assert_not_called()
+
+    def test_recovered_remote_completion_replaces_a_pollers_failure_exit(self):
+        (self.dir / "exit.json").write_text('{"exit_code": 1}')
+        with mock.patch.object(t3_adapter, "observe", return_value={"status": "completed"}):
+            t3_adapter.refresh(self.dir)
+        self.assertEqual(json.loads((self.dir / "exit.json").read_text())["exit_code"], 0)
+
+    def test_owned_channels_can_be_recreated_after_both_files_were_removed(self):
+        tree = self.git_tree()
+        kwargs = dict(agent="", guard=guard_binding.guard_plugin_dir(), state=self.dir)
+        t3_adapter.write_channel(tree, BINDING, **kwargs)
+        (tree / ".mcp.json").unlink()
+        (tree / ".claude/settings.local.json").unlink()
+        (tree / ".claude").rmdir()
+        t3_adapter.write_channel(tree, BINDING, **kwargs)
+        self.assertTrue((tree / ".mcp.json").is_file())
+
+    def test_poll_timeout_bad_json_and_nonzero_results_do_not_end_a_thread(self):
+        run = self.dir / "run"
+        run.mkdir()
+        (run / "t3.json").write_text(json.dumps({"environment": "env", "poll_s": 0}))
+        replies = [subprocess.TimeoutExpired("t3", 120),
+                   subprocess.CompletedProcess([], 1, '{"thread":{"status":"completed"}}', "offline"),
+                   subprocess.CompletedProcess([], 0, '{}', ""),
+                   subprocess.CompletedProcess([], 0, '{"thread":{"status":"completed"}}', "")]
+        with mock.patch.object(t3_adapter, "_start_thread", return_value="t1"), \
+             mock.patch.object(t3_adapter, "_t3", side_effect=replies):
+            self.assertEqual(t3_adapter.run("s", run / "t3.json"), 0)
+
+    def test_engine_facts_use_remote_liveness_even_after_the_runner_exits(self):
+        import engine_facts
+        (self.dir / "exit.json").write_text('{"exit_code": -15}')
+        record = {"launcher": "t3", "run_dir": str(self.dir), "pid": 1}
+        with mock.patch.object(t3_adapter, "observe", return_value=t3_adapter.Evidence(alive=True, launcher="t3")), \
+             mock.patch.object(engine_facts.process_status, "identity") as pid:
+            self.assertTrue(engine_facts._alive(record))
+        pid.assert_not_called()
+
+    def test_ambiguous_start_is_recovered_by_unique_title_without_another_start(self):
+        (self.dir / "t3.json").write_text(json.dumps({"title": "issue session-uuid", "tree": "/tree", "environment": "env", "project_id": "p1"}))
+        (self.dir / "launching.json").write_text("{}")
+        listed = {"threads": [{"threadId": "t1", "title": "issue session-uuid"}], "nextCursor": None}
+        with mock.patch.object(t3_adapter, "_mcp", return_value=listed) as mcp, \
+             mock.patch.object(t3_adapter, "_t3", return_value=subprocess.CompletedProcess([], 0, '{"thread":{"status":"running"}}', "")):
+            self.assertEqual(t3_adapter.observe(self.dir)["status"], "running")
+        self.assertEqual(json.loads((self.dir / "thread.json").read_text())["thread_id"], "t1")
+        self.assertEqual(mcp.call_args.args[1], "t3_thread_list")
+
+    def test_recovered_start_retains_the_stall_watchers_structured_evidence(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        (self.dir / "t3.json").write_text(json.dumps({"title": "unique-session", "tree": "/tree",
+                                                    "environment": "env", "project_id": "p1"}))
+        listed = {"threads": [{"threadId": "t1", "title": "unique-session"}], "nextCursor": None}
+        shown = {"thread": {"threadId": "t1", "status": "running", "activeRunId": "r1",
+                            "updatedAt": now.isoformat(), "pendingRequestCount": 1, "itemCount": 12}}
+        with mock.patch.object(t3_adapter, "_mcp", return_value=listed), \
+             mock.patch.object(t3_adapter, "_t3", return_value=subprocess.CompletedProcess([], 0, json.dumps(shown), "")):
+            evidence = t3_adapter.observe({"run_dir": str(self.dir)})
+        self.assertEqual((evidence.alive, evidence.last_activity_at, evidence.pending_requests), (True, now, 1))
+        self.assertFalse(evidence.error)
+        self.assertEqual(json.loads((self.dir / "thread.json").read_text())["thread_id"], "t1")
+
+    def test_t3_not_running_is_a_known_failed_start_not_a_permanent_unknown_thread(self):
+        spec = {"tree": "/tree", "title": "unique", "model": "m", "provider": "claudeAgent", "prompt": "x"}
+        (self.dir / "t3.json").write_text(json.dumps(spec))
+        with mock.patch.object(t3_adapter, "_t3", return_value=subprocess.CompletedProcess([], 1, "", "T3 is not running")):
+            self.assertEqual(t3_adapter.run("s", self.dir / "t3.json"), 1)
+            self.assertEqual(t3_adapter.observe(self.dir)["status"], "failed")
+            evidence = t3_adapter.observe({"run_dir": str(self.dir)})
+            self.assertIs(evidence.alive, False)
+            self.assertFalse(evidence.error)
+        self.assertFalse((self.dir / "thread.json").exists())
+
+    def test_mcp_control_uses_the_pinned_clients_result_and_revokes_its_session(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if "id" not in request:
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                method = request["method"]
+                if method == "initialize":
+                    result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                              "serverInfo": {"name": "fake T3", "version": "1"}}
+                elif method == "tools/list":
+                    result = {"tools": [{"name": "t3_project_list", "inputSchema": {"type": "object"}}]}
+                else:
+                    result = {"content": [], "structuredContent": {"projects": []}, "isError": False}
+                body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        (self.dir / "userdata").mkdir()
+        (self.dir / "userdata/server-runtime.json").write_text(json.dumps({"origin": f"http://127.0.0.1:{server.server_port}"}))
+        issued = subprocess.CompletedProcess([], 0, '{"token":"test-token","sessionId":"test-session"}', "")
+        with mock.patch.object(t3_adapter, "_t3", return_value=issued) as cli:
+            self.assertEqual(t3_adapter._mcp({"home": str(self.dir)}, "t3_project_list", {}), {"projects": []})
+        self.assertEqual(cli.call_args.args[1:], ("auth", "session", "revoke", "test-session"))
 
     def test_an_unrecognized_or_queued_status_is_not_proof_a_thread_ended(self):
         for status in ("queued", "unrecognized", None):

@@ -48,6 +48,12 @@ def _alive(record: dict | None) -> bool | None:
     if record is None:
         return None
     run_dir = record.get("run_dir")
+    if record.get("launcher") == "t3":
+        try:
+            evidence = t3_adapter.observe(record)
+            return True if evidence.alive is True and not evidence.error else None
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+            return None
     if isinstance(run_dir, str) and run_dir and (Path(run_dir) / "exit.json").exists():
         return None  # the adapter finished: `worker.collect` classifies its exit, not a liveness guess
     pid, session, identity = record.get("pid"), record.get("session_id"), record.get("identity")
