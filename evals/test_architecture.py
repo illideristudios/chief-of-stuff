@@ -47,7 +47,7 @@ DRAWS_NOTHING = (
     "decision_escalation",
     "performance",
     "performance_report",
-    "limits", "limits_history", "limits_probe", "limits_cli", "session_logs",
+    "limits", "limits_history", "limits_probe", "limits_cli", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
     "supervisor", "release_selection", "engine_intent",
     "startup",
     "guard_commands",  # Entities: pure shell command gate judgements.
@@ -224,7 +224,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "fragment", "page_common", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
         "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge", "private_state",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
-        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history", "session_logs",
+        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
         # §4: store's migrations/ — path keys, not top-level stems.
         "migrations/env",
         "migrations/versions/0001_initial",

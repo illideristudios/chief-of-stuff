@@ -21,6 +21,7 @@ from decision_actions import current_rows, state_of
 import gantt
 from clock import done_clock, parse_stamp as _parse_store_dt
 from fragment import esc, issue_href
+from backlog_ref import issue_ref
 from task_forge import EXHAUSTED_CHIP, retry_exhaustion
 from tracker import WORKFLOW, change_keys, issue_key, launch_row, launcher
 # The Log line grammar and the moves read with it live in tracker_log.py, which draws nothing. `moves` is imported
@@ -59,8 +60,12 @@ def _ahead(stages: list[str], start: datetime, end: datetime, title: str = "") -
 
 def _refs(tasks, log: list[Move], home):
     """Look up a row's issue or change, bridging change-only passes only through a unique issue."""
+    def task_key(t):
+        raw = t.issue.strip()
+        return issue_key(raw, home) if issue_ref(raw, home, any_host=True) or (raw.startswith("#") and raw[1:].isdecimal()) else raw
+
     named = {text: change_keys(text, home) for text in [*(t.item for t in tasks), *(m.name for m in log)]}
-    pairs = list(named.values()) + [(issue_key(t.issue, home), named[t.item][1])
+    pairs = list(named.values()) + [(task_key(t), named[t.item][1])
                                    for t in tasks if t.issue.strip() and not t.workflow]
     issues = {}
     for issue, change in pairs:
@@ -70,7 +75,7 @@ def _refs(tasks, log: list[Move], home):
 
     def ref_of(task, text: str) -> str:
         if task and task.issue.strip() and not task.workflow:
-            return issue_key(task.issue, home)
+            return task_key(task)
         if task and not task.workflow:
             return ""
         issue, change = named[task.item if task else text]

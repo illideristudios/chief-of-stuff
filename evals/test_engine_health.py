@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -240,6 +241,7 @@ class EngineBoardAndTaskHealthTest(unittest.TestCase):
             },
             workers=(),
             errors={},
+            home=bs.backlog.GitHubBacklog("example/repo"),
         )
         bs._write(self.root / "pages" / bs.CACHE, self.sources)
 
@@ -321,6 +323,20 @@ class EngineBoardAndTaskHealthTest(unittest.TestCase):
         self.assertIn("NEEDS INPUT", task_html)
         self.assertIn('role="alert"', task_html)
         self.assertIn("engine not running (last pass Thu 02:27)", task_html)
+
+    def test_engine_and_stale_forge_warnings_coexist_with_cached_identity(self) -> None:
+        bs._write(self.root / "pages" / bs.CACHE,
+                  replace(self.sources, errors={"kanban": "forge offline", "merge requests": "forge offline"}))
+        ws.write_engine_status(self.root, started_at=NOW - timedelta(hours=1),
+                               last_pass_at=NOW - timedelta(minutes=10),
+                               last_attempt_at=NOW - timedelta(minutes=10), stopped_at=None, interval=60.0)
+        board_html, task_html = self._render_board_and_issue()
+        for html in (board_html, task_html):
+            self.assertIn("engine not running", html)
+            self.assertIn("kanban: stale — forge offline", html)
+            self.assertIn("merge requests: stale — forge offline", html)
+        self.assertIn("MERGED 13:45", task_html)
+        self.assertIn('/issues/github%3Aexample%2Frepo%2312/source', task_html)
 
     def test_cleanly_stopped_engine_names_stop_time_and_last_pass(self) -> None:
         last_pass = NOW - timedelta(minutes=12)

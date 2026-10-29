@@ -1883,11 +1883,12 @@ class FlowRefReviewTest(unittest.TestCase):
                 self.assertEqual(set(re.findall(r'class="gantt-ref"[^>]*>([^<]*)<', flow)), {"!51"})
 
     def test_issue_key_and_issue_url_flow_refs_still_link_to_the_issue_page(self) -> None:
-        for ref in ("group/project#7", "https://forge.example/group/project/-/issues/7",
-                    "https://github.com/group/project/issues/7"):
+        for ref, identity in (("group/project#7", "github%3Agroup%2Fproject%237"),
+                              ("https://forge.example/group/project/-/issues/7", "gitlab%3Aforge.example%2Fgroup%2Fproject%237"),
+                              ("https://github.com/group/project/issues/7", "github%3Agroup%2Fproject%237")):
             with self.subTest(ref=ref):
                 flow = self.flow(ref, "Build the parser")
-                self.assertEqual(set(re.findall(r'href="(/issues/[^"]*)"', flow)), {"/issues/7"})
+                self.assertEqual(set(re.findall(r'href="(/issues/[^"]*)"', flow)), {f"/issues/{identity}"})
 
     def test_forge_issue_url_flow_labels_show_only_the_issue_number(self) -> None:
         # #459: display is #N, independent of the full key used to merge passes.

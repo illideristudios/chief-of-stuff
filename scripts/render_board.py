@@ -27,7 +27,7 @@ from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 from task_forge import (EXHAUSTED_CHIP, current_tasks, drifts, effective_stage, epic_risk, forge_ends,  # noqa: E402
                         held_names, hold_began, hold_causes, looping, retry_exhaustion, tab_counts,
                         task_changes, went_held, worker_names)
-from backlog_ref import store_label  # noqa: E402
+from backlog_ref import route_identity, store_label  # noqa: E402
 from tracker import TRAILING_NUMBER, Task, change_keys, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, EngineStatus, daily_trackers, engine_health, looked_before,  # noqa: E402
                        read_config, read_engine_status, with_decision_deadlines, with_workspace_decision_deadlines)
@@ -166,27 +166,39 @@ def merged_today(sources: board_sources.Sources, now: datetime) -> list[board_so
                    and c.merged_at.astimezone(now.tzinfo).date() == now.date()), key=lambda c: c.merged_at, reverse=True)
 
 
+def ambiguous_issue_numbers(tasks: list[Task], home) -> set[int]:
+    """Bare refs without a home cannot select one of several same-number identities."""
+    identities: dict[int, set[str]] = {}
+    for task in tasks:
+        if task.workflow or (number := issue_number(task.issue)) is None:
+            continue
+        identity = route_identity(task.issue, home) or task.issue.strip()
+        identities.setdefault(number, set()).add(identity)
+    return {number for number, keys in identities.items() if len(keys) > 1}
+
+
 def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None = None,
                   sources: board_sources.Sources = board_sources.EMPTY, now: datetime | None = None,
                   held: dict[Task, str] | None = None, loops: set[Task] | frozenset[Task] = frozenset(),
-                  live_keys: frozenset[str] = frozenset(), live_tasks: set[Task] | frozenset[Task] = frozenset()) -> list[columns.Column]:
+                  live_keys: frozenset[str] = frozenset(), live_tasks: set[Task] | frozenset[Task] = frozenset(),
+                  ambiguous_numbers: set[int] | None = None) -> list[columns.Column]:
     """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
     a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
     held = hold_causes(tasks, kanban, sources, lanes, frozenset()) if held is None else held
     gates = {g for lane in lanes.values() for g in lane.gates}
+    ambiguous_numbers = ambiguous_issue_numbers(tasks, sources.home) if ambiguous_numbers is None else ambiguous_numbers
 
     def issue_url(ref: str, cell: str = "") -> str:
         known = sources.issues.get(ref)
         return known.url if known else cell.strip() if cell.strip().startswith(("https://", "http://")) else ""
 
     def page(cell: str, other: str) -> str:
-        """A card name's link: its task page when the issue ends in a number, as Flow rows link, else `other` (#194)."""
-        raw = cell.strip()
-        if ":" in raw and "#" in raw and not raw.startswith(("http://", "https://")):
-            return issue_href(raw)
-        m = TRAILING_NUMBER.search(raw)
-        return f"/issues/{int(m[1])}" if m else other
+        """Link verified identities to their task page; retain the original fallback otherwise."""
+        identity = route_identity(cell, sources.home)
+        if identity is not None and identity.isdecimal() and int(identity) in ambiguous_numbers:
+            return ""
+        return issue_href(identity) if identity is not None else other
 
     def change_href(c: board_sources.Change) -> str:
         """A change's own page: the task page of its own first named issue, or its forge link when it names
@@ -204,11 +216,13 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
 
     def card(task: Task, stage: str | None = None) -> columns.Card:
         changes = task_changes(task, sources)
-        url = issue_url(issue_key(task.issue, sources.home), task.issue)
+        url = (issue_url(issue_key(task.issue, sources.home), task.issue)
+               if route_identity(task.issue, sources.home) is not None
+               else task.issue.strip() if task.issue.strip().startswith(("https://", "http://")) else "")
         raw_issue = task.issue.strip()
         full_key = ":" in raw_issue and "#" in raw_issue and not raw_issue.startswith(("http://", "https://"))
         issue = store_label(raw_issue, sources.home) if full_key else (issue_key(task.issue, sources.home) if changes or url else raw_issue)
-        refs = ((issue, page(raw_issue if full_key else issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
+        refs = ((issue, page(raw_issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
         lane = lanes.get(task.lane.strip())
         finished = task.kind == "done" or (lane and lane.stages and stage == lane.stages[-1])
         marks = (change_marks(changes, queue, shared)
@@ -347,6 +361,9 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     `stage_log` is (day, tracker text) for the earlier days the Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
     `pending_refs` is decision_page.held_refs; `looked`, the look before the latest (workspace.looked_before), and
     `look_log` the earlier days needed for hold starts; `loop_log` the active tasks' older fix history."""
+    same_home = (sources.home is not None and cfg.backlog is not None and type(sources.home) is type(cfg.backlog)
+                 and board_sources.backlog.home_of(sources.home) == board_sources.backlog.home_of(cfg.backlog))
+    sources = board_sources.for_home(sources, cfg.backlog)
     cfg = with_decision_deadlines(cfg, tracker_text, tracker_day or now.date())
     sha = hashlib.sha256(tracker_text.encode()).hexdigest()
     tracker = parse_tracker(tracker_text)
@@ -388,12 +405,14 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     earlier = list(rows.items())
     loops = looping(tasks, [m for ms in moves.values() for m in ms], lanes or {}, sources.home, earlier) | store_loops
     live_keys = frozenset(s.issue_key for s in db.segments() if s.ended_at is None) if db is not None else frozenset()
-    build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops, live_keys, source_worker_tasks(sources, tasks))
+    known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
+    ambiguous_numbers = ambiguous_issue_numbers(known, sources.home)
+    build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops, live_keys,
+                               source_worker_tasks(sources, tasks), ambiguous_numbers)
     inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols, inline=inline, linked_inline=lambda text: markdown_inline(text, links=False))}'
                   '</section>\n')
-    known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
     if db is not None:
@@ -409,14 +428,17 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
                                      frozenset(t.name.strip() for t in tasks
                                                if t.name.strip() and any(c.state == "open" and c.approved for c in task_changes(t, sources))),
                                      ended=forge_ends(tasks, sources, zone), home=sources.home)
-    # An issue's row links to its page, pages.py's /issues/<n>.
+    # Route each issue row by its full identity; only an unresolved bare ref uses the legacy route.
     issue_cells = {issue_key(t.issue, sources.home): t.issue.strip() for t in known if t.issue.strip() and not t.workflow}
 
     def flow_ref(row):
-        if row.href.startswith("/issues/") and (db is not None or ":" in row.href):
+        if row.href.startswith("/issues/"):
             return row
         if (number := issue_number(row.ref)) is not None:
-            return replace(row, ref=f"#{number}", href=f"/issues/{number}", ref_title=issue_cells.get(row.ref, row.ref))
+            identity = route_identity(row.ref, sources.home)
+            url = issue_href(identity) if identity is not None and not (identity.isdecimal() and number in ambiguous_numbers) else ""
+            return replace(row, ref=f"#{number}", href=url,
+                           ref_title=issue_cells.get(row.ref, row.ref))
         if change := change_keys(row.ref)[1]:
             return replace(row, ref=f"!{int(change.rstrip('/').rsplit('/', 1)[1])}")
         return row
@@ -435,16 +457,22 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     elif tracker_at is not None:
         meta.append(f"tracker {tracker_at.astimezone(zone):%H:%M}")
     source_keys = ("merge requests",) if db is not None and not tracker_text.strip() else ("kanban", "merge requests", "workers")
-    meta.extend(f"{k} {sources.fetched[k].astimezone(zone):%H:%M}" for k in source_keys if k in sources.fetched)
+    meta.extend(f"{k} {sources.fetched[k].astimezone(zone):%H:%M}" for k in source_keys
+                if k in sources.fetched and (same_home or k not in ("kanban", "merge requests")))
+    if same_home and "github sweep" in sources.fetched:
+        meta.append(f"GitHub inventory observation interval began {sources.fetched['github sweep'].astimezone(zone):%Y-%m-%d %H:%M} (non-atomic sweeps)")
     meta.append(_tasks(len(tasks)))
     if db is not None and (latest := next((row.message for row in reversed(db.engine_logs)
                                            if row.kind == "policy_change"), "")):
         meta.append(latest)
-    warnings = (
-        *((health.warning,) if health is not None and health.warning else ()),
-        *(f"{k}: {why}" for k, why in sources.errors.items()),
-    )
-    head = panels.Header(f"Board · {now.strftime('%a %d %b')}", tuple(meta), now, nearest.name, nearest.at, warnings)
+    warnings = [health.warning] if health is not None and health.warning else []
+    for panel, reason in sources.errors.items():
+        state = ("stale" if same_home and panel in sources.fetched else "unavailable") if panel in ("kanban", "merge requests") else ""
+        warnings.append(f"{panel}: {state + ' — ' if state else ''}{reason}")
+    if cfg.backlog is not None:
+        warnings.extend(f"{panel}: unavailable — not fetched yet" for panel in ("kanban", "merge requests")
+                        if panel not in sources.errors and (not same_home or panel not in sources.fetched))
+    head = panels.Header(f"Board · {now.strftime('%a %d %b')}", tuple(meta), now, nearest.name, nearest.at, tuple(warnings))
     # NEEDS INPUT counts the held tasks, as the BUILD cards are flagged; ALL counts every task (#349).
     tiles = flow_tiles(len(tasks), len(held),
                        sources, len(running), sum(drifts(t, kanban, sources, stages[t]) for t in tasks), len(unowned),
@@ -537,7 +565,8 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
     ctx = decision_page.decision_context(root, tracker_day, now)
     reach = (now - flow_chart.WINDOWS[-1][1]).date()
     looked = looked_before(out.parent)
-    sources = board_sources.load(out.parent)
+    cached_sources = board_sources.load(out.parent)
+    sources = board_sources.for_home(cached_sources, cfg.backlog)
     since_day = (looked.astimezone(cfg.zone).date() if looked else now.date())
     bound = min(reach, since_day)
     # Follow active laned tasks backwards only while they occur in consecutive available snapshots.
@@ -579,7 +608,7 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
             return out, cfg, now, tracker_text, req_texts
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
-                  sources=sources,
+                  sources=cached_sources,
                   tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone) if tracker.is_file() else None,
                   stage_log=stage_log,
                   slots=settings.workers.max_concurrency or 1, pending_refs=decision_page.held_refs(pending, ctx),

@@ -677,10 +677,10 @@ class IssueRefTest(unittest.TestCase):
         self.assertEqual(backlog_ref.store_label(f"github:{REPO}#9", GH), "#9")
         self.assertEqual(backlog_ref.store_label("github:o/n#9", GH), "o/n#9")
         self.assertEqual(backlog_ref.store_label("gitlab:gl.example/g/p#5", gl), "#5")
-        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/acme/web#5", gl), "gl.example/acme/web#5")
-        self.assertEqual(backlog_ref.store_label("gitlab:gl2.example/g/p#5", gl), "gl2.example/g/p#5")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/acme/web#5", gl), "gitlab:gl.example/acme/web#5")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl2.example/g/p#5", gl), "gitlab:gl2.example/g/p#5")
         self.assertEqual(backlog_ref.store_label(f"github:{REPO}#9", None), f"{REPO}#9")
-        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/acme/web#5", None), "gl.example/acme/web#5")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/acme/web#5", None), "gitlab:gl.example/acme/web#5")
         for cell in ("workflow", "#7", "https://github.com/o/n/issues/7"):
             with self.subTest(cell=cell):
                 self.assertEqual(backlog_ref.store_label(cell, GH), cell)
@@ -724,12 +724,12 @@ class GitLabIssueRefTest(unittest.TestCase):
         # the key an issue is filed under: another project on the home host, and the same path on another host, are two keys
         other_project = bl.IssueRef("acme/web", 8, "gl.example")
         other_host = bl.IssueRef("g/p", 8, "gl2.example")
-        self.assertEqual(other_project.label(GL), "gl.example/acme/web#8")
-        self.assertEqual(other_host.label(GL), "gl2.example/g/p#8")
+        self.assertEqual(other_project.label(GL), "gitlab:gl.example/acme/web#8")
+        self.assertEqual(other_host.label(GL), "gitlab:gl2.example/g/p#8")
         self.assertEqual(bl.IssueRef("g/p", 8, "gl.example").label(GL), "#8")
         # a GitHub repo keeps `owner/repo#N`; with no home, a GitLab ref is keyed by its host and project
         self.assertEqual(bl.IssueRef("o/n", 8).label(GL), "o/n#8")
-        self.assertEqual(other_project.label(None), "gl.example/acme/web#8")
+        self.assertEqual(other_project.label(None), "gitlab:gl.example/acme/web#8")
 
     def test_gitlab_urls(self):
         for cell, want in (("https://gl.example/g/p/-/issues/7", ("g/p", 7, "gl.example")),
@@ -746,10 +746,13 @@ class GitLabIssueRefTest(unittest.TestCase):
         self.assertIsNone(bl.issue_ref("https://gl.example/g/p/-/issues/1", GH))
         self.assertIsNone(bl.issue_ref("https://gl.example/g/p/-/issues/1", None))
 
-    def test_owner_repo_is_still_github(self):
+    def test_project_shorthand_remains_github_in_gitlab_backlog(self):
         ref = bl.issue_ref("locriani/GauntletIssues#33", GL)
         self.assertEqual(ref, bl.IssueRef(REPO, 33))
         self.assertEqual(ref.label(GL), f"{REPO}#33")
+        github = bl.issue_ref(f"https://github.com/{REPO}/issues/33", GL)
+        self.assertEqual(github, bl.IssueRef(REPO, 33))
+        self.assertEqual(github.label(GL), f"{REPO}#33")
 
     def test_the_same_path_on_another_host_is_not_home(self):
         self.assertEqual(bl.IssueRef("g/p", 9).label(GL), "g/p#9")

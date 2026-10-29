@@ -18,16 +18,16 @@ from pathlib import Path
 import board_sources
 import flow_chart
 from clock import parse_stamp
-from task_forge import EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, PageData, source_key, source_worker_tasks
+from task_forge import EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, PageData, change_issue_keys, lookup_keys, source_key, source_worker_tasks, tracker_issue_tasks
 import tracker_log
 from decision_actions import addresses, state_of
 from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, store_decision_badge, write_if_changed
-from fragment import href, tab_bar, issue_href, issue_page_name
+from fragment import external_url, href, tab_bar, issue_href, issue_page_name
 from page_common import drop_html_comments, markdown_blocks, markdown_inline
 from module_graph import section as _graph
 from clock import dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
-from tracker import TRAILING_NUMBER, Task, issue_number, parse_tracker, resolve_due as _resolve_due
+from tracker import TRAILING_NUMBER, Task, issue_key, issue_number, parse_tracker, resolve_due as _resolve_due
 from workspace import Config, ConfigError, EngineStatus, daily_trackers, engine_health, read_config, read_engine_status
 from settings import Graph, Kanban, SettingsError, load as load_settings
 
@@ -38,6 +38,7 @@ CSS = """<style>
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) :is(.gantt,.gantt-legend){--gantt-ink:var(--fg);--gantt-muted:var(--muted);--gantt-bg:var(--bg);--gantt-rule:var(--line);--gantt-edge:var(--line);--gantt-grid:var(--line);--gantt-past:var(--surface);--gantt-now:var(--dl);--gantt-hold:var(--dl)}}
 :root[data-theme="dark"] :is(.gantt,.gantt-legend){--gantt-ink:var(--fg);--gantt-muted:var(--muted);--gantt-bg:var(--bg);--gantt-rule:var(--line);--gantt-edge:var(--line);--gantt-grid:var(--line);--gantt-past:var(--surface);--gantt-now:var(--dl);--gantt-hold:var(--dl)}
 .meta{color:var(--muted);font-size:12px}
+.mono{font-family:ui-monospace,monospace;font-size:12px}
 header .chip.running{color:var(--surface);background:var(--stage-implement);border-color:var(--stage-implement)}
 header .chip.needs-input,header .chip.retries-exhausted{color:var(--dl);border-color:var(--dl)}
 .engine-warn{border:1px solid var(--dl);border-radius:3px;padding:6px 10px;color:var(--dl);font-size:12.5px;margin:0 0 12px}
@@ -121,9 +122,15 @@ def _change(c: board_sources.Change, changes, now: datetime) -> str:
     rows.append(("threads", f"{len(c.threads) - resolved} open", "", f"{resolved} resolved"))
     body = "\n".join(f'      <div class="chk"><span class="cap">{cap}</span><span class="mk {escape(cls)}">{escape(mark)}</span>'
                      f"<span>{note}</span></div>" for cap, mark, cls, note in rows)
-    return (f'  <section>\n    <h2>{word} · <a class="ref" data-k="{kind}" {href(c.url)}>{escape(c.ref)}</a></h2>\n'
+    c_url = external_url(c.url)
+    ref_html = (f'<a class="ref" data-k="{kind}" {href(c_url)}>{escape(c.ref)}</a>' if c_url
+                else f'<span class="ref" data-k="{kind}">{escape(c.ref)}</span>')
+    b_url = external_url(c.branch_url)
+    branch_html = (f'<a class="mono" {href(b_url)}>{escape(c.branch)}</a> → ' if c.branch and b_url
+                   else f'<span class="mono">{escape(c.branch)}</span> → ' if c.branch else "→ ")
+    return (f'  <section>\n    <h2>{word} · {ref_html}</h2>\n'
             f'    <div class="card mr">\n      <strong>{escape(c.title)}</strong> <span class="chip">{escape(state.upper())}{merged}</span>'
-            f' <span class="meta">→ {escape(c.base)}</span>\n{body}\n    </div>\n  </section>\n')
+            f' <span class="meta">{branch_html}{escape(c.base)}</span>\n{body}\n    </div>\n  </section>\n')
 
 
 def span_s(seconds: int) -> str:
@@ -135,15 +142,16 @@ def anchor(path: str) -> str:
     return "f-" + re.sub(r"[^A-Za-z0-9_.-]", "-", path)
 
 
-def _files(c: board_sources.Change, changes, number: int) -> str:
+def _files(c: board_sources.Change, changes, number: int | str) -> str:
     """FILES CHANGED: a link to the source page; each file, linked to its diff there, its +additions −deletions when
     known, "also !N" for another open change on it."""
+    source_url = str(number) if str(number).startswith("/") else f"/issues/{number}/source"
     stats, shared = {f.path: f for f in c.stats}, _shared(c, changes)
-    rows = [f'      <div class="fl"><span class="cap">files changed</span><a href="/issues/{number}/source">open source &amp; diff</a>'
+    rows = [f'      <div class="fl"><span class="cap">files changed</span><a {href(source_url)}>open source &amp; diff</a>'
             "<span></span></div>"]
     for p in _paths(c):
         f = stats.get(p)
-        rows.append(f'      <div class="fl"><a class="path" href="/issues/{number}/source#{escape(anchor(p))}">{escape(p)}</a>'
+        rows.append(f'      <div class="fl"><a class="path" {href(f"{source_url}#{anchor(p)}")}>{escape(p)}</a>'
                     f'<span class="d">{f"+{f.additions} −{f.deletions}" if f else ""}</span>'
                     f'<span class="meta">{"also " + escape(", ".join(shared[p])) if p in shared else ""}</span></div>')
     if c.stats:
@@ -160,7 +168,8 @@ def _review(c: board_sources.Change, now: datetime, linker: Linker = Linker()) -
     rows = []
     for t in sorted(newest, key=lambda t: t.resolved):
         when = f" · {_clock(t.at.astimezone(now.tzinfo), now)}" if t.at else ""
-        link = f' · <a {href(t.url)}>thread</a>' if t.url else ""
+        t_url = external_url(t.url)
+        link = f' · <a {href(t_url)}>thread</a>' if t_url else ""
         rows.append(f'      <div class="rv"><span class="mk{" passed" if t.resolved else ""}">{"Resolved" if t.resolved else "Open"}</span>'
                     f"<span><b>{escape(t.author)}</b>{when}{link}</span><div class=\"prose\">{markdown_blocks(drop_html_comments(t.body), linker.resolve)}</div></div>")
     resolved = sum(t.resolved for t in c.threads)
@@ -222,13 +231,20 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
            engine_status: EngineStatus | None = None) -> str | None:
     """The page, or None when no task in `trackers` or the store names issue `number`. `cfg` resolves a task's due (the
     board's deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
+    home = cfg.backlog if cfg else None
+    same_home = (sources.home is not None and home is not None and type(sources.home) is type(home)
+                 and board_sources.backlog.home_of(sources.home) == board_sources.backlog.home_of(home))
+    sources = board_sources.for_home(sources, home)
     identity = str(number)
     full_key = identity if "#" in identity else None
     numeric = issue_number(identity) if full_key else int(identity)
     ref = f"#{numeric}"
     names = lambda t: {k.strip().casefold() for k in (t.name, t.item) if k.strip()}  # noqa: E731
     known = [t for _, text in trackers for t in parse_tracker(text).tasks]
-    mine = [t for t in known if (t.issue == full_key if full_key else issue_number(t.issue) == numeric)]
+    mine = tracker_issue_tasks(trackers, numeric, sources.home, full_key)
+    if mine is None and db is None:
+        return None
+    mine = mine or []
     store_rows = None
     item = None
     if db is not None:
@@ -239,7 +255,9 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
         if not full_key and len(matches) > 1:
             return None
         if item is not None:
-            title = item.title or (sources.issues[ref].title if ref in sources.issues else ref)
+            item_issue = next((sources.issues[k] for k in lookup_keys((item.issue_key,), sources.home)
+                               if k in sources.issues), None)
+            title = item.title or (item_issue.title if item_issue else ref)
             task = Task(item=title, owner="",
                         state="waiting" if item.human_review else "open",
                         since=now.date().isoformat(), due="", checklist="",
@@ -252,7 +270,24 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     if not mine:
         return None
     keys = set().union(*map(names, mine))
-    log = sorted((m for day, text in trackers for m in tracker_log.moves(text, day, now.tzinfo)), key=lambda m: m.at)
+    # Resolve each day's aliases before building Flow: names may be reused by another issue later.
+    log = []
+    selected = {source_key(t.issue, sources.home) for t in mine if t.issue.strip()}
+    prior_aliases = {}
+    for day, text in trackers:
+        day_tasks = parse_tracker(text).tasks
+        aliases = {}
+        for t in day_tasks:
+            identity_key = source_key(t.issue, sources.home) if t.issue.strip() else ""
+            for alias in names(t):
+                aliases.setdefault(alias, set()).add(identity_key)
+        for move in tracker_log.moves(text, day, now.tzinfo):
+            alias = move.name.strip().casefold()
+            identities = aliases.get(alias, prior_aliases.get(alias, set()))
+            if identities and identities <= selected:
+                log.append(move)
+        prior_aliases.update(aliases)
+    log.sort(key=lambda m: m.at)
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
     cfg = cfg or Config("", "", "", getattr(now.tzinfo, "key", "UTC"), (), None, None)
     linker = Linker(cfg.backlog, root)
@@ -265,14 +300,18 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs)
     held = held_names(holds)
     rows = store_rows if store_rows is not None else [
-        (s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
-                                            ended=forge_ends(known, sources, now.tzinfo))
-        if issue_number(r.ref) == numeric
+        (s, r) for s, r in flow_chart.build(log, mine, lanes or {}, held, ends, now,
+                                            ended=forge_ends(mine, sources, now.tzinfo), home=sources.home)
+        if r.ref and r.ref in selected
     ]
     log = [m for m in log if m.name.strip().casefold() in keys]
-    issue_keys = {full_key, source_key(full_key, sources.home)} if full_key else {ref, *(t.issue for t in mine if t.issue)}
-    issue = next((sources.issues[k] for k in issue_keys if k in sources.issues), None)
-    latest = {k: t for t in known for k in names(t)}  # later trackers win
+    raw_refs = ((full_key,) if full_key
+                else (item.issue_key,) if item is not None
+                else tuple(t.issue for t in mine if t.issue.strip()) or (ref,))
+    lookup = lookup_keys(raw_refs, sources.home)
+    issue_keys = set(lookup)
+    issue = next((sources.issues[k] for k in lookup if k in sources.issues), None)
+    latest = {k: t for t in mine for k in names(t)}  # later selected rows win
     exhausted = db.exhaustion(item.issue_key) if item is not None and db is not None else None
     if exhausted is not None:
         status = EXHAUSTED_CHIP
@@ -289,15 +328,16 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     name = rows[0][1].name if rows else (issue.title if issue else mine[0].label)
 
     order = {"open": 0, "merged": 1}
-    changes = sorted((c for c in sources.changes.values() if issue_keys & set(c.issues)), key=lambda c: order.get(c.state, 2))
+    changes = sorted((c for c in sources.changes.values() if issue_keys & change_issue_keys(c)), key=lambda c: order.get(c.state, 2))
     every = list(sources.changes.values())
     cards = "".join(_change(c, every, now) for c in changes) or _section("Change", f'    <div class="card"><p>No change names {ref} yet.</p></div>')
     change = changes[0] if changes else None
     current = {t.name.strip().casefold(): t for t in mine}.values()
     why_not = ("the issue is closed" if (item and item.forge_state == "closed") or (issue and issue.state == "closed") else
                "the task is done" if status == "merged" or all(t.kind == "done" for t in current) else "")
+    source_url = f"{issue_href(identity)}/source"
     ahead = (_next(rows, change, every, why_not, now, exhaustion=exhausted)
-             + (_files(change, every, issue_href(identity)[len("/issues/"):]) if change and _paths(change) else ""))
+             + (_files(change, every, source_url) if change and _paths(change) else ""))
     ahead += _graph(change, graph, pages, root, "Architecture", f"No change names {ref} to graph.")
 
     task_of = lambda m: (t.name.strip() if (t := latest.get(m.name.strip().casefold())) else m.name).casefold()  # noqa: E731
@@ -371,29 +411,63 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
                              '    <div class="card">\n' + "\n".join(x for _, x in lines) + "\n    </div>") if lines else
                     _section("Workers", '    <div class="card"><p>No workers launched.</p></div>'))
 
-    refs = [("issue", f'<a {href(issue.url)}>{ref} {escape(issue.title)}</a>' if issue else f"{ref} {escape(name)}",
+    issue_url = external_url(issue.url) if issue else ""
+    issue_label = f"{escape(ref)} {escape(issue.title if issue else name)}"
+    refs = [("issue", f"<a {href(issue_url)}>{issue_label}</a>" if issue_url else issue_label,
              issue.state if issue else "")]
-    refs += [("MR" if c.ref.startswith("!") else "PR", f'<a {href(c.url)}>{escape(c.ref)} {escape(c.title)}</a>',
-              " · ".join(filter(None, (c.state, c.pipeline)))) for c in changes]
+    for c in changes:
+        c_url = external_url(c.url)
+        c_label = f"{escape(c.ref)} {escape(c.title)}"
+        refs.append(("MR" if c.ref.startswith("!") else "PR",
+                     f"<a {href(c_url)}>{c_label}</a>" if c_url else c_label,
+                     " · ".join(filter(None, (c.state, c.pipeline)))))
+    seen_branches: set[str] = set()
+    for c in changes:
+        if not c.branch or c.branch in seen_branches:
+            continue
+        seen_branches.add(c.branch)
+        b_url = external_url(c.branch_url)
+        b_html = (f'<a class="mono" {href(b_url)}>{escape(c.branch)}</a>' if b_url
+                  else f'<span class="mono">{escape(c.branch)}</span>')
+        refs.append(("branch", b_html, f"@ {c.head[:7]}" if c.head else ""))
+    if not seen_branches and item is not None and db is not None:
+        resume = db.resume(item.issue_key)
+        work_branch = resume.get("work_branch") if isinstance(resume, dict) else ""
+        if isinstance(work_branch, str) and work_branch.strip():
+            refs.append(("branch", f'<span class="mono">{escape(work_branch.strip())}</span>', "worktree"))
+    paths = _paths(change) if change else ()
+    source_st = f"{len(paths)} file{'s' * (len(paths) != 1)}" if paths else (change.ref if change else "")
+    refs.append(("source", f'<a {href(source_url)}>source &amp; diff</a>', source_st))
     refs_html = "\n".join(f'      <span class="cap">{cap}</span><span>{what}</span><span class="st">{escape(st)}</span>' for cap, what, st in refs)
 
     health = engine_health(engine_status, now, cfg.zone) if engine_status is not None else None
     lane = next((t.lane.strip() for t in reversed(mine) if t.lane.strip()), "")
-    eyebrow = " · ".join(["Task", f'<a class="ref" data-k="issue" {href(issue.url)}>{ref}</a>' if issue else ref,
+    eyebrow = " · ".join(["Task",
+                          f'<a class="ref" data-k="issue" {href(issue_url)}>{escape(ref)}</a>' if issue_url else escape(ref),
                           *([f"lane {escape(lane)}"] if lane else []),
                           *(tuple(escape(m) for m in health.meta) if health is not None else ()),
+                          f'<a {href(source_url)}>source</a>',
                           '<a href="/">board</a>'])  # (#215) no render clock
     warn_html = (f'  <p class="engine-warn" role="alert">{escape(health.warning)}</p>\n'
                  if health is not None and health.warning else "")
     flow = flow_chart.section(rows, now)
+    warnings = []
+    if cfg and cfg.backlog:
+        for panel in ("kanban", "merge requests"):
+            if panel in sources.errors:
+                state = "stale" if same_home and panel in sources.fetched else "unavailable"
+                warnings.append(f"{panel}: {state} — {sources.errors[panel]}")
+            elif not same_home or panel not in sources.fetched:
+                warnings.append(f"{panel}: unavailable — not fetched yet")
+    source_warning = (f'<p class="card">{escape("; ".join(warnings))}</p>\n' if warnings else "")
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>{ref} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
+            f"<title>{escape(ref)} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
             f'<body>\n<main class="issue">\n{tab_bar("Board", pending, True, **(navigation or {}))}  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(name)}</h1>\n    </div>\n"
             f'    <div><span class="chip {escape(status.replace(" ", "-"))}">{escape(status.upper())}</span>'
             + (' <span class="chip running">RUNNING</span>' if header_live and status != "running" else '') + '</div>\n  </header>\n\n'
-            + warn_html
+            + warn_html + source_warning
             + (_section("Issue", f'<div class="card prose">{markdown_blocks(issue.body, linker.resolve)}</div>') if issue and issue.body else "")
             + cards + (f"  <section>\n{flow}{worked_line}  </section>\n" if flow else "") + ahead
             + '  <div class="cols">\n  <div class="col">\n'

@@ -110,7 +110,9 @@ class ServedIdentityTest(_PagesFixture, unittest.TestCase):
                 got, head = get(self.port, route), get(self.port, route, method="HEAD")
                 self.assertEqual(head.getheader("Content-Length"), str(len(got.body)))
                 self.assertEqual(head.getheader("Last-Modified"), got.getheader("Last-Modified"))
-                self.assertNotIn("alpha", self.file(route).read_text())
+                disk = self.file(route).read_text()
+                self.assertFalse(TITLE.search(disk)[1].startswith("alpha · "))
+                self.assertFalse(H1.search(disk)[1].startswith("alpha · "))
 
     def test_a_page_an_agent_wrote_is_served_as_it_is(self):
         self.set_backlog("example/alpha")

@@ -5,7 +5,7 @@ them, who the workers are and whether a stage holds. The board and the task page
 
 from __future__ import annotations
 
-from collections.abc import Container, Mapping
+from collections.abc import Container, Iterable, Mapping
 from datetime import date, datetime, time
 from dataclasses import dataclass
 from typing import Any
@@ -29,11 +29,53 @@ def source_key(key: str, home) -> str:
     namespace, sep, number = key.rpartition("#")
     if sep and number.isdecimal():
         if namespace.startswith("github:"):
-            return issue_key(f"https://github.com/{namespace[len("github:"):]}/issues/{number}", home)
+            url = f"https://github.com/{namespace[len('github:'):]}/issues/{number}"
+            ref = board_sources.backlog.issue_ref(url, home, any_host=True)
+            return ref.label(home) if ref else key.strip()
         if namespace.startswith("gitlab:"):
-            host, _, project = namespace[len("gitlab:"):].partition("/")
-            return issue_key(f"https://{host}/{project}/-/issues/{number}", home)
+            return board_sources.store_label(key, home)
+        if namespace and "/" in namespace and isinstance(home, board_sources.backlog.Backlog):
+            ref = board_sources.backlog.issue_ref(key, home, any_host=True)
+            if ref:
+                return ref.label(home)
+            return key.strip()
+    if "://" in key and board_sources.backlog.issue_ref(key, home, any_host=True) is None:
+        return key.strip()
     return issue_key(key, home)
+
+
+def lookup_keys(refs: Iterable[str], home) -> tuple[str, ...]:
+    """Cache lookup keys for `refs` under `home`, preserving namespace so cross-repo tasks never match bare `#N`."""
+    out: list[str] = []
+    for raw in refs:
+        text = raw.strip()
+        if not text or text == tracker.WORKFLOW:
+            continue
+        if home is None and text.startswith('#') and text[1:].isdecimal():
+            continue  # a bare tracker reference has no verified forge identity
+        if (isinstance(home, board_sources.backlog.Backlog) and board_sources.ambiguous_gitlab_label(text)):
+            continue  # legacy host labels and nested project shorthand have identical spellings
+        # URLs are converted to cache keys; a raw foreign URL in an old change cache must not match.
+        candidates = (source_key(text, home),) if "://" in text else (text, source_key(text, home))
+        for candidate in candidates:
+            if candidate and candidate not in out:
+                out.append(candidate)
+    return tuple(out)
+
+
+def tracker_issue_tasks(trackers, number: int, home, full_key: str | None = None):
+    """Resolve a numeric route using the latest snapshot naming it; reject multiple identities there."""
+    snapshots = [[t for t in tracker.parse_tracker(text).tasks if tracker.issue_number(t.issue) == number]
+                 for _, text in trackers]
+    if full_key:
+        selected = source_key(full_key, home)
+    else:
+        latest = next((rows for rows in reversed(snapshots) if rows), [])
+        identities = {source_key(t.issue, home) for t in latest}
+        if len(identities) > 1:
+            return None
+        selected = next(iter(identities), None)
+    return [t for rows in snapshots for t in rows if source_key(t.issue, home) == selected] if selected else []
 
 
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
@@ -92,10 +134,15 @@ def live_worker_keys(sources: board_sources.Sources, segments) -> set[str | tupl
     return names
 
 
+def change_issue_keys(change: board_sources.Change) -> set[str]:
+    """Only normalized closing references identify issues in a local change cache."""
+    return {ref for ref in change.issues if "://" not in ref}
+
+
 def task_changes(task: Task, sources: board_sources.Sources) -> tuple[board_sources.Change, ...]:
     """The changes naming the task's issue: the open ones, or else the merged ones."""
-    key = source_key(task.issue, sources.home) if task.issue.strip() else None
-    named = [c for c in sources.changes.values() if key and (key in c.issues or task.issue in c.issues) and c.state != "closed"]
+    keys = set(lookup_keys((task.issue,), sources.home))
+    named = [c for c in sources.changes.values() if keys and (keys & change_issue_keys(c)) and c.state != "closed"]
     return tuple(c for c in named if c.state == "open") or tuple(named)
 
 
@@ -219,7 +266,8 @@ def forge_ends(tasks: list[Task], sources: board_sources.Sources, zone: ZoneInfo
             continue
         if merges := [c.merged_at for c in task_changes(t, sources) if c.state == "merged" and c.merged_at]:
             out[name] = (max(merges).astimezone(zone), "merged")
-        elif (issue := sources.issues.get(issue_key(t.issue, sources.home)) if t.issue.strip() else None) and issue.state == "closed" and issue.closed_at:
+        elif (issue := next((sources.issues[k] for k in lookup_keys((t.issue,), sources.home)
+                             if k in sources.issues), None)) and issue.state == "closed" and issue.closed_at:
             out[name] = (issue.closed_at.astimezone(zone), "closed")
     return out
 
