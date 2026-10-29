@@ -14,6 +14,8 @@ import shlex
 
 OWNED = "The engine owns merges, protected branch pushes, stage labels, Project Status, issue closure, PR readiness and review verdicts; forge commands outside the worker allowlist are denied."
 UNPARSED = "The guard cannot safely parse this command. Use a plain command; " + OWNED
+HISTORY = ("Workers reach decision history only through the engine MCP decisions tool; "
+           "sqlite3, the decisions CLI and chief-of-stuff decisions are refused.")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 SEPARATORS = {";", "&&", "||", "|", "&", "\n"}
 REDIRECTIONS = {">", ">>", "<", "<>", ">|", ">&", "<&", "&>", "&>>"}
@@ -59,8 +61,21 @@ class Opaque(Unparsed):
     """A program the gate cannot read, such as an inline interpreter program: denied even when no guarded word shows."""
 
 
+class HistoryBypass(ValueError):
+    """A command that would let a worker read decision history outside the approved MCP tool (§17)."""
+
+
 class ImplicitPush(ValueError):
     pass
+
+
+def _history_bypass(name: str, args: list[str], tokens: list[str]) -> bool:
+    """True when the command reaches decision history without the engine MCP `decisions` tool."""
+    if name in {"sqlite3", "sqlite"}:
+        return True
+    if name in {"chief-of-stuff", "chief_of_stuff"}:
+        return "decisions" in args
+    return any(PurePosixPath(token).name == "decisions_cli.py" for token in tokens)
 
 
 def _tokens(command: str) -> list[tuple[str, bool]]:
@@ -410,6 +425,8 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     name, args = PurePosixPath(tokens[0]).name, tokens[1:]
     if name.startswith("git-"):
         name, args = "git", [name[4:], *args]
+    if _history_bypass(name, args, tokens):
+        raise HistoryBypass()
     if name == "hub":
         return True  # a git wrapper with forge verbs of its own: workers use git and gh
     # Plain clients bypass the forge CLI gates. Workers must use gh/glab for forge reads too.
@@ -745,6 +762,8 @@ def permission_judgement(event: dict, protected_branches: tuple[str, ...]) -> tu
 def denial_reason(command: str, protected_branches: tuple[str, ...]) -> str | None:
     try:
         return OWNED if _denied(command, protected_branches, 0) else None
+    except HistoryBypass:
+        return HISTORY
     except ImplicitPush:
         return "Push with git first and pass --head (or -H) with an explicit branch to gh pr create. " + OWNED
     except Opaque:

@@ -78,3 +78,11 @@ def upgrade() -> None:
         sa.Column("matched_approach", sa.String(), nullable=False),
         sa.Column("granted_at", sa.String(), nullable=False),
     )
+
+
+def downgrade() -> None:
+    op.drop_table("decision_history_grant")
+    op.drop_table("decision_history_request")
+    op.drop_table("decision_graph_rejected")
+    op.drop_table("decision_graph_edge")
+    op.drop_table("decision_graph_node")
