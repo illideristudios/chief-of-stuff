@@ -272,6 +272,16 @@ class Build(unittest.TestCase):
                                       columns.Mark("shares file with !42", "shared"),
                                       columns.Mark("shares file with !50", "shared")))
 
+    def test_a_task_with_a_worker_thread_links_to_it(self) -> None:
+        # #1178: a T3 worker's thread is a deep link on its task's card; a task without one gains nothing.
+        link = "t3code://threads/env-1/mcp:t-1"
+        cols = rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, SOURCES, NOW, threads={"#9": link})
+        card = next(c for col in cols for c in col.cards if c.name == "Cut the release")
+        self.assertEqual(card.refs[-1], ("T3 thread", link))
+        self.assertIn(f'href="{link}"', columns.render(cols))
+        other = next(c for col in cols for c in col.cards if c.name == "Write README")
+        self.assertNotIn("T3 thread", [text for text, _ in other.refs])
+
     def test_a_bare_issue_does_not_match_a_change_without_a_home(self) -> None:
         sources = replace(SOURCES, home=None)
         card = next(c for col in self.cols(sources) for c in col.cards if c.name == "Cut the release")

@@ -2899,7 +2899,7 @@ class MainTest(unittest.TestCase):
 
     def test_once_opens_workspace_store_and_runs_one_pass_without_sleep(self):
         settings_path = self.root / "settings.toml"
-        settings_path.write_text(settings_path.read_text() + 'teardown = "exit 7"\n')
+        settings_path.write_text(settings_path.read_text() + 'teardown = "exit 7"\nworker_launcher = "t3"\n')
         fake = FakeForge()
         with mock.patch.object(engine.forge, "for_workspace", return_value=fake), \
              mock.patch.object(engine, "run_pass") as passed, mock.patch.object(engine.time, "sleep", side_effect=[None, RuntimeError("plugin update ignored")]) as sleep:
@@ -2911,6 +2911,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(passed.call_args.kwargs["workers"].claude_as_profile, "secondary")
         self.assertEqual(passed.call_args.kwargs["teardown_command"], "exit 7")
         self.assertEqual(passed.call_args.kwargs["launch"].keywords["teardown_command"], "exit 7")
+        self.assertEqual(passed.call_args.kwargs["launch"].keywords["launcher"], "t3")
         sleep.assert_not_called()
 
     def test_the_production_pass_consults_the_trio_through_the_claude_adapter(self):

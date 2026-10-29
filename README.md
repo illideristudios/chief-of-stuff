@@ -80,6 +80,7 @@ mode = "one-shot" # or "interactive" (the default)
 launcher = "ghostty" # ghostty, tmux, or herdr for interactive workers
 herdr_session = "chief-of-stuff" # herdr only: the dedicated session workers run in
 claude_as_profile = "secondary" # optional: Claude workers run as `claude-as run secondary`
+worker_launcher = "t3" # optional: engine Claude workers start as T3 threads; "cli" (the default) is a local process
 require_green_tests = true # optional: hold one-shot and engine completions with unknown or non-green suite counts
 rules = ["Never skip or weaken tests."] # optional: standing rules for every one-shot and engine worker
 ```
@@ -240,3 +241,5 @@ python3 evals/run.py --runtime agy --arm agent --model <agy-model> --case stale-
 The eval runner shares fixture setup and graders across CLIs. Claude remains the default backend. Codex accepts the isolated calendar and peer MCP mocks through per-run config. The harness pins its fake `gh` executable by absolute path for backlog writes, even if an agent shell changes `PATH`. Cursor and Antigravity currently refuse cases that require those mocks, and headless backends refuse wait turns that depend on an idle conversation waking by itself. A refusal is recorded as unmeasured, never as a passing case.
 
 Eval scenarios superseded by the autonomy change carry `superseded_by` in `case.json`. Live selection omits them; their fixtures remain available for mechanical grader checks. `autonomy-*` cases cover the replacement behavior. Run Python checks with the plugin's pinned dependency venv (see `docs/plans/issue-1030.md`), not a dependency-free system interpreter.
+
+With `worker_launcher = "t3"`, each engine Claude worker is a thread in the running T3 Code app (T3 is a launcher, not a runtime), started through the `t3` CLI (`$T3CODE_CLI_PATH`, else `t3` on PATH). The engine registers the worker's tree as a T3 project, writes the report and ask channel, the agent and the guard hooks into the tree as git-excluded `.mcp.json` and `.claude/settings.local.json`, and starts the thread with the rotation entry's model. The thread id and its `t3code://threads/<environment>/<thread>` link are kept in the run record, and the board links each task to its thread. T3 cannot restrict a session to the user's own settings, so a tree that brings its own `.mcp.json` or `.claude/` config is refused, and, as for Codex, Cursor and Antigravity, the forge must protect the default branch and the branch a request targets. Only Claude entries launch this way; other runtimes keep their local launch.

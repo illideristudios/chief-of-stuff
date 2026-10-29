@@ -37,6 +37,7 @@ DRAWS_NOTHING = (
     "model_port",
     "claude_adapter",
     "host_adapter",
+    "t3_adapter",
     "policy",
     "forge",
     "forge_port",
@@ -241,7 +242,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "migrations/versions/0011_rotation_records",
     }),
     "drivers": frozenset({
-        "claude_adapter", "host_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor", "release_selection", "engine_intent",
+        "claude_adapter", "host_adapter", "t3_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor", "release_selection", "engine_intent",
         "startup", "store_access", "kanban_cli", "pipeline_cli", "process_status", "session_exec", "spawn_session",
         "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",

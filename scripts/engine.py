@@ -1175,7 +1175,8 @@ def main(argv: list[str] | None = None) -> int:
                 launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
                                  clone=root / selected if selected else root,
                                  claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
-                                 require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
+                                 require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown,
+                                 launcher=config.workers.worker_launcher)
                 model = model_port.Port(partial(_judge, claude_as_profile=config.workers.claude_as_profile),
                                         rotation=config.models.get("trio", ()), pick=config.model_picks.get("trio", "first"),
                                         launchable=_judges)

@@ -179,6 +179,12 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaisesRegex(st.SettingsError, 'automatic stall restart is not supported'):
             st.load(self.root, self.write('[workers.stall]\naction = "restart"\n'))
 
+    def test_the_worker_launcher_is_the_local_cli_or_t3(self):
+        self.assertEqual(st.load(self.root, None).workers.worker_launcher, "cli")
+        self.assertEqual(st.load(self.root, self.write('[workers]\nworker_launcher = "t3"\n')).workers.worker_launcher, "t3")
+        with self.assertRaisesRegex(st.SettingsError, "worker_launcher"):
+            st.load(self.root, self.write('[workers]\nworker_launcher = "tmux"\n'))
+
     def test_green_test_requirement_is_opt_in_and_strictly_boolean(self):
         self.assertFalse(st.load(self.root, None).workers.require_green_tests)
         for value, expected in (("true", True), ("false", False)):
