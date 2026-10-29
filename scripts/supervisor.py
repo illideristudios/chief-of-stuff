@@ -16,8 +16,22 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-import shell_setup
-import engine_intent
+if __name__ == "__main__" and sys.flags.isolated:
+    # -I omits the script directory. Load only these release-owned modules by
+    # exact filename, without adding a workspace or release directory to sys.path.
+    import importlib.util
+
+    def _release_module(name: str):
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parent / (name + ".py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    shell_setup = _release_module("shell_setup")
+    engine_intent = _release_module("engine_intent")
+else:
+    import shell_setup
+    import engine_intent
 
 RELEASE = Path(__file__).resolve().parent.parent
 
@@ -547,8 +561,9 @@ def ensure_background(root: Path) -> str:
     log = state_dir(root) / "engine-ensure.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a") as output:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--root", str(root), "ensure-retry"],
-                         stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
+        subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()), "--root", str(root), "ensure-retry"],
+                         stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True,
+                         env=_preparation_environment())
     return "engine: ensuring"
 
 

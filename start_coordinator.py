@@ -241,8 +241,9 @@ def main(argv: list[str] | None = None) -> int:
     if (root / "store.db").is_file():
         try:
             engine_service = subprocess.run(
-                [sys.executable, str(release / "scripts" / "supervisor.py"), "--root", str(root), "ensure-background"],
-                capture_output=True, text=True, timeout=10)
+                [sys.executable, "-I", str(release / "scripts" / "supervisor.py"), "--root", str(root), "ensure-background"],
+                capture_output=True, text=True, timeout=10,
+                env={key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")})
             if engine_service.returncode:
                 print(engine_service.stderr.strip() or "engine: service setup failed", file=sys.stderr)
         except (OSError, subprocess.TimeoutExpired) as exc:

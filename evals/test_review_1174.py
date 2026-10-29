@@ -33,6 +33,8 @@ class StartupRegression(unittest.TestCase):
                 self.assertEqual(supervisor.ensure_background(root), 'engine: ensuring')
                 self.assertTrue(child.call_args.kwargs['start_new_session'])
                 self.assertEqual(child.call_args.args[0][-1], 'ensure-retry')
+                self.assertIn('-I', child.call_args.args[0])
+                self.assertFalse(any(key.upper().startswith('PYTHON') for key in child.call_args.kwargs['env']))
 
 
 class HealthRegression(unittest.TestCase):

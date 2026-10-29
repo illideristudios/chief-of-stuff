@@ -199,8 +199,11 @@ class CoordinatorLaunchTest(unittest.TestCase):
                                "--install-dir", str(self.install_dir)])
         self.assertEqual(code, 0)
         self.assertEqual(ensured.call_count, 2)
-        scripts_called = [Path(call.args[0][1]).name for call in ensured.call_args_list]
+        scripts_called = [Path(call.args[0][2 if call.args[0][1] == '-I' else 1]).name
+                          for call in ensured.call_args_list]
         self.assertEqual(scripts_called, ["notify_service.py", "supervisor.py"])
+        self.assertEqual(ensured.call_args_list[1].args[0][1], '-I')
+        self.assertFalse(any(key.upper().startswith('PYTHON') for key in ensured.call_args_list[1].kwargs['env']))
         self.assertEqual(ensured.call_args_list[1].args[0][-3:], ["--root", str(self.root.resolve()), "ensure-background"])
         launch.assert_called_once()
         self.assertIn("engine: test failure", errors.getvalue())
