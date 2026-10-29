@@ -118,15 +118,16 @@ _COMMENT_OR_CODE = re.compile(
 
 def drop_html_comments(text: str) -> str:
     """Drop complete forge-hidden comments, preserving literal comments in Markdown code."""
-    def code_blocks(source: str) -> list[tuple[int, int]]:
+    def block_ranges(source: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
         offsets = [0]
         for line in source.splitlines(keepends=True):
             offsets.append(offsets[-1] + len(line))
         blocks = MarkdownIt('commonmark', {'html': True}).parse(source)
-        return [(offsets[t.map[0]], offsets[t.map[1]]) for t in blocks
-                if t.type in ('fence', 'code_block') and t.map]
+        def ranges(types: tuple[str, ...]) -> list[tuple[int, int]]:
+            return [(offsets[t.map[0]], offsets[t.map[1]]) for t in blocks if t.type in types and t.map]
+        return ranges(('fence', 'code_block')), ranges(('inline',))
 
-    protected = code_blocks(text)
+    protected, inline = block_ranges(text)
     pos = 0
     while pos < len(text):
         block = next(((start, end) for start, end in protected if end > pos), None)
@@ -143,6 +144,9 @@ def drop_html_comments(text: str) -> str:
                 continue
         if match is None:
             break
+        if match.group('code') and not any(start <= match.start() and match.end() <= end for start, end in inline):
+            pos = match.start() + 1
+            continue
         backslashes = len(text[:match.start()]) - len(text[:match.start()].rstrip('\\'))
         if backslashes % 2:
             pos = match.start() + 1
@@ -151,7 +155,7 @@ def drop_html_comments(text: str) -> str:
             # Keep offsets and line boundaries stable; reparse because hidden text can contain fake fences.
             masked = re.sub(r'[^\r\n]', ' ', match.group(0))
             text = text[:match.start()] + masked + text[match.end():]
-            protected = code_blocks(text)
+            protected, inline = block_ranges(text)
         pos = match.end()
     return text
 

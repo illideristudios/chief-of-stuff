@@ -521,6 +521,34 @@ class AcceptanceTest(unittest.TestCase):
         for hidden in ("secret", "hidden", "concealed"):
             self.assertNotIn(hidden, got)
 
+    def test_unmatched_backticks_in_separate_blocks_do_not_hide_comments(self):
+        body = """## Acceptance
+- [ ] First has an unmatched ` tick
+- [x] <!-- secret list criterion -->
+- [ ] Last has an unmatched ` tick
+
+A paragraph with ` unmatched.
+
+<!-- secret paragraph -->
+
+Another paragraph with ` unmatched.
+
+Real `<!-- inline example -->` stays.
+
+```md
+<!-- fenced example -->
+```
+"""
+        issue = replace(ISSUE, body=body)
+        issue_html = ip._issue_section(issue, ip.Linker())
+        acceptance = ip._acceptance(issue)
+        for result in (issue_html, acceptance):
+            self.assertNotIn("secret list criterion", result)
+            self.assertNotIn("secret paragraph", result)
+        self.assertIn("0 of 2 met", text(acceptance))
+        self.assertIn("inline example", issue_html)
+        self.assertIn("fenced example", issue_html)
+
     def test_comment_only_items_are_not_criteria(self):
         body = "## Acceptance\n- [x] <!-- hidden\n  details -->\n- <!-- second -->\n"
         got = text(page_section(page(src=sources(issue=replace(ISSUE, body=body))), "Acceptance"))
@@ -547,7 +575,7 @@ class AcceptanceTest(unittest.TestCase):
             with self.subTest(spec=spec):
                 cfg = parse_coordinator("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n- Backlog: " + spec + "\n", TODAY)
                 tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | {first} | |\n| Task two | Item two | Robin | open | {TODAY} | | M | build | implement | {second} | |\n"
-                issue = replace(ISSUE, body="See #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4")
+                issue = replace(ISSUE, url=second, body="See #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4")
                 key = task_forge.source_key(first, cfg.backlog)
                 src = bs.Sources({"kanban": NOW}, {key: issue}, {}, (), {}, home=cfg.backlog)
                 html = ip.render(109, [(TODAY, tracker)], src, NOW, LANES, cfg=cfg)
@@ -1476,6 +1504,60 @@ class UnavailableAndStaleIssueTest(unittest.TestCase):
         self.assertIn("not logged in", acc_sec)
         self.assertNotIn("fake item criterion", acc_sec)
         self.assertNotIn("fake checklist criterion", acc_sec)
+
+    def test_stale_issue_links_follow_cached_identity_after_backlog_change(self) -> None:
+        cases = (
+            (bs.backlog.GitHubBacklog("old/repo"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://github.com/old/repo/issues/12", "https://github.com/old/repo", "#12"),
+            (bs.backlog.GitHubBacklog("Old/Repo"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://github.com/old/repo/issues/12", "https://github.com/Old/Repo", "#12"),
+            (bs.backlog.Backlog("https://labs.example.test", "team/old"), bs.backlog.Backlog("https://labs.example.test", "team/new"), "https://labs.example.test/team/other/-/issues/12", "https://labs.example.test/team/other/-/issues/12", "https://labs.example.test/team/other/-", "labs.example.test/team/other#12"),
+            (bs.backlog.Backlog("https://labs.example.test", "team/old"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://labs.example.test/team/old/-/issues/12", "https://labs.example.test/team/old/-", "#12"),
+            (None, bs.backlog.GitHubBacklog("new/repo"), "https://github.com/old/repo/issues/12", "https://github.com/old/repo/issues/12", "https://github.com/old/repo", "old/repo#12"),
+        )
+        for home, current, ref, url, base, key in cases:
+            with self.subTest(ref=ref, home=home):
+                cfg = replace(self.cfg, backlog=current)
+                tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | {ref} | |\n"
+                issue = bs.Issue(ref, url, "Old issue", "open", (), body="See #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4\n")
+                src = bs.Sources({"kanban": NOW}, {key: issue}, {}, (), {"kanban": "read failed"}, home=home)
+                html = ip.render(12, [(TODAY, tracker)], src, NOW, LANES, cfg=cfg, root=self.root)
+                self.assertIsNotNone(html)
+                for name in ("Issue", "Acceptance"):
+                    part = page_section(html, name)
+                    self.assertIn(f'href="{base}/issues/10"', part)
+                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+                    self.assertNotIn('href="https://github.com/new/repo/', part)
+
+    def test_conflicting_cached_key_and_url_never_link_to_either_namespace(self) -> None:
+        tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | #12 | |\n"
+        issue = bs.Issue("#12", "https://github.com/foreign/repo/issues/12", "Unknown", "open", (),
+                         body="See #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4\n")
+        src = bs.Sources({"kanban": NOW}, {"#12": issue}, {}, (), {"kanban": "read failed"}, home=self.home)
+        html = ip.render(12, [(TODAY, tracker)], src, NOW, LANES, cfg=self.cfg, root=self.root)
+        for name in ("Issue", "Acceptance"):
+            part = page_section(html, name)
+            self.assertNotIn('href="https://github.com/example/repo/', part)
+            self.assertNotIn('href="https://github.com/foreign/repo/', part)
+
+    def test_foreign_cached_issue_does_not_resolve_symbols_from_current_local_repo(self) -> None:
+        path = self.root / "src" / "lib.py"
+        path.parent.mkdir()
+        path.write_text("def target():\n    pass\n")
+        tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | #12 | |\n"
+        issue = bs.Issue("#12", "https://github.com/old/repo/issues/12", "Old", "open", (), body="See src/lib.py:target.")
+        src = bs.Sources({"kanban": NOW}, {"#12": issue}, {}, (), {"kanban": "read failed"}, home=bs.backlog.GitHubBacklog("old/repo"))
+        html = ip.render(12, [(TODAY, tracker)], src, NOW, LANES, cfg=self.cfg, root=self.root)
+        part = page_section(html, "Issue")
+        self.assertIn('href="https://github.com/old/repo/blob/HEAD/src/lib.py"', part)
+        self.assertNotIn("#L1", part)
+
+    def test_unknown_cached_identity_does_not_guess_current_backlog(self) -> None:
+        tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | #12 | |\n"
+        issue = bs.Issue("#12", "", "Unknown", "open", (), body="See #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4\n")
+        src = bs.Sources({"kanban": NOW}, {"#12": issue}, {}, (), {"kanban": "read failed"})
+        html = ip.render(12, [(TODAY, tracker)], src, NOW, LANES, cfg=self.cfg, root=self.root)
+        for name in ("Issue", "Acceptance"):
+            part = page_section(html, name)
+            self.assertNotIn('href="https://github.com/example/repo/', part)
 
     def test_stale_cached_issue_renders_cached_body_and_criteria_marked_stale_with_fetch_time_and_error(self) -> None:
         earlier_utc = (NOW - timedelta(minutes=25)).astimezone(ZoneInfo("UTC"))

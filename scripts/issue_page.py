@@ -183,15 +183,32 @@ def _canonical_key(raw: str, home: Backlog | GitHubBacklog | None) -> str:
     return source_key(raw, home)
 
 
-def _issue_linker(raw_refs: tuple[str, ...], cfg: Config, root: Path | None) -> Linker:
-    """Resolve bare `#N`/`!N` and file references inside an issue against that issue's own repository or project."""
-    refs = [issue_ref(raw, cfg.backlog) for raw in raw_refs]
-    if refs and all(ref is not None and ref == refs[0] for ref in refs) and (ref := refs[0]):
-        if ref.host == "github.com" and isinstance(cfg.backlog, GitHubBacklog):
-            return Linker(GitHubBacklog(ref.repo), root if ref.repo == cfg.backlog.repo else None)
-        if isinstance(cfg.backlog, Backlog) and ref.host == home_of(cfg.backlog)[0]:
-            return Linker(cfg.backlog.sibling(ref.repo), root if ref.repo == cfg.backlog.project else None)
-    return Linker(cfg.backlog, root)
+def _issue_linker(issue: board_sources.Issue | None, cache_key: str, cache_home: Backlog | GitHubBacklog | None,
+                  cfg: Config, root: Path | None) -> Linker:
+    """Resolve issue prose in the cached issue's namespace, never an unrelated current Backlog."""
+    if issue is None:
+        return Linker()
+    refs = [issue_ref(raw, cache_home, any_host=True) for raw in (cache_key, issue.url) if raw]
+    refs = [ref for ref in refs if ref is not None]
+    def identity(ref):
+        repo = ref.repo.casefold() if ref.host == "github.com" else ref.repo
+        return ref.host, repo, ref.number
+
+    if not refs or any(identity(ref) != identity(refs[0]) for ref in refs[1:]):
+        return Linker()
+    ref = refs[0]
+    current = home_of(cfg.backlog) if cfg.backlog is not None else None
+    local = root if current and current[0] == ref.host and (
+        current[1].casefold() == ref.repo.casefold() if ref.host == "github.com" else current[1] == ref.repo
+    ) else None
+    if ref.host == "github.com":
+        return Linker(GitHubBacklog(ref.repo), local)
+    for home in (cache_home, cfg.backlog):
+        if isinstance(home, Backlog) and home_of(home)[0] == ref.host:
+            return Linker(home.sibling(ref.repo), local)
+    if issue_ref(issue.url, None, any_host=True) == ref:
+        return Linker(Backlog(f"https://{ref.host}", ref.repo), local)
+    return Linker()
 
 
 def _foreign_forge(raw_ref: str, backlog_cfg: Backlog | GitHubBacklog) -> bool:
@@ -329,6 +346,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     ref = f"#{numeric}"
     cfg_given = cfg
     cfg = cfg or Config("", "", "", getattr(now.tzinfo, "key", "UTC"), (), None, None)
+    cache_home = sources.home
     home = sources.home if sources.home is not None else cfg.backlog
     if sources.home is None and home is not None:
         sources = replace(sources, home=home)
@@ -351,7 +369,8 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             display_ref = store_label(item.issue_key, home) if (home is not None or full_key) else ref
             raw_refs = (item.issue_key,)
             lookup = lookup_keys(raw_refs, home)
-            issue = next((sources.issues[k] for k in lookup if k in sources.issues), None)
+            cache_key = next((k for k in lookup if k in sources.issues), "")
+            issue = sources.issues.get(cache_key)
             title = item.title or (issue.title if issue else display_ref)
             task = Task(item=title, owner="",
                         state="waiting" if item.human_review else "open",
@@ -375,7 +394,8 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
                 return None
             lookup = lookup_keys(raw_refs, home)
             display_ref = resolved[0] if len(resolved) == 1 and not resolved[0].startswith("http") else ref
-        issue = next((sources.issues[k] for k in lookup if k in sources.issues), None)
+        cache_key = next((k for k in lookup if k in sources.issues), "")
+        issue = sources.issues.get(cache_key)
     issue_keys = set(lookup)
     keys = set().union(*map(names, mine))
     # Resolve each day's aliases before building Flow: names may be reused by another issue later.
@@ -396,7 +416,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     log.sort(key=lambda m: m.at)
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
     linker = Linker(cfg.backlog, root)
-    issue_linker = _issue_linker(raw_refs, cfg, root)
+    issue_linker = _issue_linker(issue, cache_key, cache_home, cfg, root)
     today_tasks = parse_tracker(trackers[-1][1]).tasks if trackers else known
     ends = {t.item: end for t in today_tasks
             if t.kind != "done" and (end := _resolve_due(t.due, cfg, now.date()))}
