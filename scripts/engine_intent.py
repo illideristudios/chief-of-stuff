@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -53,12 +54,7 @@ def read(root: Path, data: Path, error) -> dict | None:
 
 
 def validate_release(root: Path, release: Path, error) -> None:
-    """Reject workspace-controlled release trees, including links out of the tree.
-
-    The release tree and its ancestors are trusted under the workspace-only threat
-    model. An external link could make code or pip inputs depend on the workspace,
-    so only links resolving within the trusted tree are accepted.
-    """
+    """Trust release trees and their ancestors, but never links or indirect pip inputs."""
     root = root.resolve()
     try:
         resolved = release.resolve(strict=True)
@@ -69,8 +65,13 @@ def validate_release(root: Path, release: Path, error) -> None:
             for name in dirs + files:
                 path = Path(directory) / name
                 if path.is_symlink():
-                    target = path.resolve()
-                    if target != resolved and resolved not in target.parents:
-                        raise error("engine release must not link outside its trusted tree or into the workspace")
-    except (OSError, RuntimeError) as exc:
+                    raise error("engine release must not contain symlinks or depend on workspace aliases")
+        requirements = release / "requirements.txt"
+        if requirements.exists():
+            for line in requirements.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and not re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:==[A-Za-z0-9][A-Za-z0-9_.+!-]*)?", line):
+                    raise error("engine requirements must contain only package names or exact versions")
+    except (OSError, RuntimeError, UnicodeError) as exc:
         raise error(f"invalid engine release: {exc}") from exc

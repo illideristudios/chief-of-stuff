@@ -567,7 +567,7 @@ class EnsureTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "selected upgrade"):
                         pg.ensure(self.dir, self.port, self.log, root)
 
-    def test_plugin_marker_selects_same_version_release_for_replacement(self):
+    def test_plugin_marker_alone_does_not_authorize_same_version_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
             release = Path(tmp).resolve() / "plugins/cache/market/chief/1.2.3"
@@ -583,9 +583,8 @@ class EnsureTest(unittest.TestCase):
                  mock.patch.object(pg.supervisor, "current_release", return_value=release), \
                  mock.patch.object(pg, "VERSION", "1.2.3"), \
                  mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.2.3"), \
-                 mock.patch.object(pg, "_stop", side_effect=RuntimeError("marker selected")):
-                with self.assertRaisesRegex(RuntimeError, "marker selected"):
-                    pg.ensure(self.dir, self.port, self.log, root)
+                 mock.patch.object(pg, "_stop", side_effect=AssertionError("marker is not authority")):
+                self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
 
     def test_authoritative_installed_rollback_replaces_newer_server(self):
         root = self.dir.parent / "workspace"
@@ -2106,7 +2105,8 @@ class StandaloneBoardTest(unittest.TestCase):
         self.assertIsNone(proc.poll())
 
     def test_old_supervisor_keeps_the_selected_newer_server(self):
-        selected = self.root.parent / "newer"
+        selected = self.root.parent.resolve() / "newer"
+        selected.mkdir()
         selected_id = hashlib.sha256(os.fsencode(selected.resolve())).hexdigest()[:24]
         with mock.patch.object(pg.supervisor, "selected_release", return_value=selected, create=True), \
              mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0 release-{selected_id}"), \
@@ -2116,7 +2116,7 @@ class StandaloneBoardTest(unittest.TestCase):
         stopped.assert_not_called()
 
     def test_standalone_follows_plugin_selected_release(self):
-        release = self.root.parent / "new"
+        release = self.root.parent.resolve() / "new"
         (release / "scripts").mkdir(parents=True)
         (release / "scripts/pages.py").touch()
         stop, attempted = threading.Event(), threading.Event()

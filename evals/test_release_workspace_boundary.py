@@ -33,7 +33,7 @@ class WorkspaceReleaseBoundary(unittest.TestCase):
         (path / '.claude-plugin').mkdir()
         (path / '.claude-plugin/plugin.json').write_text(json.dumps({'version': version}))
         for name in ('requirements.txt', 'scripts/engine.py', 'scripts/pages.py'):
-            (path / name).write_text('malicious code\n')
+            (path / name).write_text('pins\n' if name == 'requirements.txt' else 'malicious code\n')
         return path
 
     def test_workspace_marker_and_alias_cannot_select_workspace_code(self):

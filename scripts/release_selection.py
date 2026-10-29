@@ -31,12 +31,14 @@ def explicit_intent(root: Path, supervisor) -> dict | None:
 
 def selected_release(root: Path, supervisor) -> Path:
     """Use the supervisor's selector when available; support older cached supervisor modules too."""
-    select = getattr(supervisor, "selected_release", None)
-    if select is not None and getattr(supervisor, "TRUSTED_INTENT_VERSION", 0) >= 2:
-        return select(root)
     import engine_intent
     def validate(release):
         engine_intent.validate_release(root, release, supervisor.ServiceError)
+    select = getattr(supervisor, "selected_release", None)
+    if select is not None and getattr(supervisor, "TRUSTED_INTENT_VERSION", 0) >= 2:
+        selected = select(root)
+        validate(selected)
+        return selected
     current = supervisor.current_release()
     intent = explicit_intent(root, supervisor)
     if intent is not None and intent["operation"] == "install":
@@ -52,9 +54,9 @@ def selected_release(root: Path, supervisor) -> Path:
         return current
     try:
         candidate = Path((supervisor.state_dir(root) / "engine-plugin-release").read_text()).resolve(strict=True)
+        validate(candidate)
         candidate_version = _plugin_version(candidate)
         if candidate.parent == current.parent and candidate_version is not None and candidate_version > current_version:
-            validate(candidate)
             return candidate
     except (OSError, RuntimeError, ValueError, supervisor.ServiceError):
         pass

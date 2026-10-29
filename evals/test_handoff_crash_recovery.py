@@ -140,6 +140,9 @@ class HandoffCrashRecovery(SupervisorTest):
                         supervisor.install(self.root, jobs_dir=self.jobs)
                 with mock.patch.object(supervisor, 'RELEASE', new):
                     supervisor.ensure(self.root, jobs_dir=self.jobs)
+                    if supervisor._explicit_install(self.root):
+                        with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
+                            supervisor.commit_handoff(self.root, old, self.jobs)
                     self.assertEqual(supervisor.current_release_from_job(self.job()), old)
                     self.assertTrue(self.loaded)
                     self.assertEqual(supervisor.current_release_from_job(loaded_job[0]), old)
@@ -191,7 +194,8 @@ class HandoffCrashRecovery(SupervisorTest):
         with mock.patch.object(supervisor, 'RELEASE', new), \
              mock.patch.object(supervisor, 'launchctl', side_effect=fail_bootout):
             with self.assertRaisesRegex(supervisor.ServiceError, 'bootout failed'):
-                supervisor.ensure(self.root, jobs_dir=self.jobs)
+                with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
+                    supervisor.commit_handoff(self.root, old, self.jobs)
         self.assertEqual(supervisor.selected_release(self.root), old)
         with mock.patch.object(supervisor, 'RELEASE', new):
             supervisor.install(self.root, jobs_dir=self.jobs)
@@ -348,6 +352,9 @@ with mock.patch.object(supervisor, 'RELEASE', Path(os.environ['TEST_OLD'])), moc
                 with mock.patch.object(supervisor, 'RELEASE', new):
                     supervisor.ensure(self.root, jobs_dir=self.jobs)
                     supervisor.ensure(self.root, jobs_dir=self.jobs)
+                    if supervisor._explicit_install(self.root):
+                        with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
+                            supervisor.commit_handoff(self.root, old, self.jobs)
                     self.assertEqual(supervisor.selected_release(self.root), old)
                     self.assertEqual(supervisor.current_release_from_job(self.job()), old)
                     with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):

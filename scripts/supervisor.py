@@ -209,10 +209,10 @@ def selected_release(root: Path) -> Path:
         return current
     try:
         candidate = Path((state_dir(root) / PLUGIN_RELEASE_MARKER).read_text()).resolve(strict=True)
+        _validate_release(root, candidate)
         candidate_version = _plugin_version(candidate)
         if (candidate.parent == current.parent and candidate_version is not None
                 and candidate_version > current_version):
-            _validate_release(root, candidate)
             return candidate
     except (OSError, RuntimeError, ValueError, ServiceError):
         pass
@@ -446,9 +446,15 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
         if respect_disabled:
             pending = _explicit_install(root)
             if pending is not None:
-                from workspace import lock_held
+                path = job_path(label("engine", root), jobs_dir)
+                if path.exists():
+                    existing = plistlib.loads(path.read_bytes())
+                    if existing.get("Label") != label("engine", root) or existing.get("WorkingDirectory") != str(root):
+                        raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
                 target = f"gui/{os.getuid()}/{label('engine', root)}"
-                if lock_held(state_dir(root) / "engine.lock") and launchctl("print", target, missing_ok=True):
+                # The workspace can unlink a held lock. A loaded job may still be
+                # in a pass, so only the engine's boundary helper can replace it.
+                if launchctl("print", target, missing_ok=True):
                     return "engine: upgrade pending"
                 return _finish_explicit_install(root, pending, jobs_dir, replay=True)
             from workspace import lock_held

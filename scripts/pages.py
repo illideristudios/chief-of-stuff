@@ -922,10 +922,6 @@ def _selected_for_rollback(root: Path | None) -> bool:
         if release.parent.name == "versions":
             return (pointer.is_symlink() and pointer.resolve(strict=True) == release
                     and (release / "chief_of_stuff.py").is_file())
-        if root is not None and release_selection._plugin_version(release) is not None:
-            marker = supervisor.state_dir(root) / "engine-plugin-release"
-            return (Path(marker.read_text()).resolve(strict=True) == release
-                    and _selected_release(root).resolve() == release)
     except (OSError, RuntimeError, ValueError):
         return False
     return False
