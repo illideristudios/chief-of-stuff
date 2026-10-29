@@ -54,8 +54,10 @@ def command(request: Request, claude_as_profile: str = "", *, extra_args: tuple[
 
 def _pin_config_dir(environment: dict[str, str], claude_as_profile: str) -> None:
     # A named profile wins over a default-login directory. An empty profile keeps one the caller set.
-    if claude_as_profile or "CLAUDE_CONFIG_DIR" not in environment:
+    if claude_as_profile:
         environment["CLAUDE_CONFIG_DIR"] = str(session_logs.claude_home(claude_as_profile))
+    elif "CLAUDE_CONFIG_DIR" not in environment and os.environ.get("CLAUDE_CONFIG_DIR"):
+        environment["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
 
 
 def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
@@ -70,16 +72,19 @@ def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
     prepared = command(replace(request, keep_events=True), claude_as_profile,
                        extra_args=("--input-format", "stream-json", "--replay-user-messages"))
     prepared.pop()  # stream input has no positional prompt, as in drive_turns
-    return spawn(prepared, request, run_dir, overlay, stdin_prompt=request.prompt)
+    config_dir = overlay.get("CLAUDE_CONFIG_DIR") or str(session_logs.claude_home())
+    return spawn(prepared, request, run_dir, overlay, stdin_prompt=request.prompt, config_dir=config_dir)
 
 
 def spawn(prepared: list[str], request: Request, run_dir: Path, env: dict[str, str] | None = None,
-          *, stdin_prompt: str | None = None) -> subprocess.Popen:
+          *, stdin_prompt: str | None = None, config_dir: str | None = None) -> subprocess.Popen:
     """The detached runner for any host's prepared login argv (#700: shared by every host adapter).
 
     Only a run given `stdin_prompt` has a mailbox; every other host keeps a closed stdin and cannot take messages.
     """
     launch = {"argv": prepared, "cwd": request.cwd, "session_id": request.session_id, "env": env or {}}
+    if config_dir is not None:
+        launch["config_dir"] = config_dir
     if stdin_prompt is not None:
         launch["stdin_prompt"] = stdin_prompt
         for name in BOXES:

@@ -214,7 +214,10 @@ def _worker_config_dir(root: Path, data, segment_id: int) -> Path | None:
         if not isinstance(command, dict):
             return None
         env = command.get("env")
-        home = env.get("CLAUDE_CONFIG_DIR") if isinstance(env, dict) else None
+        explicit_home = env.get("CLAUDE_CONFIG_DIR") if isinstance(env, dict) else None
+        home = command.get("config_dir", explicit_home)
+        if explicit_home is not None and explicit_home != home:
+            return None
         if (command.get("session_id") != run["session_id"] or not isinstance(command.get("cwd"), str)
                 or Path(command["cwd"]).resolve() != Path(run["tree"]).resolve()
                 or not isinstance(home, str) or not Path(home).is_absolute()):

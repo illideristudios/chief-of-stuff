@@ -145,6 +145,18 @@ class EventsTest(unittest.TestCase):
                 self.assertEqual(claude_adapter.classify(code, raw, stderr, keep_events=True).kind, kind)
 
 
+class DefaultClaudeLoginTest(unittest.TestCase):
+    def test_default_login_does_not_set_config_override_but_records_transcript_directory(self):
+        environment = dict(os.environ)
+        environment.pop("CLAUDE_CONFIG_DIR", None)
+        with mock.patch.dict(os.environ, environment, clear=True), \
+             mock.patch.object(claude_adapter, "command", return_value=["claude", "--", "p"]), \
+             mock.patch.object(claude_adapter, "spawn") as spawn:
+            claude_adapter.start(Request(prompt="p", session_id=SID), Path("/tmp/run"))
+        self.assertNotIn("CLAUDE_CONFIG_DIR", spawn.call_args.args[3])
+        self.assertEqual(spawn.call_args.kwargs["config_dir"], str(Path(environment["HOME"]) / ".claude"))
+
+
 class StartTest(unittest.TestCase):
     def test_runner_spawn_failure_removes_launch_evidence_and_reraises(self):
         with tempfile.TemporaryDirectory() as tmp:
