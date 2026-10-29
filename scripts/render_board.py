@@ -457,7 +457,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     elif tracker_at is not None:
         meta.append(f"tracker {tracker_at.astimezone(zone):%H:%M}")
     source_keys = ("merge requests",) if db is not None and not tracker_text.strip() else ("kanban", "merge requests", "workers")
-    meta.extend(f"{k} {sources.fetched[k].astimezone(zone):%H:%M}" for k in source_keys if k in sources.fetched)
+    meta.extend(f"{k} {sources.fetched[k].astimezone(zone):%H:%M}" for k in source_keys
+                if k in sources.fetched and (same_home or k not in ("kanban", "merge requests")))
     meta.append(_tasks(len(tasks)))
     if db is not None and (latest := next((row.message for row in reversed(db.engine_logs)
                                            if row.kind == "policy_change"), "")):
@@ -562,7 +563,8 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
     ctx = decision_page.decision_context(root, tracker_day, now)
     reach = (now - flow_chart.WINDOWS[-1][1]).date()
     looked = looked_before(out.parent)
-    sources = board_sources.for_home(board_sources.load(out.parent), cfg.backlog)
+    cached_sources = board_sources.load(out.parent)
+    sources = board_sources.for_home(cached_sources, cfg.backlog)
     since_day = (looked.astimezone(cfg.zone).date() if looked else now.date())
     bound = min(reach, since_day)
     # Follow active laned tasks backwards only while they occur in consecutive available snapshots.
@@ -604,7 +606,7 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
             return out, cfg, now, tracker_text, req_texts
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
-                  sources=sources,
+                  sources=cached_sources,
                   tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone) if tracker.is_file() else None,
                   stage_log=stage_log,
                   slots=settings.workers.max_concurrency or 1, pending_refs=decision_page.held_refs(pending, ctx),

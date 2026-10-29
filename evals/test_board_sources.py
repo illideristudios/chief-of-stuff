@@ -1275,6 +1275,19 @@ class CarriedStateKeepsItsHomeTest(unittest.TestCase):
         view = bs.for_home(stale, cfg.backlog)
         self.assertEqual(task_forge.effective_stage(task, view, lanes), "implement")
 
+    def test_write_reports_changed_home_as_unavailable_without_old_fetch_times(self):
+        root, first = self.refreshed()
+        claude = root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("repo o/app", "repo acme/web"))
+        for errors in ({}, {"kanban": "offline", "merge requests": "offline"}):
+            with self.subTest(errors=errors):
+                bs._write(root / "pages" / bs.CACHE, replace(first, errors=errors))
+                html = rb.write(root, day=DAY, now=NOW)[0].read_text().split("</style>", 1)[1]
+                self.assertIn("kanban: unavailable", html)
+                self.assertIn("merge requests: unavailable", html)
+                self.assertNotIn("kanban " + first.fetched["kanban"].astimezone(NOW.tzinfo).strftime("%H:%M"), html)
+                self.assertNotIn("merge requests " + first.fetched["merge requests"].astimezone(NOW.tzinfo).strftime("%H:%M"), html)
+
     def test_rendering_follows_each_refresh_outcome(self):
         root = workspace("GitLab; host https://forge.example; project group/old; token env OLD")
         path = root / "daily" / f"{DAY}-tracker.md"
