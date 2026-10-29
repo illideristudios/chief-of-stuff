@@ -28,10 +28,10 @@ class IdentityTest(unittest.TestCase):
             row = tip.TODAY_START.replace("#109", ref)
             task = parse_tracker(row).tasks[0]
             return task_forge.task_changes(task, src)
-        for ref in ("#7", "team/app#8", "https://labs.example.test/team/app/-/issues/8", "team/other#9", "https://labs.example.test/team/nested/other/-/issues/10"):
+        for ref in ("#7", "https://labs.example.test/team/app/-/issues/8", "gitlab:labs.example.test/team/other#9", "https://labs.example.test/team/nested/other/-/issues/10"):
             with self.subTest(ref=ref):
                 self.assertEqual(matches(ref), (change,))
-        for ref in ("#9", "team/another#9", "https://foreign.example/team/app/-/issues/11", "#11"):
+        for ref in ("#9", "team/app#8", "team/other#9", "team/another#9", "https://foreign.example/team/app/-/issues/11", "#11"):
             with self.subTest(ref=ref):
                 self.assertEqual(matches(ref), ())
         # Caches produced before this fix can still contain a raw foreign closing URL.
@@ -161,10 +161,10 @@ class IdentityTest(unittest.TestCase):
         ambiguous = current.replace('\n\n## File ownership', '\n' + duplicate + '\n\n## File ownership')
         self.assertIsNone(issue_page.render(109, [(tip.TODAY, ambiguous)], src, tip.NOW, tip.LANES))
 
-    def test_refresh_fetches_gitlab_project_shorthand_but_not_foreign_host(self):
+    def test_refresh_fetches_explicit_gitlab_project_but_not_foreign_host(self):
         from test_board_sources import gitlab_workspace, refresh_gitlab, FakeGitLab, gl_issue, NOW
         import shutil
-        root = gitlab_workspace([('team/other#7', '!42'), ('foreign.example:8443/team/app#8', '')])
+        root = gitlab_workspace([('gitlab:labs.example.test/team/other#7', '!42'), ('foreign.example:8443/team/app#8', '')])
         self.addCleanup(shutil.rmtree, root, True)
         issue = {**gl_issue(7), 'webUrl': 'https://labs.example.test/team/other/-/issues/7'}
         fake = FakeGitLab(issues=[issue], mrs=[{**gl_mr(42), 'description': 'Fixes team/other#7'}])
@@ -178,7 +178,7 @@ class IdentityTest(unittest.TestCase):
     def test_home_port_and_other_port_are_distinct_through_refresh(self):
         from test_board_sources import gitlab_workspace, refresh_gitlab, FakeGitLab, gl_issue, NOW
         import shutil
-        root = gitlab_workspace([('team/app#7', '!42'), ('labs.example.test:8444/team/app#8', '')])
+        root = gitlab_workspace([('#7', '!42'), ('labs.example.test:8444/team/app#8', '')])
         self.addCleanup(shutil.rmtree, root, True)
         config = root / 'CLAUDE.md'
         config.write_text(config.read_text().replace('https://labs.example.test;', 'https://labs.example.test:8443;'))
@@ -227,7 +227,7 @@ class ReviewFindingsTest(unittest.TestCase):
         self.assertEqual(bs.backlog.issue_ref(nested.label(home), home), nested)
         self.assertIsNone(bs.backlog.issue_ref(foreign.label(home), home))
         self.assertIsNone(bs.backlog.issue_ref('https://foreign/team/app/-/issues/7', home))
-        self.assertEqual(bs.backlog.issue_ref('team/other#7', home).repo, 'team/other')
+        self.assertEqual(bs.backlog.issue_ref('team/other#7', home).host, 'github.com')
         self.assertNotIn(nested.label(home), task_forge.lookup_keys(('group.with.dots/team/app#7',), home))
 
     def test_dotted_nested_project_url_refreshes_without_fetching_foreign_host(self):
@@ -281,3 +281,93 @@ class ReviewFindingsTest(unittest.TestCase):
         ambiguous_old = old.replace('\n\n## File ownership', '\n' + other + '\n\n## File ownership')
         html = issue_page.render('github:o/app#109', [(tip.YESTERDAY, ambiguous_old), (tip.TODAY, current)], src, tip.NOW, tip.LANES)
         self.assertNotIn('00:05', html)
+
+
+class IndependentReviewRegressions(unittest.TestCase):
+    def test_refresh_does_not_fetch_github_shorthand_as_gitlab(self):
+        from test_board_sources import gitlab_workspace, refresh_gitlab, FakeGitLab, gl_mr, NOW
+        import shutil
+        root = gitlab_workspace([('team/other#7', '!42'), ('gitlab:labs.example.test/team/other#8', '')])
+        self.addCleanup(shutil.rmtree, root, True)
+        fake = FakeGitLab(mrs=[{**gl_mr(42), 'description': 'Fixes team/other#7'}])
+        src = refresh_gitlab(root, NOW, fake)
+        tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
+        github_task = parse_tracker(tracker).tasks[0]
+        self.assertEqual(task_forge.task_changes(github_task, src), ())
+        self.assertFalse(any('"7"' in q and 'team/other' in q for q in fake.queries))
+        self.assertTrue(any('"8"' in q and 'team/other' in q for q in fake.queries))
+        self.assertEqual(bs.backlog.issue_ref(github_task.issue, src.home).host, 'github.com')
+
+    def test_failed_refresh_does_not_match_old_gitlab_closer_to_github(self):
+        from test_board_sources import gitlab_workspace, NOW, gl_mr
+        from unittest import mock
+        import shutil
+        root = gitlab_workspace([('https://github.com/team/other/issues/7', '!42')])
+        self.addCleanup(shutil.rmtree, root, True)
+        home = bs.backlog.Backlog('https://labs.example.test', 'team/app')
+        from dataclasses import replace
+        change = replace(bs._gl_change(gl_mr(42), '', home), issues=('team/other#7',))
+        bs._write(root / 'pages' / bs.CACHE, bs.Sources({}, {}, {'!42': change}, (), {}, home))
+        with mock.patch.object(bs, 'forge', return_value=(None, None, {'merge requests': 'offline'})):
+            src = bs.refresh(root, NOW)
+        tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
+        task = parse_tracker(tracker).tasks[0]
+        self.assertEqual(task_forge.task_changes(task, src), ())
+        for render in (issue_page.render, source_page.render):
+            html = render(7, [(NOW.date(), tracker)], src, NOW)
+            self.assertNotIn('MR 42', html)
+        gitlab_tracker = tracker.replace('https://github.com/team/other/issues/7', 'gitlab:labs.example.test/team/other#7')
+        self.assertEqual(task_forge.task_changes(parse_tracker(gitlab_tracker).tasks[0], src), (src.changes["!42"],))
+        self.assertIn('MR 42', issue_page.render(7, [(NOW.date(), gitlab_tracker)], src, NOW))
+        foreign_tracker = tracker.replace('https://github.com/team/other/issues/7', 'gitlab:foreign.example/team/other#7')
+        self.assertEqual(task_forge.task_changes(parse_tracker(foreign_tracker).tasks[0], src), ())
+
+    def test_cached_gitlab_reference_without_verifiable_forge_fails_closed(self):
+        from test_board_sources import gl_mr
+        from dataclasses import asdict, replace
+        home = bs.backlog.Backlog('https://labs.example.test', 'team/app')
+        old = replace(bs._gl_change(gl_mr(42), '', home), url='', issues=('team/other#7',))
+        loaded = bs._change_of(asdict(old), home)
+        self.assertNotIn('team/other#7', loaded.issues)
+
+    def test_cached_bare_closer_keeps_mr_forge_when_cache_home_changes(self):
+        from test_board_sources import gl_mr
+        from dataclasses import asdict, replace
+        gl_home = bs.backlog.Backlog('https://labs.example.test', 'team/app')
+        old = replace(bs._gl_change(gl_mr(42), '', gl_home), issues=('#7',))
+        loaded = bs._change_of(asdict(old), bs.backlog.GitHubBacklog('team/app'))
+        self.assertEqual(loaded.issues, ('gitlab:labs.example.test/team/app#7',))
+        unknown = bs._change_of(asdict(replace(old, url='')), gl_home)
+        self.assertEqual(unknown.issues, ())
+
+    def test_sibling_pr_discovery_to_source_page_loads_its_review_notes(self):
+        from test_board_sources import workspace, gh_pr, gh_issue, NOW
+        from unittest import mock
+        from types import SimpleNamespace
+        import shutil
+        root = workspace('GitHub issues; repo o/app', issue='o/sibling#7', mr='https://github.com/o/sibling/pull/42')
+        self.addCleanup(shutil.rmtree, root, True)
+        def gh(args):
+            pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7'}
+            return 0, json.dumps({'data': {'r0': {'n118': gh_issue(118), 'n58': gh_pr(58)},
+                                             'r1': {'n7': gh_issue(7), 'n42': pr}, 'merged': {'nodes': []}}}), ''
+        bs.refresh(root, NOW, gh=gh)
+        tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
+        queries = []
+        def notes_gh(args):
+            queries.append(args[-1])
+            thread = {'path': 'src/a.py', 'line': 1, 'diffSide': 'RIGHT', 'isResolved': False,
+                      'comments': {'nodes': [{'author': {'login': 'reviewer'}, 'body': 'Sibling review note'}]}}
+            return 0, json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': [thread]}}}}}), ''
+        real_notes = source_page.notes
+        cfg = bs.read_config(root)
+        with mock.patch.object(source_page, 'inputs', return_value=(cfg, NOW, [(NOW.date(), tracker)], SimpleNamespace(graph={}))), \
+             mock.patch.object(source_page, 'notes', side_effect=lambda change, home: real_notes(change, home, gh=notes_gh)):
+            path = source_page.write(root, root / 'pages', 7)
+        self.assertIn('Sibling review note', path.read_text())
+        self.assertIn('owner: "o", name: "sibling"', queries[0])
+        self.assertIn('pullRequest(number: 42)', queries[0])
+        home_change = bs._gh_change('#58', gh_pr(58), '', 'o/app')
+        self.assertEqual(real_notes(home_change, cfg.backlog, gh=notes_gh)[1], '')
+        self.assertIn('owner: "o", name: "app"', queries[-1])
+        self.assertIn('pullRequest(number: 58)', queries[-1])

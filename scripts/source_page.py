@@ -91,9 +91,12 @@ def notes(change: board_sources.Change, home, gh=backlog.run_gh, call=backlog._c
     only, apart from the cache refresh's. Never raises."""
     when = board_sources._when
     try:
-        n = int(change.ref[1:])
         if isinstance(home, backlog.GitHubBacklog):
-            owner, name = home.repo.split("/", 1)
+            match = re.fullmatch(r"(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<number>\d+)", change.ref)
+            if not match:
+                return [], "invalid GitHub pull request reference"
+            n = int(match.group("number"))
+            owner, name = (match.group("repo") or home.repo).split("/", 1)
             q = (f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
                  f"{{ pullRequest(number: {n}) {{ {GH_NOTES} }} }} }}")
             code, out, err = gh(["api", "graphql", "-f", f"query={q}"])
@@ -106,6 +109,7 @@ def notes(change: board_sources.Change, home, gh=backlog.run_gh, call=backlog._c
                          board_sources.ReviewThread(bool(t.get("isResolved")), (c.get("author") or {}).get("login") or "",
                                                     c.get("body") or "", when(c.get("createdAt")), c.get("url") or ""))
                     for t in nodes for c in ((t.get("comments") or {}).get("nodes") or [])[:1]], ""
+        n = int(change.ref[1:])
         secret = backlog.token(home)
         if not secret:
             return [], home.missing_token
