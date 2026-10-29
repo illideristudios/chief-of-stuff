@@ -48,6 +48,7 @@ DRAWS_NOTHING = (
     "decision_graph",  # Entities: decision DAG leaves, ancestors and rejected alternatives.
     "decision_history",  # Use Cases: harsh justification judgement and PrecedentSource seam.
     "precedent_source",  # Interface Adapters: tracker and decision-graph PrecedentSource gateways.
+    "decisions_cli",  # Frameworks and Drivers: coordinator/architect/owner decision graph CLI.
     "performance",
     "performance_report",
     "limits", "limits_history", "limits_probe", "limits_cli", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
@@ -254,7 +255,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
         "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
-        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli",
+        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "decisions_cli",
         "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }

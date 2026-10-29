@@ -511,5 +511,272 @@ class DecisionGraphStoreAndAdapterTest(unittest.TestCase):
         self.assertEqual(self.dh.lookup_precedent(after, "early prototypes markdown tables"), ())
 
 
+
+class DecisionGraphMCPAndCLITest(unittest.TestCase):
+    def setUp(self) -> None:
+        from datetime import datetime, timezone
+        import engine_mcp
+        import guard_binding
+        import store
+
+        self.store_mod = store
+        self.engine_mcp = engine_mcp
+        self.guard_binding = guard_binding
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        store.migrate(self.root / "store.db")
+        self.db = store.Store(self.root / "store.db")
+        self.addCleanup(self.db.engine.dispose)
+        self.issue_key = "github:example/repo#1181"
+        self.db.upsert_item(self.issue_key, title="Decision graph", stage="implement")
+
+        self.d1 = self.db.add_graph_decision(
+            "Keep decisions in markdown tables.",
+            "No database existed in early prototypes.",
+            topic="precedent",
+            decided_by="owner",
+        )
+        self.d2 = self.db.add_graph_decision(
+            "Store decisions in SQLite behind SQLAlchemy ORM.",
+            "Concurrent workers require transactional writes.",
+            parent_ids=(self.d1.id,),
+            topic="precedent-storage",
+            decided_by="owner",
+            rejected_alternatives=(
+                dg.RejectedAlternative(
+                    approach="Poll verdict in a model turn loop",
+                    reason="Burns model tokens waiting on the coordinator.",
+                ),
+            ),
+        )
+        self.d3 = self.db.add_graph_decision(
+            "Expose only current leaves to workers by default.",
+            "Superseded decisions in context cause decision poisoning.",
+            parent_ids=(self.d1.id,),
+            topic="precedent-visibility",
+            decided_by="owner",
+        )
+        self.d4 = self.db.add_graph_decision(
+            "Serve current decision leaves through the engine MCP tool backed by SQLAlchemy ORM.",
+            "Combines ACID storage with single-tool history gating.",
+            parent_ids=(self.d2.id, self.d3.id),
+            topic="decision-graph",
+            decided_by="owner",
+        )
+
+        self.env = {
+            "CHIEF_ISSUE_KEY": self.issue_key,
+            "CHIEF_STAGE": "implement",
+            "CHIEF_ATTEMPT": "1",
+            "CHIEF_SESSION_ID": "worker-1181",
+            "CHIEF_ROOT": str(self.root),
+            "CHIEF_LAUNCHED_AT": datetime.now(timezone.utc).isoformat(),
+            "CHIEF_PYTHON": sys.executable,
+        }
+        self.binding = guard_binding.Binding.from_env(self.env)
+        self.tools = engine_mcp.EngineTools(self.binding, self.db)
+
+    def test_mcp_decisions_returns_only_current_leaves_by_default_and_refuses_unjustified_history(self) -> None:
+        import asyncio
+
+        leaves_res = asyncio.run(self.tools.decisions())
+        self.assertEqual([leaf["id"] for leaf in leaves_res["leaves"]], [self.d4.id])
+        self.assertEqual(leaves_res["leaves"][0]["parent_ids"], [self.d2.id, self.d3.id])
+        self.assertNotIn("rejected_alternatives", leaves_res["leaves"][0])
+        self.assertNotIn("ancestors", leaves_res)
+
+        refused = asyncio.run(self.tools.decisions(action="ancestors", leaf_id=self.d4.id))
+        self.assertEqual(refused["status"], "refused")
+        self.assertIn("justify", refused["message"].lower())
+        self.assertEqual(self.db.pending_history_requests(), [])
+
+        with self.assertRaises(TypeError):
+            asyncio.run(self.tools.decisions(role="coordinator"))  # type: ignore[call-arg]
+
+    def test_stdio_mcp_blocks_worker_until_coordinator_judges_and_delivers_bounded_slice_without_model_polling(self) -> None:
+        import asyncio
+        import json
+        import decisions_cli
+        import inbox
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        mailbox_dir = self.root / ".chief-of-stuff" / "mailbox"
+
+        async def run() -> dict:
+            params = StdioServerParameters(
+                command=sys.executable,
+                args=[str(ROOT / "scripts/engine_mcp.py")],
+                env=self.env,
+                cwd=str(self.root),
+            )
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write, read_timeout_seconds=10) as client:
+                    await client.initialize()
+
+                    async def coordinator_side() -> None:
+                        for _ in range(200):
+                            if self.db.pending_history_requests():
+                                break
+                            await asyncio.sleep(0.02)
+                        pending = self.db.pending_history_requests()
+                        self.assertEqual(len(pending), 1)
+                        # Verify request reached coordinator mailbox without any ancestor history attached.
+                        coord_incoming = mailbox_dir / "coordinator" / "incoming"
+                        msg_files = list(coord_incoming.glob("msg_*"))
+                        self.assertEqual(len(msg_files), 1)
+                        msg = inbox.Message.from_file(msg_files[0])
+                        self.assertNotIn("Keep decisions in markdown tables", repr(msg.to_dict()))
+                        # Coordinator CLI judges pending requests without reading history.
+                        rc = await asyncio.to_thread(
+                            decisions_cli.main, ["--root", str(self.root), "judge"]
+                        )
+                        self.assertEqual(rc, 0)
+
+                    coord_task = asyncio.create_task(coordinator_side())
+                    call_res = await client.call_tool(
+                        "decisions",
+                        {
+                            "action": "ancestors",
+                            "leaf_id": self.d4.id,
+                            "requested_depth": 1,
+                            "justification": (
+                                f"Decision #{self.d4.id} requires the engine MCP tool to serve leaves, "
+                                "which does not match what the code shows in scripts/engine_mcp.py:20."
+                            ),
+                        },
+                    )
+                    await coord_task
+                    self.assertFalse(call_res.is_error, call_res)
+                    return json.loads(call_res.content[0].text)
+
+        payload = asyncio.run(run())
+        self.assertEqual(payload["status"], "approved")
+        self.assertEqual(payload["approved_depth"], 1)
+        self.assertEqual([a["id"] for a in payload["ancestors"]], [self.d2.id, self.d3.id])
+        self.assertEqual(len(self.db.history_grants()), 1)
+
+        # Code mismatch was also reported to the architect mailbox.
+        arch_files = list((mailbox_dir / "architect" / "incoming").glob("msg_*"))
+        self.assertEqual(len(arch_files), 1)
+
+    def test_stdio_mcp_was_rejected_and_denial_wake_blocked_worker_with_narrow_or_denied_verdict(self) -> None:
+        import asyncio
+        import json
+        import decisions_cli
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        async def run() -> tuple[dict, dict]:
+            params = StdioServerParameters(
+                command=sys.executable,
+                args=[str(ROOT / "scripts/engine_mcp.py")],
+                env=self.env,
+                cwd=str(self.root),
+            )
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write, read_timeout_seconds=10) as client:
+                    await client.initialize()
+
+                    async def approve_narrow() -> None:
+                        for _ in range(200):
+                            reqs = self.db.pending_history_requests()
+                            if reqs:
+                                rc = await asyncio.to_thread(
+                                    decisions_cli.main,
+                                    [
+                                        "--root", str(self.root),
+                                        "decide",
+                                        "--request", str(reqs[0].id),
+                                        "--approve",
+                                        "--reason", "Specific non-obvious approach named.",
+                                    ],
+                                )
+                                self.assertEqual(rc, 0)
+                                return
+                            await asyncio.sleep(0.02)
+                        self.fail("pending was_rejected request never arrived")
+
+                    t1 = asyncio.create_task(approve_narrow())
+                    res1 = await client.call_tool(
+                        "decisions",
+                        {
+                            "action": "was_rejected",
+                            "approach": "poll verdict in a model turn loop",
+                            "justification": (
+                                "I am about to build worker waiting by polling verdict in a model turn loop; "
+                                "not obvious because current leaf #4 does not state the waiting mechanism."
+                            ),
+                        },
+                    )
+                    await t1
+                    self.assertFalse(res1.is_error, res1)
+
+                    async def deny_fishing() -> None:
+                        for _ in range(200):
+                            reqs = self.db.pending_history_requests()
+                            if reqs:
+                                rc = await asyncio.to_thread(
+                                    decisions_cli.main,
+                                    ["--root", str(self.root), "judge", "--request", str(reqs[0].id)],
+                                )
+                                self.assertEqual(rc, 0)
+                                return
+                            await asyncio.sleep(0.02)
+                        self.fail("pending fishing request never arrived")
+
+                    t2 = asyncio.create_task(deny_fishing())
+                    res2 = await client.call_tool(
+                        "decisions",
+                        {
+                            "action": "ancestors",
+                            "leaf_id": self.d4.id,
+                            "justification": "Need more context on earlier decisions.",
+                        },
+                    )
+                    await t2
+                    self.assertFalse(res2.is_error, res2)
+                    return json.loads(res1.content[0].text), json.loads(res2.content[0].text)
+
+        narrow, denied = asyncio.run(run())
+        self.assertEqual(narrow["status"], "approved")
+        self.assertTrue(narrow["matched"])
+        self.assertEqual(narrow["rejected_alternative"]["approach"], "Poll verdict in a model turn loop")
+        self.assertNotIn("ancestors", narrow)
+
+        self.assertEqual(denied["status"], "denied")
+        self.assertIn("context", denied["reason"].lower())
+        # Only the 1 approved grant was logged; the denied request logged no grant.
+        self.assertEqual(len(self.db.history_grants()), 1)
+
+    def test_decisions_cli_allows_free_readers_and_refuses_worker_bound_shell(self) -> None:
+        import io
+        import json
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest import mock
+        import decisions_cli
+
+        out = io.StringIO()
+        with mock.patch.dict("os.environ", {}, clear=False):
+            # Ensure no worker env vars are set in coordinator/owner shell.
+            clean_env = {k: v for k, v in __import__("os").environ.items() if not k.startswith("CHIEF_")}
+            with mock.patch.dict("os.environ", clean_env, clear=True), redirect_stdout(out):
+                rc = decisions_cli.main(
+                    ["--root", str(self.root), "--json", "read", "--role", "owner", "--leaf", str(self.d4.id)]
+                )
+        self.assertEqual(rc, 0)
+        parsed = json.loads(out.getvalue())
+        self.assertEqual([a["id"] for a in parsed["ancestors"]], [self.d2.id, self.d3.id, self.d1.id])
+
+        # Inside a worker-bound environment, decisions_cli refuses so workers cannot bypass the MCP tool.
+        err = io.StringIO()
+        with mock.patch.dict("os.environ", self.env, clear=False), redirect_stderr(err):
+            rc_worker = decisions_cli.main(
+                ["--root", str(self.root), "read", "--role", "coordinator"]
+            )
+        self.assertEqual(rc_worker, 1)
+        self.assertIn("refused", err.getvalue().lower())
+
 if __name__ == "__main__":
     unittest.main()

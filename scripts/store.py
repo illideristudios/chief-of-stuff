@@ -9,6 +9,7 @@ it changes, and a test holds these models to what the migrations build.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import uuid
 from contextlib import closing, contextmanager
@@ -340,6 +341,28 @@ def is_current(path: Path | str) -> bool:
             return False
 
 
+
+def verdict_fifo_path(root: Path, request_id: int) -> Path:
+    return Path(root) / ".chief-of-stuff" / "verdicts" / f"req_{request_id}.fifo"
+
+
+def signal_history_verdict(root: Path, request_id: int) -> None:
+    """Wake a blocked MCP `decisions` waiter immediately once its verdict commits."""
+    fifo = verdict_fifo_path(root, request_id)
+    if not fifo.exists():
+        return
+    try:
+        wfd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        os.write(wfd, b"\x01")
+    except OSError:
+        pass
+    finally:
+        os.close(wfd)
+
+
 def migrate(path: Path | str) -> None:
     """Enable WAL and bring the database at `path` to the latest revision. Call it once at engine start, never from
     concurrent writers: journal-mode changes need an exclusive lock, and first-time migrations race to create tables."""
@@ -349,7 +372,8 @@ def migrate(path: Path | str) -> None:
 
 class Store:
     def __init__(self, path: Path | str, clock: clock.Clock = clock.system) -> None:
-        private_state.store_files(Path(path), create=True)
+        self.path = Path(path)
+        private_state.store_files(self.path, create=True)
         self.clock = clock
         self._active_session = None
         self.engine = create_engine(f"sqlite:///{path}", connect_args={"timeout": 30, "isolation_level": None})
@@ -1154,7 +1178,8 @@ class Store:
                 )
             s.flush()
             s.expunge(row)
-            return row
+        signal_history_verdict(self.path.parent, request_id)
+        return row
 
     def judge_history_request(self, request_id: int, *, decided_by: str = "coordinator") -> DecisionHistoryRequest:
         """Judge one pending request using only current leaves and the worker's justification text."""

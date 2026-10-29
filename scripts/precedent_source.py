@@ -50,7 +50,7 @@ class GraphPrecedentSource:
 
 
 def default_store_path(root: Path) -> Path:
-    return Path(root) / ".chief-of-stuff" / "store.db"
+    return Path(root) / "store.db"
 
 
 def workspace_precedent_source(
