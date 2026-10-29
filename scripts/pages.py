@@ -70,6 +70,8 @@ ISSUE = re.compile(r"/issues/([a-z0-9_.-]+:[A-Za-z0-9_./-]+#\d+|\d+)(/source)?")
 WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
+MAX_RESPONSE = 16 * 1024 * 1024  # bound the snapshot held while preparing a response
+MAX_STATIC = MAX_RESPONSE - 64 * 1024  # leave room for HTTP headers
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
 # An answer saved mid-render of another page (the board) can leave that page stale until the next forge refresh.
 PAGE_LOCKS: dict[str, threading.Lock] = {}
@@ -91,6 +93,30 @@ def page_lock(path: Path | str) -> threading.Lock:
     """The lock one page's renders and its answer saves take, so neither overlaps another of the same page."""
     with PAGE_LOCKS_GUARD:
         return PAGE_LOCKS.setdefault(str(path), threading.Lock())
+
+
+@contextlib.contextmanager
+def publication_lock(root: Path | None, path: Path | str):
+    """Serialize one page's publication and answer saves across threads and server processes."""
+    with page_lock(path):
+        if root is None:
+            yield
+        else:
+            key = hashlib.sha256(os.fsencode(Path(path).resolve())).hexdigest()
+            with supervisor.lock(root.resolve() / ".chief-of-stuff" / "page-locks" / key, wait=True):
+                yield
+
+
+class ResponseTooLarge(Exception):
+    pass
+
+
+class ResponseSnapshot(io.BytesIO):
+    """Bound the entire prepared response, including headers, before sending any bytes."""
+    def write(self, data):
+        if self.tell() + len(data) > MAX_RESPONSE:
+            raise ResponseTooLarge
+        return super().write(data)
 
 
 def _plugin_version() -> str:
@@ -348,9 +374,9 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             day = name[:10]
             if not (root / cfg.tracker_path(day)).is_file() and not (root / "store.db").is_file():
                 return ""
-        with page_lock(key):  # checked under the lock: a request that waited finds the page already rendered
+        with publication_lock(root, key):  # check and record the identity under the cross-process lock
             board = board_name(root, pages_dir) if not name.endswith("-board.html") else None
-            if name == "decisions.html" and board:
+            if (name == "decisions.html" or (name.startswith("decision-") and not store_decision)) and board:
                 day = board[:10]
             sources = [*_sources(root, cfg, pages_dir, day), pages_dir / LOOKED_BEFORE, fragment.THEME_PATH]
             if board:
@@ -539,7 +565,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # A look is recorded before `fresh`, so the board counts from the look before, and taken back when the
             # board cannot render; one lock around it all, so two tabs loading at once cannot interleave it.
             pages = Path(self.directory)
-            with page_lock(pages / LAST_LOOKED) if look else contextlib.nullcontext():
+            with publication_lock(root, pages / LAST_LOOKED) if look else contextlib.nullcontext():
                 prior = None
                 if look:
                     with contextlib.suppress(OSError):
@@ -630,17 +656,48 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             lock = decision_page.page_render_lock(root, shared=True)
         else:
             lock = contextlib.nullcontext()
-        with lock:
-            if self._allowed():
-                match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
-                if match:
-                    self._send_worker_session(int(match[1]), body)
-                elif self._is_html():
-                    self._send_html(body)
-                elif body:
-                    super().do_GET()
-                else:
-                    super().do_HEAD()
+        def prepare():
+            with lock:
+                if self._allowed():
+                    match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
+                    if match:
+                        self._send_worker_session(int(match[1]), body)
+                    elif self._is_html():
+                        self._send_html(body)
+                    elif body:
+                        super(Handler, self).do_GET()
+                    else:
+                        super(Handler, self).do_HEAD()
+        self._snapshot_response(prepare)
+
+    def _snapshot_response(self, prepare):
+        """Prepare bounded bytes before writing to a potentially stalled socket."""
+        socket_output = self.wfile
+        snapshot = ResponseSnapshot()
+        self.wfile = snapshot
+        try:
+            try:
+                prepare()
+            except ResponseTooLarge:
+                snapshot = ResponseSnapshot()
+                self.wfile = snapshot
+                self._headers_buffer = []
+                self.send_error(413, f"a response is at most {MAX_RESPONSE} bytes")
+        finally:
+            self.wfile = socket_output
+        socket_output.write(snapshot.getvalue())
+
+    def send_head(self):
+        # HEAD and GET reject the same oversized static file before the standard handler opens it.
+        path = Path(self.translate_path(self.path))
+        try:
+            stat = path.stat()
+            if S_ISREG(stat.st_mode) and stat.st_size > MAX_STATIC:
+                self.send_error(413, f"a static file is at most {MAX_STATIC} bytes")
+                return None
+        except OSError:
+            pass  # The standard handler reports missing or unreadable files.
+        return super().send_head()
 
     def do_GET(self):
         self._serve(True)
@@ -782,6 +839,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        self._snapshot_response(self._post)
+
+    def _post(self):
         """Save the user's answer beside the decision. Only this machine's own pages may post: the Host and, when a
         browser sends one, the Origin must be this server's."""
         port = self.server.server_address[1]
@@ -815,7 +875,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if source is None or not source.is_file():
             return self._refusal(404, "No such decision. Your answer was not saved.", answer=draft, words_name="words")
         import decision_page
-        with page_lock(Path(self.directory) / f"decision-{m[1]}.html"):
+        with publication_lock(getattr(self.server, "root", None), Path(self.directory) / f"decision-{m[1]}.html"):
             try:
                 d = decision_page.parse(json.loads(source.read_text()))
             except decision_page.BAD:

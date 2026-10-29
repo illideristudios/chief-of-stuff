@@ -1826,5 +1826,122 @@ class SuperviseTest(unittest.TestCase):
         ensured.assert_called_once()
 
 
+class CrossProcessPublicationTest(unittest.TestCase):
+    setUp = RenderOnRequestTest.setUp
+    fake_refresh = RenderOnRequestTest.fake_refresh
+
+    def test_two_servers_serialize_same_page_publications(self):
+        import select
+        scripts = Path(__file__).resolve().parent.parent / 'scripts'
+        code = '''import sys, threading, contextlib
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import pages, render_board
+root = Path(sys.argv[2]); directory = root / "pages"
+original_lock = pages.publication_lock if hasattr(pages, "publication_lock") else None
+if original_lock:
+    @contextlib.contextmanager
+    def observed_lock(root, path):
+        print("attempting", flush=True)
+        with original_lock(root, path):
+            yield
+    pages.publication_lock = observed_lock
+def write(root, day, **kw):
+    print("entered", flush=True)
+    sys.stdin.readline()
+    (directory / (day + "-board.html")).write_text("<body>" + sys.argv[3] + "</body>")
+render_board.write = write
+server = pages.make_server(directory, 0, root=root, refresh=lambda *a: None)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+'''
+        processes = []
+        for label in ('first', 'second'):
+            proc = subprocess.Popen([sys.executable, '-u', '-c', code, str(scripts), str(self.root), label],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            processes.append(proc)
+            def cleanup(p=proc):
+                if p.poll() is None:
+                    p.kill()
+                p.communicate(timeout=10)
+            self.addCleanup(cleanup)
+        def line(proc):
+            self.assertTrue(select.select([proc.stdout], [], [], 10)[0], 'server did not signal in time')
+            return proc.stdout.readline().decode().strip()
+        ports = [int(line(p)) for p in processes]
+        results = []
+        threads = [threading.Thread(target=lambda port=p: results.append(get(port, '/')), daemon=True) for p in ports]
+        threads[0].start()
+        self.assertEqual(line(processes[0]), 'attempting')
+        self.assertEqual(line(processes[0]), 'entered')
+        threads[1].start()
+        self.assertEqual(line(processes[1]), 'attempting')
+        try:
+            self.assertFalse(select.select([processes[1].stdout], [], [], 0.6)[0], 'second server rendered concurrently')
+        finally:
+            processes[0].stdin.write(b'go\n'); processes[0].stdin.flush()
+        self.assertEqual(line(processes[1]), 'entered')
+        processes[1].stdin.write(b'go\n'); processes[1].stdin.flush()
+        for thread in threads:
+            thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual([r.status for r in results], [200, 200])
+        again = threading.Thread(target=lambda: results.append(get(ports[0], '/')), daemon=True)
+        again.start()
+        self.assertEqual(line(processes[0]), 'attempting')
+        self.assertEqual(line(processes[0]), 'entered')
+        processes[0].stdin.write(b'go\n'); processes[0].stdin.flush()
+        again.join(10)
+        self.assertFalse(again.is_alive())
+        self.assertIn(b'first', results[-1].body)
+
+    def test_stalled_static_download_does_not_block_board_cli(self):
+        (self.pages / 'large.bin').write_bytes(b'x' * (12 * 1024 * 1024))
+        client = socket.socket()
+        self.addCleanup(client.close)
+        self.server.handle_error = lambda *args: None
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        client.settimeout(10)
+        client.connect(('127.0.0.1', self.port))
+        client.sendall(f'GET /large.bin HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n\r\n'.encode())
+        self.assertIn(b'200', client.recv(1024))
+        script = Path(__file__).resolve().parent.parent / 'scripts' / 'render_board.py'
+        proc = subprocess.run([sys.executable, str(script), '--root', str(self.root), '--date', self.day],
+                              capture_output=True, text=True, timeout=5)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_authored_decision_uses_served_board_day_for_references(self):
+        from datetime import timedelta
+        import decision_page
+        today = datetime.fromisoformat(self.day).date()
+        board_day = (today - timedelta(days=2)).isoformat()
+        newer_day = (today - timedelta(days=1)).isoformat()
+        self.tracker.unlink()
+        (self.root / 'daily' / f'{board_day}-tracker.md').write_text(ISSUE_TRACKER.format(day=board_day, task='Board task'))
+        (self.root / 'daily' / f'{newer_day}-tracker.md').write_text(ISSUE_TRACKER.format(day=newer_day, task='Newer task').replace('implement', 'review'))
+        (self.pages / f'{board_day}-board.html').write_text('<body>board</body>')
+        decision = json.loads(DECISION)
+        decision['references'] = [{'kind': 'issue', 'value': '#7'}]
+        (self.pages / 'decision-cache-ttl.json').write_text(json.dumps(decision))
+        original = decision_page.write
+        seen = []
+        def observe(root, directory, name, day, **kw):
+            ctx = decision_page.context(root, day)
+            seen.append((day, [(task.item, task.stage) for task in ctx.tasks]))
+            return original(root, directory, name, day, **kw)
+        with mock.patch.object(decision_page, 'write', side_effect=observe):
+            response = get(self.port, '/decisions/cache-ttl')
+            self.assertEqual(response.status, 200)
+        self.assertEqual(seen, [(board_day, [('Board task', 'implement')])])
+        self.assertIn(b'<span class="st">implement</span>', response.body)
+
+    def test_oversized_static_file_is_refused_for_get_and_head(self):
+        with (self.pages / 'huge.bin').open('wb') as stream:
+            stream.truncate(pg.MAX_STATIC + 1)
+        for method in ('GET', 'HEAD'):
+            with self.subTest(method=method):
+                self.assertEqual(get(self.port, '/huge.bin', method=method).status, 413)
+
+
 if __name__ == "__main__":
     unittest.main()
