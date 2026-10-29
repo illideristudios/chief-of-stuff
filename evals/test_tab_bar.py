@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta
 from html import unescape
 from html.parser import HTMLParser
@@ -467,6 +468,81 @@ class LeadCountsTest(unittest.TestCase):
                 server.server_close()
         finally:
             shutil.rmtree(root, True)
+
+    def test_direct_routes_use_latest_tracker_when_today_is_missing(self):
+        from test_pages import ISSUE_TRACKER, LastLookedTest
+        import decision_page
+        import render_board
+        root = Path(tempfile.mkdtemp())
+        try:
+            now = datetime.now(ZoneInfo(ZONE))
+            day = (now.date() - timedelta(days=1)).isoformat()
+            (root / "CLAUDE.md").write_text(
+                "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+                f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n"
+                "- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text(LastLookedTest.SETTINGS + "\n[workers]\nmax_concurrency = 2\n")
+            (root / "daily").mkdir()
+            (root / "daily" / f"{day}-tracker.md").write_text(
+                ISSUE_TRACKER.format(day=day, task="Security audit").replace(
+                    "\n## Log", f"\n| Ready | Ship | unassigned | open | {day} |  | S | build | implement | #8 | c |\n\n## Log"))
+            pages = root / "pages"
+            pages.mkdir()
+            (pages / "decision-alpha.json").write_text(decision("alpha"))
+            (pages / ".looked-before").write_text(datetime.fromisoformat(f"{day}T08:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+            render_board.write(root, day)
+            (pages / "decision-alpha.html").unlink()  # Exercise a direct render before the board regenerates it.
+            server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                port = server.server_address[1]
+                with mock.patch.object(decision_page, "write", wraps=decision_page.write) as write:
+                    self.assertEqual(get(port, "/decisions/alpha").status, 200)
+                    self.assertEqual(write.call_args.args[3], day)
+                routes = ("/decisions/alpha", "/issues/7", "/issues/7/source", "/workers", "/decisions", "/")
+                for route in routes:
+                    with self.subTest(route=route):
+                        response = get(port, route)
+                        self.assertEqual(response.status, 200)
+                        got = tabs(response.body.decode())
+                        self.assertEqual([b.all_text() for b in badges(got["Dispatch"])], ["1"])
+                        since = badges(got["Since you last looked"])
+                        self.assertEqual([b.all_text() for b in since], ["1"])
+                        self.assertIn("08:00", since[0].attrs["title"])
+            finally:
+                server.shutdown()
+                server.server_close()
+        finally:
+            shutil.rmtree(root, True)
+
+    def test_fallback_navigation_uses_tracker_day_and_decision_deadlines(self):
+        import decision_page
+        import task_forge
+        from test_pages import ISSUE_TRACKER, LastLookedTest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime.now(ZoneInfo(ZONE))
+            day = now.date() - timedelta(days=1)
+            deadline = now.date() + timedelta(days=1)
+            (root / "CLAUDE.md").write_text(
+                "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+                f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n"
+                "- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text(LastLookedTest.SETTINGS)
+            (root / "daily").mkdir()
+            (root / "pages").mkdir()
+            (root / "daily" / f"{day}-tracker.md").write_text(
+                ISSUE_TRACKER.format(day=day, task="Security audit") +
+                f"\n## Decisions\n\n| time | item | words |\n|---|---|---|\n| 09:00 | deadline: Review {deadline} 16:00 | yes |\n")
+            with mock.patch.object(task_forge, "tab_counts", wraps=task_forge.tab_counts) as counts, \
+                 mock.patch.object(decision_page, "decision_context", wraps=decision_page.decision_context) as context:
+                pg._tracker_navigation(root, root / "pages")
+            args, kwargs = counts.call_args
+            self.assertEqual(kwargs["tracker_day"], day)
+            self.assertEqual(args[2].date(), now.date())
+            self.assertEqual((args[2].second, args[2].microsecond), (0, 0))
+            self.assertEqual([(d.name, d.at.date()) for d in args[1].deadlines], [("Review", deadline)])
+            self.assertEqual(context.call_args.args[1:], (day, args[2]))
 
     def test_navigation_omits_unavailable_counts_and_keeps_known_zeros(self):
         # Unavailable keys are absent from the nav dict; a known zero is present as 0 and still draws no badge.

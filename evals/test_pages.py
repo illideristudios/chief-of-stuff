@@ -951,18 +951,35 @@ class LastLookedTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertIsNotNone(workspace.looked_before(self.pages))
 
-    def test_a_look_re_renders_the_board_only(self):
-        # #579 review R6: `.looked-before` is the board's source, not every page's.
-        import issue_page
+    def test_a_look_refreshes_since_on_all_routes(self):
         self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
-        calls = []
-        real = issue_page.write
-        with mock.patch.object(issue_page, "write", lambda *a, **k: calls.append(1) or real(*a, **k)):
-            get(self.port, "/", headers=self.LOOK)
-            self.assertEqual(get(self.port, "/issues/7").status, 200)
-            get(self.port, "/", headers=self.LOOK)
-            get(self.port, "/issues/7")
-        self.assertEqual(len(calls), 1)
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        earlier = datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE))
+        later = datetime.fromisoformat(f"{self.day}T10:00").replace(tzinfo=ZoneInfo(ZONE))
+        (self.pages / ".looked-before").write_text(earlier.isoformat())
+        routes = ("/decisions/cache-ttl", "/issues/7", "/issues/7/source", "/workers", "/decisions", "/")
+        for route in routes:
+            with self.subTest(route=route, phase="before"):
+                response = get(self.port, route)
+                self.assertEqual(response.status, 200)
+                self.assertIn(b"1 went needs input since 08:00", response.body)
+        (self.pages / ".last-looked").write_text(later.isoformat())
+        get(self.port, "/", headers=self.LOOK)
+        for route in routes:
+            with self.subTest(route=route, phase="after"):
+                response = get(self.port, route)
+                self.assertEqual(response.status, 200)
+                self.assertNotIn(b"went needs input since", response.body)
+
+
+    def test_a_changed_look_refreshes_an_authored_decision_without_a_board_render(self):
+        self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        marker = self.pages / ".looked-before"
+        marker.write_text(datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, "/decisions/cache-ttl").body)
+        marker.write_text(datetime.fromisoformat(f"{self.day}T10:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        self.assertNotIn(b"went needs input since", get(self.port, "/decisions/cache-ttl").body)
 
 
 class ReloadMarksItselfTest(unittest.TestCase):

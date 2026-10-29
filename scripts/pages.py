@@ -55,7 +55,7 @@ import page_reload
 import supervisor
 from backlog_ref import GitHubBacklog
 from workspace import (LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, looked_before, pages_address,
-                       read_config, record_look, unrecord_look)
+                       read_config, record_look, unrecord_look, with_workspace_decision_deadlines)
 
 SERVER = "chief-of-stuff-pages"
 PID = ".pid"
@@ -191,7 +191,9 @@ def _navigation(root: Path, pages_dir: Path, data):
 
 
 def _tracker_navigation(root: Path, pages_dir: Path) -> dict:
-    """Coordinator lead counts from today's tracker. No tracker or settings: every count is unavailable.
+    """Coordinator lead counts from today's tracker, or the latest available tracker.
+
+    No tracker or settings: every count is unavailable.
 
     Loads the same since/flow lookback window the board uses so Since/Epics match when the store is absent.
     """
@@ -204,21 +206,26 @@ def _tracker_navigation(root: Path, pages_dir: Path) -> dict:
         cfg = read_config(root)
     except (ConfigError, OSError):
         return {}
-    now = datetime.now(cfg.zone)
+    now = datetime.now(cfg.zone).replace(second=0, microsecond=0)
     tracker_day = now.date()
     tracker = root / cfg.tracker_path(tracker_day.isoformat())
+    trackers = daily_trackers(root, cfg)
     if not tracker.is_file():
-        return {}
+        if not trackers:
+            return {}
+        tracker_day, tracker = trackers[-1]
+    tracker_text = tracker.read_text()
+    cfg = with_workspace_decision_deadlines(root, cfg, tracker_text, tracker_day)
     try:
         settings = load_settings(root, cfg.settings_path)
     except (SettingsError, OSError):
         return {}
     looked = looked_before(pages_dir)
-    since_day = looked.astimezone(cfg.zone).date() if looked else tracker_day
+    since_day = looked.astimezone(cfg.zone).date() if looked else now.date()
     reach = (now - flow_chart.WINDOWS[-1][1]).date()
     bound = min(reach, since_day)
     earlier = []
-    for d, path in reversed(daily_trackers(root, cfg)):
+    for d, path in reversed(trackers):
         if d >= tracker_day:
             continue
         if d < bound:
@@ -228,7 +235,7 @@ def _tracker_navigation(root: Path, pages_dir: Path) -> dict:
     ctx = decision_page.decision_context(root, tracker_day, now)
     pending_refs = decision_page.held_refs(decision_page.entries(pages_dir, ctx), ctx)
     return task_forge.tab_counts(
-        tracker.read_text(), cfg, now, settings.lanes, settings.kanban, board_sources.load(pages_dir),
+        tracker_text, cfg, now, settings.lanes, settings.kanban, board_sources.load(pages_dir),
         pending_refs, looked, earlier, slots=settings.workers.max_concurrency or 1, tracker_day=tracker_day)
 
 
@@ -311,7 +318,8 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
         if name.startswith("decision-") and not store_decision:
             if not (pages_dir / f"{name[:-5]}.json").is_file():
                 return ""
-            day = today
+            days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
+            day = today if (root / "store.db").is_file() or today in days or not days else days[-1]
         elif store_decision or name.startswith("issue-") or name == "workers.html":
             day = today
         elif name == "decisions.html":
@@ -322,8 +330,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             if not (root / cfg.tracker_path(day)).is_file() and not (root / "store.db").is_file():
                 return ""
         with page_lock(key):  # checked under the lock: a request that waited finds the page already rendered
-            sources = [*_sources(root, cfg, pages_dir, day),
-                       *([pages_dir / LOOKED_BEFORE] if name.endswith("-board.html") else []), fragment.THEME_PATH]
+            sources = [*_sources(root, cfg, pages_dir, day), pages_dir / LOOKED_BEFORE, fragment.THEME_PATH]
             newest = max(RENDERER_MTIME_NS, max((p.stat().st_mtime_ns for p in sources if p.is_file()), default=0))
             mtime = target.stat().st_mtime_ns if target.is_file() else 0
             digest = _digest(sources)
