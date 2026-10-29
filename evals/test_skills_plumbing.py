@@ -173,6 +173,7 @@ class SkillsPlumbingTest(unittest.TestCase):
             "review-pipeline": "A verify pass with nothing open moves the task to `merge`.",
             "coordinator-sessions": "When a session's state is in question, poll it; do not ask the user.",
             "dispatch": "That row is the dispatch.",
+            "architect-signals": "you never edit `architecture/compliance.md` to mark a row assigned.",
         }
         release = start.install(root, self.base / "install")
         agent = (release / "agents" / "chief-of-stuff.md").read_text()
@@ -220,7 +221,7 @@ class SkillsPlumbingTest(unittest.TestCase):
         for runtime in (*NON_CLAUDE, "claude"):
             with self.subTest(runtime=runtime):
                 self.assert_pinned_skill_pointers(runtime, release,
-                                                  {"decision-page", "optional-features", "tracker-rows", "review-pipeline", "coordinator-sessions", "dispatch"})
+                                                  {"decision-page", "optional-features", "tracker-rows", "review-pipeline", "coordinator-sessions", "dispatch", "architect-signals"})
 
     def test_review_pipeline_description_names_every_read_moment(self):
         from evals.test_agent_budget import DESCRIPTION_CAP, description

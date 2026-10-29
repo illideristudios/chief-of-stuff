@@ -39,12 +39,13 @@ ONE_SHOT_PARAGRAPH = 3_800  # kept: a later slice trims this paragraph
 # rendered_sizes(1) over the simulated agent, copied into a temporary plugin:
 # Claude 39,241 B; Codex 37,248 B; Cursor 37,356 B; AGY 37,412 B (slice 487 plus the PR 540 review sentence simulated).
 # #547 adds the approved-forge-closure sentence: Claude 39,386; Codex 37,393; Cursor 37,501; AGY 37,557.
-PROMPT = {"claude": 39_390, "codex": 37_400, "cursor": 37_510, "agy": 37_560}
+# #1180 adds Architect signals (~379 B): bump prompt ceilings by the same delta, rounded up to 10 B.
+PROMPT = {"claude": 39_770, "codex": 37_780, "cursor": 37_890, "agy": 37_940}
 CEILING = {  # `## ` section -> bytes, heading line included
     "Role": 1600, "Dispatch authority": 1100, "Browser safety": 170, "Writing": 580,
     "Config": 1400, "Clock": 1850, "Calendar": 910, "Open the day": 2000, "Resume": 4670,
     "Write authority": 1790, "Filing": 360, "Autonomy": 2_500, "Dispatch": 1_200,
-    "Assign": 300, "Pipeline": 1_300, "Check": 2780,
+    "Assign": 300, "Pipeline": 1_300, "Architect signals": 400, "Check": 2780,
     "Sessions": 1_700, "Relay": 3190, "Tracker": 5_640, "Board": 1460,
     "Requirements": 360, "Share": 460, "Asks": 3900, "Notify": 360,
 }
@@ -56,8 +57,9 @@ CEILING = {  # `## ` section -> bytes, heading line included
 # stage 4 of the page-theme plan: the decision-page skill gains the theme contract (it names the vendored
 # `${CLAUDE_PLUGIN_ROOT}/assets/page-theme.css` the server reads and forbids styling from the JSON), one paragraph;
 # it measures 2,766 B under a 2,800 B ceiling.
-SKILL_CEILING = {"decision-page": 2_800, "optional-features": 4_950, "tracker-rows": 5_150, "review-pipeline": 9_250, "coordinator-sessions": 8_950, "dispatch": 14_400}  # measured size rounded up to 50 B
-SKILLS_TOTAL = 45_500  # all SKILL.md files, bytes; the sum of the ceilings above (measured 45,228 B)
+# #1180: architect-signals skill measured 1,548 B.
+SKILL_CEILING = {"decision-page": 2_800, "optional-features": 4_950, "tracker-rows": 5_150, "review-pipeline": 9_250, "coordinator-sessions": 8_950, "dispatch": 14_400, "architect-signals": 1_600}  # measured size rounded up to 50 B
+SKILLS_TOTAL = 47_100  # all SKILL.md files, bytes; prior 45,500 plus architect-signals
 DESCRIPTION_CAP = 300  # frontmatter description characters, not bytes
 SKILL_POINTER = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/skills/([^/\s`]+)/SKILL\.md")
 DECISION_PAGE_POINTER = "Before writing a decision page, Read ${CLAUDE_PLUGIN_ROOT}/skills/decision-page/SKILL.md"
