@@ -18,7 +18,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from decision_actions import current_rows, state_of, tab_counts as store_tab_counts
+from decision_actions import current_rows, state_of
 from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history, horizon,  # noqa: E402
                       nearest_deadline, queue_durations, task_end as _end)
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
@@ -395,7 +395,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
     if db is not None:
-        navigation = store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
+        navigation = decision_page.store_navigation(db, decisions or [])
     else:
         navigation = tab_counts(tracker_text, cfg, now, lanes or {}, kanban, sources, pending_refs, looked,
                                 [*(look_log or []), *(stage_log or [])], slots, held=held, ends=ends, tracker_day=tracker_day)
@@ -548,7 +548,7 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
     look_log = sorted((d, text) for d, text in logs if since_day <= d < reach)
     # Same lead counts the board draws (#965): store rows (with resumes for exhaustion), or the tracker.
     if db is not None:
-        navigation = store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
+        navigation = decision_page.store_navigation(db, decision_page.entries(out.parent, ctx))
     else:
         pending_preview = decision_page.entries(out.parent, ctx)
         navigation = tab_counts(tracker_text, cfg, now, settings.lanes, settings.kanban, sources,

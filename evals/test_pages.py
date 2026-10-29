@@ -708,7 +708,7 @@ class RenderOnRequestTest(unittest.TestCase):
             with self.subTest(route=route):
                 page_nav = nav.search(get(self.port, route).body.decode()).group(0)
                 for badge in ('title="1 need input">1', 'title="1 ready to dispatch">1',
-                              'title="1 pending">1'):
+                              'title="2 pending">2'):
                     self.assertIn(badge, board_nav)
                     self.assertIn(badge, page_nav)
 
@@ -1324,6 +1324,19 @@ class AnswerTest(unittest.TestCase):
         self.assertEqual(get(self.port, "/decisions/linked").status, 404)
         self.assertEqual(post(self.port, "/decisions/linked", b"key=B", origin=self.origin).status, 404)
         self.assertEqual((outside.read_bytes(), link.is_symlink()), (before, True))
+
+    def test_validation_refusal_survives_navigation_read_failures(self):
+        for target, error in (("_page_data", OSError("private store error")),
+                              ("_tracker_navigation", OSError("private tracker error")),
+                              ("_navigation", RuntimeError("private navigation error"))):
+            with self.subTest(target=target), mock.patch.object(pg, target, side_effect=error):
+                resp = post(self.port, "/decisions/cache-ttl", b"key=Z&words=%3Cdraft%3E", origin=self.origin)
+                self.assertEqual(resp.status, 400)
+                self.assertIn("&lt;draft&gt;", resp.body.decode())
+                self.assertIn("Choose one of the options", resp.body.decode())
+                self.assertNotIn("private", resp.body.decode())
+                self.assertIn("no-store", resp.getheader("Cache-Control"))
+                self.assertIsNone(self.answer())
 
     def test_an_unreadable_decision_takes_no_answer(self):
         self.json.write_text("{")

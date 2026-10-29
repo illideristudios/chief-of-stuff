@@ -676,6 +676,15 @@ def pending_count(pages_dir: Path, ctx: Context | None) -> int:
     return sum(d is not None for _, d, _, _ in entries(pages_dir, ctx)) if ctx else 0
 
 
+def store_navigation(db: PageData, pending: list, navigation: dict | None = None) -> dict:
+    """Store lead counts with the readable authored decisions included exactly once."""
+    counts = store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
+    nav = dict(navigation) if navigation is not None else counts
+    store_count = counts["decisions"]
+    nav["decisions"] = store_count + sum(d is not None for _, d, _, _ in pending)
+    return nav
+
+
 def held_refs(pending: list[tuple[str, dict | None, datetime | None, str]], ctx: Context) -> dict[str, datetime | None]:
     """The issues and changes the pending decisions (`entries`) hold, keyed as the board files them (`ref_keys`): what a
     task's hold names as `decision` (#228), and what decisions.html counts as held. Each maps to when the first
@@ -947,8 +956,7 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
             f'  <section>\n    <h2>COMPLETED · {len(done)}</h2>\n    <div class="list fin">\n'
             f'      <div class="row done head cap"><span>answered</span><span>decision</span><span>answer</span><span>{words}</span><span>since</span></div>\n'
             + ("\n".join(done) or none) + "\n    </div>\n  </section>\n")
-    nav = navigation if navigation is not None else (
-        store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes) if db is not None else {})
+    nav = (store_navigation(db, pending, navigation) if db is not None else (navigation or {}))
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             f"<title>Decisions · {escape(_day(day))}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decisions\">\n{tab_bar('Decisions', total_pending, **nav)}"
@@ -962,6 +970,8 @@ def write_all(pages_dir: Path, ctx: Context, day: str, root: Path | None = None,
     """Re-render every readable decision's page from its JSON and the context, and `decisions.html`; the pending entries."""
     pending = entries(pages_dir, ctx)
     count = sum(d is not None for _, d, _, _ in pending)
+    if db is not None:
+        navigation = store_navigation(db, pending, navigation)
     for source in pages_dir.glob("decision-*.json"):
         try:
             page = render(parse(json.loads(source.read_text())), day, ctx.forge, root, ctx, source.stem.removeprefix("decision-"),

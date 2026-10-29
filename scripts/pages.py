@@ -175,7 +175,18 @@ def _navigation(root: Path, pages_dir: Path, data):
     import decision_actions
     if data is not None:
         # Resumes keep exhausted retries in Workers, not Dispatch (#963 / #965).
-        return decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+        import decision_page
+        try:
+            day = datetime.now(read_config(root).zone).date().isoformat()
+        except (ConfigError, OSError):
+            day = ""
+        ctx = decision_page.context(root, day)
+        if ctx is not None:
+            return decision_page.store_navigation(data, decision_page.entries(pages_dir, ctx))
+        counts = decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+        if any(pages_dir.glob("decision-*.json")):
+            counts.pop("decisions", None)
+        return counts
     return _tracker_navigation(root, pages_dir)
 
 
@@ -769,7 +780,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if (key and key not in [o["key"] for o in d["options"]]) or not (key or words):
                 root = getattr(self.server, "root", None)
                 pages_dir = Path(self.directory)
-                navigation = _navigation(root, pages_dir, _page_data(root)) if root is not None else None
+                try:
+                    navigation = _navigation(root, pages_dir, _page_data(root)) if root is not None else None
+                except Exception:  # Navigation is optional; a read failure must not discard the submitted draft.
+                    navigation = None
                 page = decision_page.render(d, datetime.now().astimezone().date().isoformat(), slug=m[1],
                                             refusal="Your answer was not saved. Choose one of the options or write an answer.",
                                             draft=draft, selected=key if key in [o["key"] for o in d["options"]] else "",

@@ -298,7 +298,7 @@ class LeadCountsTest(unittest.TestCase):
             with self.subTest(page=page):
                 got = tabs(html)
                 expected = {"Workers": ("1", "need"), "Dispatch": ("1", "ready"),
-                            "Decisions": ("2", "pending")}
+                            "Decisions": ("4", "pending")}
                 for label, (count, why) in expected.items():
                     found = badges(got[label])
                     self.assertEqual([b.all_text() for b in found], [count], f"{page}: {label}")
@@ -392,6 +392,47 @@ class LeadCountsTest(unittest.TestCase):
         finally:
             shutil.rmtree(root, True)
 
+    def test_mixed_decision_sources_match_on_every_page(self):
+        import store
+        root = Path(tempfile.mkdtemp())
+        try:
+            day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
+            (root / "CLAUDE.md").write_text(
+                "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+                f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n")
+            (root / "daily").mkdir()
+            (root / "daily" / f"{day}-tracker.md").write_text(
+                ROUTE_TRACKER.format(day=day) + "\n## Decisions\n\n| time | item | Robin's words |\n|---|---|---|\n| 00:05 | decision-done | A |\n")
+            pages = root / "pages"
+            pages.mkdir()
+            for slug in ("alpha", "done"):
+                (pages / f"decision-{slug}.json").write_text(decision(slug))
+            (pages / "decision-broken.json").write_text("{")
+            store.migrate(root / "store.db")
+            db = store.Store(root / "store.db")
+            try:
+                db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
+                db.upsert_item("github:example/repo#110", title="Choice", forge_state="open")
+                db.upsert_item("github:example/repo#111", title="Closed", forge_state="closed")
+                row = db.add_decision("github:example/repo#110", "scope", "Open choice")
+                db.add_decision("github:example/repo#110", "design", "Answered choice", answer="yes", decided_by="user")
+                db.add_decision("github:example/repo#111", "scope", "Closed issue choice")
+            finally:
+                db.engine.dispose()
+            server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                for route in ("/", "/decisions", "/decisions/alpha", f"/decisions/{row.id}", "/workers", "/issues/109", "/issues/109/source"):
+                    with self.subTest(route=route):
+                        response = get(server.server_address[1], route)
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual([b.all_text() for b in badges(tabs(response.body.decode())["Decisions"])], ["2"])
+            finally:
+                server.shutdown()
+                server.server_close()
+        finally:
+            shutil.rmtree(root, True)
+
     def test_coordinator_decisions_pages_match_board_dispatch_count(self):
         # #965: without store.db the Decisions list and JSON decision page still share the board's Dispatch badge.
         root = Path(tempfile.mkdtemp())
@@ -448,6 +489,15 @@ class LeadCountsTest(unittest.TestCase):
             self.assertEqual(counts.get("decisions"), 0)
             self.assertNotIn("since", counts)
             self.assertNotIn("epics", counts)
+            pages = root / "pages"
+            pages.mkdir()
+            (pages / "decision-alpha.json").write_text(decision("alpha"))
+            db = store.Store(path)
+            try:
+                unavailable = pg._navigation(root, pages, task_forge.page_data(db))
+            finally:
+                db.engine.dispose()
+            self.assertNotIn("decisions", unavailable)
             html = fragment.tab_bar("Board", 0, **counts)
             self.assertTrue(all(not badges(t) for t in tabs(html).values()))
         finally:
