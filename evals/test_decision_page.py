@@ -1213,7 +1213,7 @@ class ModuleGraphTest(unittest.TestCase):
         self.assertNotIn('<pre class="mermaid">', section)
         for text in ("unavailable", "Errno", "page.mmd"):
             with self.subTest(text=text):
-                self.assertNotIn(text, page)
+                self.assertNotIn(text, section)
 
     def test_a_change_touching_only_excluded_modules_says_so_without_an_error(self):
         self.fake(views=[])

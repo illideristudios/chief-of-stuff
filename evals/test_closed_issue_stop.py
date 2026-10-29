@@ -280,12 +280,13 @@ class SourcesWriterAndReaderAgreeTest(unittest.TestCase):
         def gh(args, input_text=None):
             query = args[args.index("-f") + 1]
             data = {}
-            for i, repo in enumerate(re.findall(r'repository\(owner: "([^"]+)", name: "([^"]+)"\)', query)):
-                name = "/".join(repo)
-                data[f"r{i}"] = {"n8": {"__typename": "Issue", "number": 8, "url": f"https://github.com/{name}/issues/8",
+            for alias, owner, repo in re.findall(r'(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\)', query):
+                name = f"{owner}/{repo}"
+                data[alias] = {"n8": {"__typename": "Issue", "number": 8, "url": f"https://github.com/{name}/issues/8",
                                         "title": name, "state": "CLOSED" if name == "o/app" else "OPEN",
                                         "closedAt": CLOSED_AT if name == "o/app" else None, "labels": {"nodes": []}}}
-            return 0, json.dumps({"data": {**data, "merged": {"nodes": []}}}), ""
+            return 0, json.dumps({"data": {**data, "merged": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+                                           "rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000}}}), ""
 
         self.check("GitHub issues; repo o/app", "#8", "acme/web#8", gh=gh)
 

@@ -210,7 +210,12 @@ class StoreBoardOpenChangesTest(unittest.TestCase):
 
         def gh(args, input_text=None):  # answers only what the query asks for, as GitHub does
             query = args[args.index("-f") + 1]
-            data = {"merged": {"nodes": []}, **({"open": {"nodes": [pr]}} if "is:open" in query else {})}
+            info = {"hasNextPage": False, "endCursor": None}
+            data = {"rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000},
+                    "merged": {"nodes": [], "pageInfo": info},
+                    **({"open": {"nodes": [pr], "pageInfo": info}} if "is:open" in query else {})}
+            if "r0: repository" in query:
+                data["r0"] = {f"n{n}": None for n in re.findall(r"n(\d+): issueOrPullRequest", query)}
             return 0, json.dumps({"data": data}), ""
 
         bs.refresh(root, NOW, gh=gh)
