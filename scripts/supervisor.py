@@ -320,10 +320,16 @@ def _request_plugin_release(root: Path, selected: Path, existing: dict) -> bool:
         return False
 
 
+def _preparation_environment() -> dict[str, str]:
+    """Do not pass Python startup configuration from a workspace to preparation subprocesses."""
+    return {key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")}
+
+
 def _venv_python_runs(python: Path, *, timeout: float = 30) -> bool:
     try:
         return python.is_file() and subprocess.run(
-            [str(python), "-c", ""], capture_output=True, timeout=timeout).returncode == 0
+            [str(python), "-I", "-c", ""], capture_output=True, timeout=timeout,
+            cwd="/", env=_preparation_environment()).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -331,7 +337,7 @@ def _venv_python_runs(python: Path, *, timeout: float = 30) -> bool:
 def run_preparation(argv: list[str], timeout: float) -> subprocess.CompletedProcess:
     """Reap a timed-out venv or pip process and its descendants before discarding its generation."""
     with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          start_new_session=True) as child:
+                          start_new_session=True, cwd="/", env=_preparation_environment()) as child:
         try:
             out, err = child.communicate(timeout=timeout)
         except BaseException:
@@ -361,14 +367,15 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
             raise subprocess.TimeoutExpired("engine dependency preparation", timeout)
         return min(seconds, cap)
 
-    requirements = (release or RELEASE) / "requirements.txt"
+    data = data.absolute()
+    requirements = ((release or RELEASE) / "requirements.txt").absolute()
     base = shell_setup.resolve("python3")
     if base is None:
         raise ServiceError("no python3 on the login shell's PATH to build the engine venv")
     try:
         identity = subprocess.run(
-            [base, "-c", "import json, sys; print(json.dumps([sys.version, sys.implementation.cache_tag]))"],
-            capture_output=True, text=True, timeout=remaining(30))
+            [base, "-I", "-c", "import json, sys; print(json.dumps([sys.version, sys.implementation.cache_tag]))"],
+            capture_output=True, text=True, timeout=remaining(30), cwd="/", env=_preparation_environment())
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ServiceError(f"could not identify the engine's base Python: {exc}") from exc
     if identity.returncode:
@@ -402,8 +409,8 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
     python = building / "bin/python"
     staged = data / f".{pointer.name}.{building.name}"
     try:
-        for argv in ([base, "-m", "venv", str(building)],
-                     [str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)]):
+        for argv in ([base, "-I", "-m", "venv", str(building)],
+                     [str(python), "-I", "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)]):
             result = run_preparation(argv, timeout=remaining())
             if result.returncode:
                 raise ServiceError(f"engine dependencies failed to install: "

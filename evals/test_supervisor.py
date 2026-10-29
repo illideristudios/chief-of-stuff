@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import plistlib
 import re
 import subprocess
@@ -29,7 +30,7 @@ class SupervisorTest(unittest.TestCase):
         self.calls = []
         self.pip_fails = False
         self.python_version, self.cache_tag = "3.13.0", "cpython-313"
-        self.identity_call = ["/login/bin/python3", "-c",
+        self.identity_call = ["/login/bin/python3", "-I", "-c",
                               "import json, sys; print(json.dumps([sys.version, sys.implementation.cache_tag]))"]
         for patch in (mock.patch.object(supervisor, "RELEASE", self.release),
                       mock.patch.object(supervisor.sys, "platform", "darwin"),
@@ -57,7 +58,7 @@ class SupervisorTest(unittest.TestCase):
         self.calls.append(argv)
         if argv == self.identity_call:
             return subprocess.CompletedProcess(argv, 0, json.dumps([self.python_version, self.cache_tag]), "")
-        if argv[1:3] == ["-m", "venv"]:
+        if argv[1:4] == ["-I", "-m", "venv"]:
             (Path(argv[-1]) / "bin").mkdir(parents=True)
             (Path(argv[-1]) / "bin/python").touch()
         if "pip" in argv and self.pip_fails:
@@ -135,7 +136,7 @@ class VenvTest(SupervisorTest):
         self.pip_fails = False
         new_python = supervisor.ensure_venv(self.data, release=current)
         self.assertNotEqual(old_python, new_python)
-        self.assertIn([str(new_python.parent.parent.resolve() / "bin/python"), "-m", "pip", "install", "--disable-pip-version-check",
+        self.assertIn([str(new_python.parent.parent.resolve() / "bin/python"), "-I", "-m", "pip", "install", "--disable-pip-version-check",
                        "-r", str(current / "requirements.txt")], self.calls)
         self.assertEqual(supervisor.ensure_venv(self.data, release=current), new_python)
         self.assertEqual(supervisor.ensure_venv(self.data), old_python)
@@ -233,7 +234,7 @@ class VenvTest(SupervisorTest):
                 self.assertNotEqual(new, old)
                 self.assertTrue(old.is_file(), "the running engine's venv must stay intact")
                 self.assertTrue((old.parent.parent / ".installed").exists())
-                self.assertIn(["/login/bin/python3", "-m", "venv", str(new.parent.parent.resolve())], self.calls)
+                self.assertIn(["/login/bin/python3", "-I", "-m", "venv", str(new.parent.parent.resolve())], self.calls)
                 self.assertEqual(supervisor.ensure_venv(self.data), new)
                 old = new
 
@@ -241,12 +242,12 @@ class VenvTest(SupervisorTest):
         python = supervisor.ensure_venv(self.data)
         venv = python.parent.parent.resolve()
         self.assertEqual(python.parent.parent.name, venv.name.rsplit("-", 1)[0] + ".current")
-        self.assertEqual(self.calls, [self.identity_call, ["/login/bin/python3", "-m", "venv", str(venv)],
-                                      [str(venv / "bin/python"), "-m", "pip", "install", "--disable-pip-version-check",
+        self.assertEqual(self.calls, [self.identity_call, ["/login/bin/python3", "-I", "-m", "venv", str(venv)],
+                                      [str(venv / "bin/python"), "-I", "-m", "pip", "install", "--disable-pip-version-check",
                                        "-r", str(self.release / "requirements.txt")]])
         self.assertEqual(supervisor.ensure_venv(self.data), python)
         # Reuse checks the base identity and probes the cached interpreter; it must not rebuild.
-        self.assertEqual(self.calls[3:], [self.identity_call, [str(python), "-c", ""]])
+        self.assertEqual(self.calls[3:], [self.identity_call, [str(python), "-I", "-c", ""]])
 
     def test_changed_requirements_build_a_new_venv_beside_the_old(self):
         old = supervisor.ensure_venv(self.data)
@@ -506,6 +507,47 @@ class AgentTest(SupervisorTest):
             self.assertEqual(supervisor.main(["--root", str(self.root), "install"]), 2)
         self.assertIn("cannot install engine", errors.getvalue())
         self.assertNotIn("Traceback", errors.getvalue())
+
+
+class UntrustedWorkspacePythonTest(unittest.TestCase):
+    def test_real_preparation_ignores_workspace_modules_and_python_environment(self):
+        # A fresh process lets the workspace be the actual cwd without changing this test runner's cwd.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            workspace, release, data = (base / name for name in ("workspace", "release", "data"))
+            workspace.mkdir()
+            release.mkdir()
+            (release / "requirements.txt").write_text("")
+            marker = base / "executed"
+            scripts = Path(supervisor.__file__).resolve().parent
+            driver = """import os, sys
+from pathlib import Path
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+import supervisor
+workspace, release, data = map(Path, sys.argv[2:])
+os.chdir(workspace)
+if os.environ.pop('TEST_POISON_ENV') == '1':
+    os.environ['PYTHONPATH'] = str(workspace)
+    os.environ['PYTHONHOME'] = str(workspace)
+    os.environ['PYTHONSTARTUP'] = str(workspace / 'sitecustomize.py')
+before = dict(os.environ)
+with mock.patch.object(supervisor.shell_setup, 'resolve', return_value=sys.executable):
+    python = supervisor.ensure_venv(data, release=release)
+    assert supervisor.ensure_venv(data, release=release) == python
+assert os.environ == before
+assert python.is_file()
+"""
+            for module in ("json", "venv", "pip", "environment"):
+                with self.subTest(module=module):
+                    shadow = workspace / f"{module if module != 'environment' else 'sitecustomize'}.py"
+                    shadow.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text({module!r})\nraise RuntimeError('shadowed')\n")
+                    env = dict(os.environ, TEST_POISON_ENV=str(int(module == "environment")))
+                    result = subprocess.run([sys.executable, "-I", "-c", driver, str(scripts), str(workspace),
+                                             str(release), str(data / module)], env=env, capture_output=True, text=True, timeout=120)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertFalse(marker.exists(), f"workspace module executed: {marker.read_text() if marker.exists() else ''}")
+                    shadow.unlink()
 
 
 class BasePythonTest(unittest.TestCase):

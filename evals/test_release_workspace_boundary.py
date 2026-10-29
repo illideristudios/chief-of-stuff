@@ -130,5 +130,7 @@ class MarkerBaselineTest(unittest.TestCase):
         marker.write_text(str(case.root))
         with supervisor.lock(supervisor.state_dir(case.root) / 'engine.lock'), \
              mock.patch.object(supervisor, 'RELEASE', new):
-            self.assertEqual(supervisor.ensure(case.root, jobs_dir=case.jobs), 'engine: upgrade pending')
+            self.assertEqual(supervisor.ensure(case.root, jobs_dir=case.jobs), 'engine: upgrade pending; if the running engine cannot hand off, stop new work, '
+                                 'verify the current pass has completed and no new pass can start, then run '
+                                 'chief-of-stuff supervisor --root /path/to/workspace install from the desired release during a maintenance window')
             self.assertEqual(marker.read_text(), str(new))

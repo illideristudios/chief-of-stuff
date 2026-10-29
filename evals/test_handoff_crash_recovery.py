@@ -365,15 +365,14 @@ class HandoffCrashRecovery(SupervisorTest):
                 self.assertEqual(supervisor.current_release_from_job(self.job()), old)
         self.assertNotIn('bootout', self.verbs())
 
-    def test_detached_helper_survives_sigterm_to_parent(self):
+    def test_detached_helper_survives_sigterm_to_parent_group(self):
         old, new = self.releases()
         (self.root / 'store.db').touch()
         with mock.patch.object(supervisor, 'RELEASE', old):
             supervisor.ensure(self.root, jobs_dir=self.jobs)
         job_path = supervisor.job_path(supervisor.label('engine', self.root), self.jobs)
         helper = self.root / 'helper.py'
-        result = self.root / 'finished'
-        helper.write_text('import os, signal, time, pathlib\nos.kill(int(os.environ["TEST_PARENT"]), signal.SIGTERM)\ntime.sleep(0.4)\npathlib.Path(os.environ["TEST_RESULT"]).write_text("bootstrap")\n')
+        helper.write_text('import os, signal, time, pathlib\nos.killpg(int(os.environ["TEST_PARENT"]), signal.SIGTERM)\ntime.sleep(0.4)\npathlib.Path(os.environ["TEST_RESULT"]).write_text("bootstrap")\n')
         driver = self.root / 'driver.py'
         driver.write_text('''import os, signal, sys, time
 from pathlib import Path
@@ -383,24 +382,38 @@ import engine, supervisor
 def interrupted(*_):
     Path(os.environ['TEST_SIGNAL']).write_text('received')
     raise KeyboardInterrupt
+os.environ['TEST_PARENT'] = str(os.getpid())
 signal.signal(signal.SIGTERM, interrupted)
 sys.platform = 'darwin'
-with mock.patch.object(supervisor, 'RELEASE', Path(os.environ['TEST_OLD'])), mock.patch.object(supervisor, 'job_path', return_value=Path(os.environ['TEST_JOB'])), mock.patch.object(supervisor, 'launchctl', return_value=True), mock.patch.object(supervisor, '__file__', os.environ['TEST_HELPER']):
+real_popen = supervisor.subprocess.Popen
+def attached(*args, **kwargs):
+    kwargs['start_new_session'] = False
+    return real_popen(*args, **kwargs)
+with mock.patch.object(supervisor, 'RELEASE', Path(os.environ['TEST_OLD'])), mock.patch.object(supervisor, 'job_path', return_value=Path(os.environ['TEST_JOB'])), mock.patch.object(supervisor, 'launchctl', return_value=True), mock.patch.object(supervisor, '__file__', os.environ['TEST_HELPER']), mock.patch.object(supervisor.subprocess, 'Popen', side_effect=attached if os.environ['TEST_ATTACHED'] == '1' else real_popen):
     try:
         engine._persist_launchd_handoff(Path(os.environ['TEST_ROOT']), Path(os.environ['TEST_NEW']))
         time.sleep(2)
     except KeyboardInterrupt:
         pass
 ''')
-        env = dict(os.environ, TEST_SCRIPTS=str(Path(supervisor.__file__).parent), TEST_OLD=str(old), TEST_NEW=str(new), TEST_JOB=str(job_path), TEST_HELPER=str(helper), TEST_ROOT=str(self.root), TEST_RESULT=str(result), TEST_SIGNAL=str(self.root / 'signal'))
-        driver.write_text(driver.read_text().replace("signal.signal(signal.SIGTERM", "os.environ['TEST_PARENT'] = str(os.getpid())\nsignal.signal(signal.SIGTERM"))
-        child = subprocess.Popen([sys.executable, str(driver)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        child.wait(timeout=5)
-        deadline = time.monotonic() + 3
-        while not result.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertTrue((self.root / 'signal').exists(), 'parent did not receive SIGTERM')
-        self.assertTrue(result.exists(), 'helper died before bootstrap after parent received SIGTERM')
+        for attached in (False, True):
+            with self.subTest(attached=attached):
+                result, received = self.root / f'finished-{attached}', self.root / f'signal-{attached}'
+                env = dict(os.environ, TEST_SCRIPTS=str(Path(supervisor.__file__).parent), TEST_OLD=str(old), TEST_NEW=str(new), TEST_JOB=str(job_path), TEST_HELPER=str(helper), TEST_ROOT=str(self.root), TEST_RESULT=str(result), TEST_SIGNAL=str(received), TEST_ATTACHED=str(int(attached)))
+                errors = self.root / f'errors-{attached}'
+                with errors.open('w') as output:
+                    child = subprocess.Popen([sys.executable, str(driver)], env=env, stdout=subprocess.DEVNULL, stderr=output, start_new_session=True)
+                    try:
+                        child.wait(timeout=5)
+                        deadline = time.monotonic() + 3
+                        while not result.exists() and time.monotonic() < deadline:
+                            time.sleep(0.05)
+                        self.assertTrue(received.exists(), f'parent did not receive SIGTERM: {errors.read_text()}')
+                        self.assertEqual(result.exists(), not attached, 'helper survival must depend on detaching')
+                    finally:
+                        if child.poll() is None:
+                            child.kill()
+                            child.wait()
 
     def test_explicit_cache_choice_survives_later_newer_ensures_and_recovery(self):
         for interrupted in (False, True):

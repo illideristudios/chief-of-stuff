@@ -83,7 +83,9 @@ class RecoveryAuthority(SupervisorTest):
         with supervisor.lock(lock):
             os.unlink(lock)
             self.launchctl_mock.reset_mock()
-            self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending')
+            self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending; if the running engine cannot hand off, stop new work, '
+                                 'verify the current pass has completed and no new pass can start, then run '
+                                 'chief-of-stuff supervisor --root /path/to/workspace install from the desired release during a maintenance window')
             self.assertNotIn('bootout', self.verbs())
             self.assertTrue(supervisor._explicit_install(self.root))
 

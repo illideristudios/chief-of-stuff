@@ -96,7 +96,9 @@ class UntrustedEngineIntentTest(SupervisorTest):
         self.launchctl_mock.reset_mock()
         with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
             with mock.patch.object(supervisor, 'RELEASE', new):
-                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending')
+                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending; if the running engine cannot hand off, stop new work, '
+                                 'verify the current pass has completed and no new pass can start, then run '
+                                 'chief-of-stuff supervisor --root /path/to/workspace install from the desired release during a maintenance window')
                 self.assertTrue(supervisor.status(self.root, self.jobs)['upgrade_pending'])
         self.assertNotIn('bootout', self.verbs())
         self.assertEqual(supervisor.current_release_from_job(self.job()), old)
