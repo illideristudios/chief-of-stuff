@@ -3448,7 +3448,7 @@ class MainTest(unittest.TestCase):
 
     def test_failed_release_preflight_keeps_running_and_retries_before_teardown(self):
         import pages
-        install = self.root / "install"
+        install = self.data / "install"
         old, current = install / "versions/old", install / "versions/new"
         old.mkdir(parents=True)
         (current / "scripts").mkdir(parents=True)
@@ -3502,7 +3502,7 @@ class MainTest(unittest.TestCase):
         self.assertIn("pip offline", errors.getvalue())
 
     def test_failed_preflight_backoff_survives_restart_and_changes_with_pins_or_release(self):
-        current = self.root / "next"
+        current = self.data / "next"
         (current / "scripts").mkdir(parents=True)
         (current / "scripts/engine.py").touch()
         requirements = current / "requirements.txt"
@@ -3542,7 +3542,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(errors.getvalue().count("pip offline"), 3, "unchanged failures are logged once per target")
 
     def test_preflight_does_not_wait_for_another_workspace_supervisor_lock(self):
-        current = self.root / "next"
+        current = self.data / "next"
         (current / "scripts").mkdir(parents=True)
         (current / "scripts/engine.py").touch()
         (current / "requirements.txt").write_text("example==1\n")
@@ -3562,7 +3562,7 @@ class MainTest(unittest.TestCase):
 
     def test_once_runs_the_working_release_when_update_preflight_fails(self):
         errors = io.StringIO()
-        current = self.root / "next"
+        current = self.data / "next"
         (current / "scripts").mkdir(parents=True)
         (current / "scripts/engine.py").touch()
         (current / "requirements.txt").write_text("example==1\n")
@@ -3578,7 +3578,7 @@ class MainTest(unittest.TestCase):
         execv.assert_not_called()
 
     def test_loop_relaunches_the_installed_release_when_the_pointer_moves(self):
-        newer = self.root / "install/versions/2.0.0-abc"
+        newer = self.data / "install/versions/2.0.0-abc"
         (newer / "scripts").mkdir(parents=True)
         (newer / "scripts/engine.py").touch()
         (newer / "requirements.txt").write_text("example==1\n")
@@ -3598,7 +3598,7 @@ class MainTest(unittest.TestCase):
             str(python), str(newer / "scripts/engine.py"), "--root", str(self.root), "--interval", "5.0"])
 
     def test_running_plugin_engine_follows_newer_marker_after_a_pass(self):
-        cache = self.root / "plugins/cache/market/chief"
+        cache = self.data / "plugins/cache/market/chief"
         old, newer = cache / "1.0.0", cache / "2.0.0"
         for release, version in ((old, "1.0.0"), (newer, "2.0.0")):
             (release / "scripts").mkdir(parents=True)
@@ -3639,7 +3639,7 @@ class MainTest(unittest.TestCase):
 
     def test_stale_launch_hands_off_before_opening_the_workspace_or_migrating(self):
         import pages
-        install = self.root / "install"
+        install = self.data / "install"
         old, current = install / "versions/old", install / "versions/current"
         old.mkdir(parents=True)
         (current / "scripts").mkdir(parents=True)
@@ -3680,7 +3680,7 @@ class MainTest(unittest.TestCase):
         started = threading.Event()
         children = []
         real_popen = subprocess.Popen
-        newer = self.root / "next"
+        newer = self.data / "next"
         (newer / "scripts").mkdir(parents=True)
         (newer / "scripts/engine.py").touch()
         (newer / "requirements.txt").write_text("example==1\n")

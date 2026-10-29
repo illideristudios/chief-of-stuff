@@ -160,7 +160,7 @@ class HandoffCrashRecovery(SupervisorTest):
         with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
             with mock.patch.object(supervisor, 'RELEASE', new):
                 self.launchctl_mock.reset_mock()
-                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: serving')
+                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending')
                 self.assertNotIn('bootout', self.verbs())
                 self.assertEqual(supervisor.selected_release(self.root), old)
                 supervisor.commit_handoff(self.root, old, self.jobs)

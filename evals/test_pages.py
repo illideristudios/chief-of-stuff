@@ -570,7 +570,7 @@ class EnsureTest(unittest.TestCase):
     def test_plugin_marker_selects_same_version_release_for_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
-            release = Path(tmp) / "plugins/cache/market/chief/1.2.3"
+            release = Path(tmp).resolve() / "plugins/cache/market/chief/1.2.3"
             (release / "scripts").mkdir(parents=True)
             (release / "scripts/engine.py").touch()
             (release / "requirements.txt").touch()
@@ -2139,7 +2139,7 @@ class StandaloneBoardTest(unittest.TestCase):
             self.assertFalse(thread.is_alive())
 
     def test_failed_upgrade_keeps_supervising_and_shutdown_releases_the_lock(self):
-        release = self.root.parent / "new"
+        release = self.root.parent.resolve() / "new"
         (release / "scripts").mkdir(parents=True)
         (release / "scripts" / "pages.py").touch()
         stop, failed, serving = threading.Event(), threading.Event(), threading.Event()
@@ -2168,7 +2168,7 @@ class StandaloneBoardTest(unittest.TestCase):
                 pass
 
     def test_failed_child_launch_resumes_supervision(self):
-        release = self.root.parent / "new"
+        release = self.root.parent.resolve() / "new"
         (release / "scripts").mkdir(parents=True)
         (release / "scripts" / "pages.py").touch()
         stop, attempted, resumed = threading.Event(), threading.Event(), threading.Event()

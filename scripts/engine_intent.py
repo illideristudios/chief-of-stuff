@@ -53,14 +53,24 @@ def read(root: Path, data: Path, error) -> dict | None:
 
 
 def validate_release(root: Path, release: Path, error) -> None:
+    """Reject workspace-controlled release trees, including links out of the tree.
+
+    The release tree and its ancestors are trusted under the workspace-only threat
+    model. An external link could make code or pip inputs depend on the workspace,
+    so only links resolving within the trusted tree are accepted.
+    """
     root = root.resolve()
     try:
         resolved = release.resolve(strict=True)
-        if resolved != release or resolved == root or root in resolved.parents:
+        if (resolved != release or resolved == root or root in resolved.parents
+                or resolved in root.parents):
             raise error("engine release must be stable and outside the workspace")
-        for path in (release / "scripts/engine.py", release / "requirements.txt"):
-            target = path.resolve()
-            if target == root or root in target.parents:
-                raise error("engine release must not point into the workspace")
+        for directory, dirs, files in os.walk(release, followlinks=False, onerror=lambda exc: (_ for _ in ()).throw(exc)):
+            for name in dirs + files:
+                path = Path(directory) / name
+                if path.is_symlink():
+                    target = path.resolve()
+                    if target != resolved and resolved not in target.parents:
+                        raise error("engine release must not link outside its trusted tree or into the workspace")
     except (OSError, RuntimeError) as exc:
         raise error(f"invalid engine release: {exc}") from exc

@@ -46,7 +46,8 @@ class ReleaseSelectionTest(unittest.TestCase):
             self.assertEqual(release_selection.selected_release(self.root, supervisor), self.old)
 
     def test_installed_pointer_takes_precedence_even_for_a_rollback(self):
-        installed = self.root / "install/versions/old"
+        installed = self.root.parent / "install/versions/old"
+        installed.mkdir(parents=True)
         with mock.patch.object(supervisor, "RELEASE", self.new), \
              mock.patch.object(supervisor, "current_release", return_value=installed):
             self.marker.write_text(str(self.new))

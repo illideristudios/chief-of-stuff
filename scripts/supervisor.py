@@ -27,7 +27,7 @@ PLUGIN_RELEASE_MARKER = "engine-plugin-release"
 HANDOFF_MARKER = "engine-handoff.json"
 EXPLICIT_INSTALL_MARKER = "engine-explicit-install.json"
 EXPLICIT_INTENT_MARKER = "engine-explicit-intent.json"
-TRUSTED_INTENT_VERSION = 1
+TRUSTED_INTENT_VERSION = 2
 ENSURE_LOCK_TIMEOUT = 1200.0
 
 # Run after the venv python, with the workspace as working directory (engine --root defaults to ".").
@@ -193,12 +193,17 @@ def selected_release(root: Path) -> Path:
         current = current_release()
         # Installed versions follow the user's current pointer; cache choices stay pinned.
         if not intent["pending"] and chosen.parent.name == "versions" and current.parent == chosen.parent:
+            _validate_release(root, current)
             return current
+        _validate_release(root, chosen)
         return chosen
     pending = _explicit_install(root)
     if pending is not None:
-        return Path(pending["release"])
+        chosen = Path(pending["release"])
+        _validate_release(root, chosen)
+        return chosen
     current = current_release()
+    _validate_release(root, current)
     current_version = _plugin_version(current)
     if current != RELEASE or current_version is None:
         return current
@@ -207,8 +212,9 @@ def selected_release(root: Path) -> Path:
         candidate_version = _plugin_version(candidate)
         if (candidate.parent == current.parent and candidate_version is not None
                 and candidate_version > current_version):
+            _validate_release(root, candidate)
             return candidate
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError, ServiceError):
         pass
     return current
 
@@ -291,8 +297,9 @@ def _request_plugin_release(root: Path, selected: Path, existing: dict) -> bool:
         try:
             prior = Path(marker.read_text()).resolve(strict=True)
             if prior.parent == running.parent:
+                _validate_release(root, prior)
                 prior_version = _plugin_version(prior)
-        except (OSError, RuntimeError, ValueError):
+        except (OSError, RuntimeError, ValueError, ServiceError):
             pass
         baseline = max((v for v in (running_version, prior_version) if v is not None), default=None)
         if (selected.parent == running.parent and candidate_version is not None and baseline is not None
@@ -442,7 +449,7 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                 from workspace import lock_held
                 target = f"gui/{os.getuid()}/{label('engine', root)}"
                 if lock_held(state_dir(root) / "engine.lock") and launchctl("print", target, missing_ok=True):
-                    return "engine: serving"
+                    return "engine: upgrade pending"
                 return _finish_explicit_install(root, pending, jobs_dir, replay=True)
             from workspace import lock_held
             path = job_path(label("engine", root), jobs_dir)
@@ -608,7 +615,7 @@ def status(root: Path, jobs_dir: Path | None = None) -> dict:
     job = plistlib.loads(path.read_bytes()) if path.exists() else None
     loaded = sys.platform == "darwin" and launchctl("print", f"gui/{os.getuid()}/{name}", missing_ok=True)
     selected = selected_release(root)
-    pending = bool(job and loaded and current_release_from_job(job) != selected)
+    pending = bool(_explicit_install(root) or (job and loaded and current_release_from_job(job) != selected))
     return {"installed": job is not None,
             "loaded": loaded,
             "upgrade_pending": pending,

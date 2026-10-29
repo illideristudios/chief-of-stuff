@@ -261,7 +261,9 @@ class FollowupRegression(SupervisorTest):
                 with mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
                     with self.assertRaises(SystemExit):
                         supervisor.install(self.root, jobs_dir=self.jobs)
-                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: serving')
+                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending')
+                self.assertTrue(supervisor.status(self.root, self.jobs)['upgrade_pending'])
+                self.assertNotIn('bootout', self.verbs())
                 handoff.assert_not_called()
             finally:
                 finish.set()
