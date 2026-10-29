@@ -126,6 +126,10 @@ ECHO_WAIT_S = 30.0  # after the final result, how long a written message may wai
 WRITE_WAIT_S = 5.0  # maximum time to write one complete input line, including the assignment
 
 
+class InputWriteError(Exception):
+    """The input stream is incomplete or its delivery is ambiguous."""
+
+
 def messaging(run_dir: Path) -> bool:
     """Whether this run's runner owns a stdin pipe and a mailbox; legacy and non-Claude runs do not."""
     try:
@@ -277,7 +281,7 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
         print(f"assignment stdin write failed: {exc}", file=sys.stderr)
         _close_intake(run_dir)
         _stop_after_write_failure(process)
-        return final
+        raise InputWriteError("assignment stdin write failed") from exc
     (box / "open").touch()
     while True:
         exited = process.poll() is not None
@@ -325,7 +329,7 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
                     print(f"message stdin write failed: {exc}", file=sys.stderr)
                     _close_intake(run_dir)
                     _stop_after_write_failure(process)
-                    return final
+                    raise InputWriteError("message stdin write failed") from exc
                 inflight[path.stem] = time.monotonic() + ECHO_WAIT_S
         elif not closed and all(deadline <= time.monotonic() for deadline in inflight.values()):
             _close_intake(run_dir)
@@ -355,8 +359,11 @@ def _messaging_worker(run_dir: Path, prepared: dict) -> None:
         else:
             _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
                                              "session_id": prepared["session_id"]})
-            final = _serve(run_dir, process, prepared["session_id"], prepared["stdin_prompt"])
-            code = process.wait()
+            try:
+                final = _serve(run_dir, process, prepared["session_id"], prepared["stdin_prompt"])
+                code = process.wait()
+            except InputWriteError:
+                code = 1  # never report success for a failed or partially written input line
     if not final:
         final = (run_dir / "stream.jsonl").read_bytes()  # no result event: classify sees what the host printed
     # collect classifies stdout as one JSON answer, as `--output-format json` wrote it.
