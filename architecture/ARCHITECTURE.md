@@ -116,17 +116,19 @@ Ow := an architect run waits for the owner to ask for it
 ∴   drift is graded when it can arise, with no prompt from the owner
 ```
 
-Every question has one answerer (owner, 2026-10-29, T3 design §5). The owner and the architect decide architectural questions, under their own rules. The coordinator owns scheduling, priority and dispatch, and answers the questions in that scope. The decision trio answers the non-architectural decisions outside the coordinator's scope, and stays as this section describes it: three independent models, read-only, each question asked once. An agent that cannot tell whether a decision is architectural asks the architect.
+Every question has one answerer (owner, 2026-10-29, T3 design §5). The owner and the architect decide architectural questions, under their own rules. The coordinator owns scheduling, priority and dispatch, and answers the questions in that scope. The decision trio answers the non-architectural decisions outside the coordinator's scope, and stays as this section describes it: three independent models, read-only, each question asked once. A trio that splits, or whose retry is exhausted, leaves the decision waiting on the owner, as the rules below already say (owner, 2026-10-29: "splits - require my input"). This is the one exception to section 15's rule that a non-architectural decision never waits. An agent that cannot tell whether a decision is architectural asks the architect.
 
 ```
 D := the decision is architectural      Co := it is about scheduling, priority or dispatch      Q := the asker cannot tell whether D
 Ar := the owner and the architect decide it      Ac := the coordinator answers it      Tr := the decision trio answers it      A := the asker asks the architect
+Sp := the trio splits or exhausts its retry      Wo := the decision waits on the owner
 
 1.  D → Ar              [owner, 2026-10-29]
 2.  ¬D ∧ Co → Ac        [owner, 2026-10-29: "the coordinator owns scheduling and priority and dispatch"]
 3.  ¬D ∧ ¬Co → Tr       [owner, 2026-10-29: "trio for decisions outside the coordinator's scope"]
 4.  Q → A               [owner, 2026-10-29]
-∴   D, ¬D ∧ Co and ¬D ∧ ¬Co partition the questions, so each has exactly one answerer
+5.  Tr ∧ Sp → Wo        [owner, 2026-10-29: "splits - require my input"; T3 design §5]
+∴   D, ¬D ∧ Co and ¬D ∧ ¬Co partition the questions, so each has exactly one answerer, and a split or exhausted trio hands its decision to the owner
 ```
 
 The decision trio's models are not fixed (owner, 2026-10-18; issue #879). Its three personas keep their roles and judgement lenses from the policy, but each consult draws its models the way workers do.
@@ -137,7 +139,7 @@ The decision trio's models are not fixed (owner, 2026-10-18; issue #879). Its th
 - **Quota.** A quota stop moves that member to the next distinct entry. When no entry can run, the decision falls back to the owner as an exhausted retry.
 - **Outage.** Any other model failure, such as a timeout or an answer with no structure, moves that member to another entry once (#928). A second failure is kept as the member's vote, and the decision is retried as an outage. A failure is never read as a concern. Each call has at most 300 seconds (owner, 2026-10-19: "we need to bump timeout").
 - **Bounded per pass.** Consults run inside the engine pass, so all of a pass's consults share one budget of 480 seconds (#927), more than one call's limit so a slow vote leaves time for the others. No model call starts once the budget is spent, and each call's limit is cut to what remains of it. A consult that runs out of time is an outage, asked again at its retry time like any other. A permission ask is never denied for want of time.
-- **Asked once.** A decision whose newest row waits on the owner, after a split or an exhausted retry, is not put to the trio again; later passes wait on it (#927). Whether that wait on the owner survives section 15 is open (section 19). A retryable outage is asked again only at its retry time.
+- **Asked once.** A decision whose newest row waits on the owner, after a split or an exhausted retry, is not put to the trio again; later passes wait on it (#927). That wait on the owner stands (owner, 2026-10-29) and is section 15's one exception. A retryable outage is asked again only at its retry time.
 - **Which denials bind.** A worker's permission ask is never an owner decision: the guard's rule or the trio answers it (#890). A deny binds every later attempt at the same request only when it is a trio verdict or a person's answer. A deny the engine records itself (the guard's rule, an unavailable trio, a trio that adopted no answer), an ask with no decision row, and a reversed decision stop only the stage and attempt that got them, so a retry asks again (#958). The rule is `guard_rules.denial_binds`, applied by `worker_guard.py`.
 
 ```
@@ -435,18 +437,21 @@ The owner hands a project over, walks away, and returns to significant progress 
 - **The hard stops are removed entirely** (owner, 2026-10-29). These are the coordinator's human-only action list, the lane gates and the yes-gates between pipeline stages, merges waiting on the owner (including the legacy `merge_owner` modes `approval` and `user`), and every guard hook and command rule whose job is to enforce one of them. Commit, push, merge and deploy proceed unattended unless the decision is architectural.
 - **What stays is automation, not a stop.** The review panel, the fix loop and the merge gate of section 6 stay. The worker guard of section 13 and the Claude plugin's worker hooks stay: they keep merges, protected pushes and stage writes with the engine's merge gate and wait on no person, so they enforce none of the removed stops (architect, reading T3 design §5). Branch protection for non-Claude entries stays as a launch precondition (section 13). Rules set in a user's or host's own settings, outside chief-of-stuff, are unaffected (T3 design §3).
 - **Waiting for an architectural decision is not a hard stop** and stays. Such a decision belongs to the owner and the architect (section 6).
+- **A non-architectural decision never waits, with one exception:** a decision trio that splits, or whose retry is exhausted, leaves its decision waiting on the owner (owner, 2026-10-29: "splits - require my input"; section 6). Every other non-architectural decision proceeds without the owner or the architect.
 
 ```
 D := the decision is architectural      U := the work waits for the owner or the architect      H := one of the old hard stops applies
 Wg := the worker guard and branch protection apply      P := a person is waited on
+Tr := the decision trio answers it      Sp := the trio splits or exhausts its retry      Wo := the decision waits on the owner
 
-1.  D → U            [owner, 2026-10-29]
-2.  ¬D → ¬U          [owner, 2026-10-29: the default is autonomy]
-3.  ¬H               [owner, 2026-10-29: kill the existing hard stops entirely]
-4.  Wg → ¬P          [section 13: the guard confines merges to the engine; branch protection is a launch precondition]
-5.  H → P            [a hard stop is a wait on a person]
-6.  ¬P → ¬H          [5, contrapositive]
-∴   commit, push, merge and deploy proceed unattended unless D, and removing H leaves Wg standing (4, 6)
+1.  D → U                   [owner, 2026-10-29]
+2.  ¬D ∧ ¬(Tr ∧ Sp) → ¬U    [owner, 2026-10-29: the default is autonomy]
+3.  Tr ∧ Sp → Wo            [owner, 2026-10-29: "splits - require my input"; T3 design §5]
+4.  ¬H                      [owner, 2026-10-29: kill the existing hard stops entirely]
+5.  Wg → ¬P                 [section 13: the guard confines merges to the engine; branch protection is a launch precondition]
+6.  H → P                   [a hard stop is a wait on a person]
+7.  ¬P → ¬H                 [6, contrapositive]
+∴   commit, push, merge and deploy proceed unattended unless D or a split trio (2, 3), and removing H leaves Wg standing (5, 7)
 ```
 
 Every piece of unattended work ends in one of three outcomes (owner, 2026-10-29, T3 design §5).
@@ -579,12 +584,3 @@ These are unsettled. Nothing in this document settles them, and work that depend
 - Dependencies between issues in different projects, which section 12 leaves uncovered (`compliance.md` row C29).
 - How a T3 worker reaches the engine's report and ask server, and which runtime mode it runs under (section 13).
 - How T3's worktrees and the engine's worktrees reconcile (section 13).
-- Whether the trio's fallback to the owner stays. The T3 design keeps the trio "as it is" in section 6, where a split or an exhausted retry leaves a non-architectural decision waiting on the owner, and also rules that a non-architectural decision never waits on the owner or the architect (section 15). Both cannot hold for a trio split; this reconciliation does not choose between them.
-
-```
-Tf := a trio split or exhausted retry leaves the decision waiting on the owner      D := the decision is architectural      U := the work waits for the owner or the architect
-1.  ¬D ∧ Tf → U       [section 6, kept by T3 design §5: "the trio stays as it is"]
-2.  ¬D → ¬U           [owner, 2026-10-29: T3 design §5]
-3.  ¬D ∧ Tf → ⊥       [1, 2]
-∴   one of the two premises has to give for a trio split, and that choice is the owner's
-```
