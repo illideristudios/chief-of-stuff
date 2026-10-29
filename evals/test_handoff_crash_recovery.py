@@ -42,7 +42,8 @@ class HandoffCrashRecovery(SupervisorTest):
     def test_crashes_after_bootout_or_bootstrap_are_replayed(self):
         for verb in ('bootout', 'bootstrap'):
             with self.subTest(verb=verb):
-                old, new = self.releases() if verb == 'bootout' else (old, new)
+                self.doCleanups(); self.setUp()
+                old, new = self.releases()
                 (self.root / 'store.db').touch()
                 marker = supervisor.state_dir(self.root) / supervisor.PLUGIN_RELEASE_MARKER
                 with mock.patch.object(supervisor, 'RELEASE', old):
@@ -394,3 +395,63 @@ with mock.patch.object(supervisor, 'RELEASE', Path(os.environ['TEST_OLD'])), moc
             self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: disabled')
             self.assertEqual(supervisor.commit_handoff(self.root, old, self.jobs), 'engine: handoff superseded')
         self.assertFalse(self.loaded)
+
+    def test_install_intent_is_recoverable_before_legacy_pending_write(self):
+        old, new = self.releases()
+        (self.root / 'store.db').touch()
+        supervisor.uninstall(self.root, self.jobs)
+        write = supervisor.atomic_write
+        def crash(path, data, *args, **kwargs):
+            if path.name == supervisor.EXPLICIT_INSTALL_MARKER:
+                raise SystemExit('power loss')
+            return write(path, data, *args, **kwargs)
+        with mock.patch.object(supervisor, 'RELEASE', old), mock.patch.object(supervisor, 'atomic_write', side_effect=crash):
+            with self.assertRaises(SystemExit):
+                supervisor.install(self.root, jobs_dir=self.jobs)
+        with mock.patch.object(supervisor, 'RELEASE', new):
+            supervisor.ensure(self.root, jobs_dir=self.jobs)
+            self.assertTrue(self.loaded)
+            self.assertEqual(supervisor.current_release_from_job(self.job()), old)
+
+    def test_interrupted_uninstall_removes_loaded_job_on_next_ensure(self):
+        (self.root / 'store.db').touch()
+        supervisor.ensure(self.root, jobs_dir=self.jobs)
+        with mock.patch.object(supervisor, 'unload_agent', side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                supervisor.uninstall(self.root, self.jobs)
+        self.assertTrue(self.loaded)
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: disabled')
+        self.assertFalse(self.loaded)
+        self.assertFalse(supervisor.job_path(supervisor.label('engine', self.root), self.jobs).exists())
+
+    def test_engine_sees_pending_intent_even_before_legacy_marker(self):
+        import engine
+        old, _ = self.releases()
+        (self.root / 'store.db').touch()
+        write = supervisor.atomic_write
+        def crash(path, data, *args, **kwargs):
+            if path.name == supervisor.EXPLICIT_INSTALL_MARKER:
+                raise SystemExit('power loss')
+            return write(path, data, *args, **kwargs)
+        with mock.patch.object(supervisor, 'RELEASE', old), mock.patch.object(supervisor, 'atomic_write', side_effect=crash):
+            with self.assertRaises(SystemExit):
+                supervisor.install(self.root, jobs_dir=self.jobs)
+        self.assertTrue(engine._pending_explicit_install(self.root))
+
+    def test_explicit_installed_release_follows_later_current_pointer(self):
+        base = self.root.parent / 'install/versions'
+        old, new = base / 'old', base / 'new'
+        for release in (old, new):
+            (release / '.claude-plugin').mkdir(parents=True)
+            (release / '.claude-plugin/plugin.json').write_text('{"version":"1.0.0"}')
+            (release / 'requirements.txt').write_text('pins')
+            (release / 'scripts').mkdir()
+            (release / 'scripts/engine.py').touch()
+            (release / 'chief_of_stuff.py').touch()
+        pointer = base.parent / 'current'
+        pointer.symlink_to(old)
+        with mock.patch.object(supervisor, 'RELEASE', old):
+            supervisor.install(self.root, jobs_dir=self.jobs)
+            pointer.unlink()
+            pointer.symlink_to(new)
+            self.assertEqual(supervisor.selected_release(self.root), new)

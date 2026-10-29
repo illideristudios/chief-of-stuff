@@ -3,12 +3,14 @@ webserver and ensure they are set up as part of the agent's boot loop")."""
 
 import collections
 import email.utils
+import hashlib
 import http.client
 import json
 import http.server
 import os
 import re
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -526,6 +528,77 @@ class EnsureTest(unittest.TestCase):
             thread.join(timeout=2)
         self.assertEqual(errors, [])
         popen.assert_not_called()
+
+    def test_stale_ensure_preserves_newer_server_with_or_without_identity(self):
+        root = self.dir.parent / "workspace"
+        for identity in ("", " release-" + "a" * 24):
+            for selected in (None, root):
+                with self.subTest(identity=identity, root=selected), \
+                     mock.patch.object(pg, "VERSION", "1.2.3"), \
+                     mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0{identity}"), \
+                     mock.patch.object(pg, "_stop", side_effect=AssertionError("newer server stopped")), \
+                     mock.patch.object(pg.subprocess, "Popen", side_effect=AssertionError("server replaced")):
+                    self.assertEqual(pg.ensure(self.dir, self.port, self.log, selected), "pages: serving")
+
+    def test_authoritative_installed_rollback_replaces_newer_server(self):
+        root = self.dir.parent / "workspace"
+        with tempfile.TemporaryDirectory() as tmp:
+            release = Path(tmp) / "versions" / "old"
+            release.mkdir(parents=True)
+            (release / "chief_of_stuff.py").touch()
+            (release.parent.parent / "current").symlink_to(release)
+            with mock.patch.object(pg.supervisor, "RELEASE", release), \
+                 mock.patch.object(pg, "VERSION", "1.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=RuntimeError("rollback selected")):
+                with self.assertRaisesRegex(RuntimeError, "rollback selected"):
+                    pg.ensure(self.dir, self.port, self.log, root)
+
+    def test_explicit_rollback_replaces_newer_server_only_for_selected_release(self):
+        root = self.dir.parent / "workspace"
+        for selected, should_stop in ((pg.supervisor.RELEASE, True), (root / "other", False)):
+            with self.subTest(selected=selected), \
+                 mock.patch.object(pg.supervisor, "_explicit_install", return_value={"release": str(selected)}, create=True), \
+                 mock.patch.object(pg, "VERSION", "1.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=RuntimeError("selected rollback")) as stopped:
+                if should_stop:
+                    with self.assertRaisesRegex(RuntimeError, "selected rollback"):
+                        pg.ensure(self.dir, self.port, self.log, root)
+                else:
+                    self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
+                    stopped.assert_not_called()
+
+    def test_completed_explicit_cache_rollback_replaces_newer_server(self):
+        root = self.dir.parent / "workspace"
+        with mock.patch.object(pg.supervisor, "_explicit_install", return_value=None), \
+             mock.patch.object(pg.supervisor, "_explicit_intent", return_value={"operation": "install", "release": str(pg.supervisor.RELEASE), "pending": False}), \
+             mock.patch.object(pg, "VERSION", "1.0.0"), \
+             mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
+             mock.patch.object(pg, "_stop", side_effect=RuntimeError("selected rollback")):
+            with self.assertRaisesRegex(RuntimeError, "selected rollback"):
+                pg.ensure(self.dir, self.port, self.log, root)
+
+    def test_legacy_supervisor_honors_completed_explicit_cache_rollback(self):
+        root = self.dir / "workspace"
+        root.mkdir(exist_ok=True)
+        state = pg.supervisor.state_dir(root)
+        state.mkdir(exist_ok=True)
+        release = pg.supervisor.RELEASE
+        (state / "engine-explicit-intent.json").write_text(json.dumps({
+            "operation": "install", "release": str(release), "pending": False,
+            "job": {"Label": pg.supervisor.label("engine", root), "WorkingDirectory": str(root.resolve())}}))
+        legacy = SimpleNamespace(RELEASE=release, state_dir=pg.supervisor.state_dir,
+                                 label=pg.supervisor.label, ServiceError=pg.supervisor.ServiceError)
+        with mock.patch.object(pg, "supervisor", legacy):
+            self.assertTrue(pg._selected_for_rollback(root))
+
+    def test_versions_compare_numerically_and_equal_versions_can_change_release(self):
+        with mock.patch.object(pg, "VERSION", "1.9.0"):
+            self.assertTrue(pg._newer_server(f"{pg.SERVER}/1.10.0"))
+            self.assertFalse(pg._newer_server(f"{pg.SERVER}/1.9"))
+            self.assertFalse(pg._newer_server(f"{pg.SERVER}/1.9.0.0"))
+            self.assertFalse(pg._newer_server(f"{pg.SERVER}/1.10.0-rc1"))
 
     def test_an_older_server_is_restarted(self):
         # A server started before `--root` existed never renders; `--ensure` replaces it, by its pid file.
@@ -1669,7 +1742,7 @@ class StandaloneBoardTest(unittest.TestCase):
         (self.pages / ".pid").write_text(str(stale))
         stop = threading.Event()
         with mock.patch.object(pg, "POLL", 0.05):
-            thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop), daemon=True)
+            thread = threading.Thread(target=pg.supervise_with_retry, args=(self.root, stop), daemon=True)
             thread.start()
             self.addCleanup(lambda: thread.join(timeout=5))
             self.addCleanup(stop.set)
@@ -1678,6 +1751,389 @@ class StandaloneBoardTest(unittest.TestCase):
             pid = int((self.pages / ".pid").read_text())
             self.assertNotEqual(pid, stale)
             self.assertTrue(pg.is_pages_serve(pid, self.port))
+
+    def test_standalone_follows_an_upgrade_and_restarts_the_server_from_the_new_release(self):
+        self.addCleanup(self.stop_server)
+        install = self.root.parent / "install"
+        versions = install / "versions"
+        source = Path(pg.__file__).resolve().parent.parent
+        for name, version in (("old", "1.0.0"), ("new", "1.0.0")):
+            release = versions / name
+            shutil.copytree(source / "scripts", release / "scripts")
+            (release / ".claude-plugin").mkdir()
+            (release / ".claude-plugin" / "plugin.json").write_text(json.dumps({"version": version}))
+            (release / "chief_of_stuff.py").touch()
+            (release / "requirements.txt").write_text("")
+        # An earlier installed draft does not advertise a release identity.
+        legacy = versions / "old/scripts/pages.py"
+        legacy.write_text(legacy.read_text().replace('server_version = f"{SERVER}/{VERSION} release-{RELEASE_ID}"',
+                                                    'server_version = f"{SERVER}/{VERSION}"').replace(
+            'if identity and identity[1] == RELEASE_ID:', 'if not identity or identity[1] == RELEASE_ID:'))
+        current = install / "current"
+        current.symlink_to(versions / "old")
+        # Exercise a real supervisor process and real servers; stub only venv preparation to avoid pip.
+        code = (
+            "import sys; from pathlib import Path; "
+            f"sys.path.insert(0, {str(versions / 'old' / 'scripts')!r}); "
+            "import pages; pages.POLL = pages.RETRY_MIN = pages.RETRY_MAX = 0.1; "
+            "pages.supervisor.ensure_venv = lambda *a, **k: Path(sys.executable); "
+            f"sys.exit(pages.main(['--root', {str(self.root)!r}, 'supervise']))"
+        )
+        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def cleanup():
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+        self.addCleanup(cleanup)
+
+        def wait_for(predicate):
+            deadline = time.monotonic() + WAIT + 10
+            while time.monotonic() < deadline:
+                if predicate():
+                    return True
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+            return False
+
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and
+                                 (pg._who(self.port) or "").startswith(pg.SERVER + "/1.0.0")))
+        old_pid = int((self.pages / ".pid").read_text())
+        current.unlink()
+        current.symlink_to(versions / "new")
+        new_id = hashlib.sha256(os.fsencode((versions / "new").resolve())).hexdigest()[:24]
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and
+                                 int((self.pages / ".pid").read_text()) != old_pid and
+                                 f"release-{new_id}" in (pg._who(self.port) or "")),
+                        "standalone supervisor did not upgrade the server")
+        def server_pid():
+            try:
+                return int((self.pages / ".pid").read_text())
+            except (OSError, ValueError):
+                return None
+        self.assertTrue(wait_for(lambda: server_pid() is not None and pg.is_pages_serve(server_pid(), self.port)))
+        first_pid = server_pid()
+        os.kill(first_pid, signal.SIGTERM)
+        self.assertTrue(wait_for(lambda: server_pid() is not None and server_pid() != first_pid and
+                                 (pg._who(self.port) or "").startswith(pg.SERVER + "/1.0.0")),
+                        "the upgraded supervisor did not restart the upgraded server")
+        self.assertIsNone(proc.poll())
+        upgraded_pid = server_pid()
+        current.unlink()
+        current.symlink_to(versions / "old")
+        self.assertTrue(wait_for(lambda: server_pid() is not None and server_pid() != upgraded_pid and
+                                 (pg._who(self.port) or "").startswith(pg.SERVER + "/1.0.0") and
+                                 "release-" not in (pg._who(self.port) or "")),
+                        "rollback did not restore the earlier release")
+
+    def test_broken_new_release_keeps_the_old_supervisor_alive_to_restore_a_crashed_board(self):
+        self.addCleanup(self.stop_server)
+        install = self.root.parent / "install"
+        versions = install / "versions"
+        source = Path(pg.__file__).resolve().parent.parent
+        old, broken = versions / "old", versions / "broken"
+        shutil.copytree(source / "scripts", old / "scripts")
+        (old / ".claude-plugin").mkdir()
+        (old / ".claude-plugin/plugin.json").write_text('{"version":"1.0.0"}')
+        (old / "chief_of_stuff.py").touch()
+        (old / "requirements.txt").touch()
+        shutil.copytree(old / "scripts", broken / "scripts")
+        shutil.copytree(old / ".claude-plugin", broken / ".claude-plugin")
+        (broken / "chief_of_stuff.py").touch()
+        (broken / "requirements.txt").touch()
+        current = install / "current"
+        current.symlink_to(old)
+        code = ("import sys; from pathlib import Path; "
+                f"sys.path.insert(0, {str(old / 'scripts')!r}); "
+                "import pages; pages.POLL = pages.RETRY_MIN = pages.RETRY_MAX = 0.1; "
+                "pages.supervisor.ensure_venv = lambda *a, **k: Path(sys.executable); "
+                f"sys.exit(pages.main(['--root', {str(self.root)!r}, 'supervise']))")
+        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def cleanup():
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+        self.addCleanup(cleanup)
+        def wait_for(predicate):
+            deadline = time.monotonic() + WAIT + 5
+            while time.monotonic() < deadline:
+                if predicate():
+                    return True
+                if proc.poll() is not None:
+                    return False
+                time.sleep(0.05)
+            return False
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and pg._who(self.port)))
+        marker = self.root / "candidate-attempted"
+        startup_failure = ((old / "scripts/pages.py").read_text().replace(
+            'if __name__ == "__main__":',
+            f'def ensure(*args, **kwargs):\n    Path({str(marker)!r}).touch()\n'
+            '    os.kill(int((args[0] / PID).read_text()), signal.SIGTERM)\n'
+            '    raise RuntimeError("server startup failed")\n\nif __name__ == "__main__":'))
+        mark = f"from pathlib import Path; Path({str(marker)!r}).touch()\n"
+        for failure in (mark + "import missing_release_dependency\n", mark + "raise RuntimeError('startup failed')\n",
+                        startup_failure,
+                        mark + "import os, sys, time\nfd = int(sys.argv[sys.argv.index('--handoff-ready-fd')+1])\n"
+                        "os.write(fd, b'1'); os.close(fd); time.sleep(0.2); sys.exit(1)\n"):
+            with self.subTest(failure=failure):
+                (broken / "scripts/pages.py").write_text(failure)
+                current.unlink()
+                current.symlink_to(broken)
+                self.assertTrue(wait_for(marker.exists), "candidate was not attempted")
+                time.sleep(1)
+                self.assertIsNone(proc.poll(), "old supervisor was discarded after exec succeeded")
+                self.assertTrue(wait_for(lambda: pg._who(self.port) is not None), "old supervisor did not restore startup failure")
+                pid = int((self.pages / ".pid").read_text())
+                os.kill(pid, signal.SIGTERM)
+                self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and
+                                         int((self.pages / ".pid").read_text()) != pid and pg._who(self.port)))
+                current.unlink()
+                current.symlink_to(old)
+                marker.unlink()
+                time.sleep(0.3)
+
+    def test_live_waiting_successor_that_cannot_recover_falls_back(self):
+        self.addCleanup(self.stop_server)
+        versions = self.root.parent / "install/versions"
+        old, broken = versions / "old", versions / "broken"
+        source = Path(pg.__file__).resolve().parent.parent
+        for release in (old, broken):
+            shutil.copytree(source / "scripts", release / "scripts")
+            (release / ".claude-plugin").mkdir()
+            (release / ".claude-plugin/plugin.json").write_text('{"version":"1.0.0"}')
+            (release / "chief_of_stuff.py").touch()
+            (release / "requirements.txt").touch()
+        candidate = broken / "scripts/pages.py"
+        marker = self.root / "candidate-failed"
+        launched = self.root / "candidate-running"
+        candidate.write_text(candidate.read_text().replace(
+            'if __name__ == "__main__":',
+            f'def ensure(*args, **kwargs):\n    Path({str(marker)!r}).touch()\n'
+            f'    raise RuntimeError("cannot recover board")\n\nif __name__ == "__main__":\n    Path({str(launched)!r}).touch()').replace(
+            'POLL = 5  # seconds between healthy server checks',
+            'POLL = 0.1  # seconds between healthy server checks'))
+        current = versions.parent / "current"
+        current.symlink_to(old)
+        code = ("import sys; from pathlib import Path; "
+                f"sys.path.insert(0, {str(old / 'scripts')!r}); "
+                "import pages; pages.POLL = pages.RETRY_MIN = pages.RETRY_MAX = 0.1; "
+                "pages.supervisor.ensure_venv = lambda *a, **k: Path(sys.executable); "
+                f"sys.exit(pages.main(['--root', {str(self.root)!r}, 'supervise']))")
+        def wait_for(predicate, timeout=10):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if predicate():
+                    return True
+                time.sleep(0.05)
+            return False
+        self.assertEqual(pg.ensure(self.pages, self.port, self.root / "pages.log", self.root), "pages: started")
+        old_pid = int((self.pages / ".pid").read_text())
+        lock_path = pg.supervisor.state_dir(self.root) / "pages-supervisor.lock"
+        with pg.supervisor.lock(lock_path):
+            proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            def cleanup():
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=10)
+            self.addCleanup(cleanup)
+            current.unlink()
+            current.symlink_to(broken)
+            # The candidate is alive but cannot run ensure until this owner releases the lock.
+            self.assertTrue(wait_for(launched.exists), "candidate was not launched")
+            self.assertFalse(marker.exists())
+            self.assertIsNone(proc.poll())
+            os.kill(old_pid, signal.SIGTERM)
+            self.assertTrue(wait_for(lambda: pg._who(self.port) is None))
+        self.assertTrue(wait_for(marker.exists), "candidate never tried to recover")
+        self.assertTrue(wait_for(lambda: pg._who(self.port) is not None), "parent did not restore the board")
+        self.assertIsNone(proc.poll())
+
+    def test_waiting_successor_reports_failure_after_lock_owner_exits(self):
+        stop = threading.Event()
+        reports = []
+        attempted, failed = threading.Event(), threading.Event()
+        def report(value):
+            reports.append(value)
+            if value is False:
+                failed.set()
+        lock_path = pg.supervisor.state_dir(self.root) / "pages-supervisor.lock"
+
+        def fail(*args, **kwargs):
+            attempted.set()
+            raise pg.PagesError("candidate cannot recover board")
+
+        with mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg, "RETRY_MAX", 0.05), \
+             mock.patch.object(pg, "ensure", side_effect=fail):
+            with pg.supervisor.lock(lock_path):
+                thread = threading.Thread(target=pg.supervise_with_retry, args=(self.root, stop, report))
+                thread.start()
+                self.assertTrue(threading.Event().wait(0.15) is False)
+                self.assertNotIn(True, reports, "lock contention is not readiness")
+            try:
+                self.assertTrue(attempted.wait(2))
+                self.assertTrue(failed.wait(2), "failed recovery must reach the parent")
+            finally:
+                stop.set()
+                thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+    def test_plugin_selected_update_survives_old_supervisor_and_server_failover(self):
+        self.addCleanup(self.stop_server)
+        cache = self.root.parent / "plugins/cache/market/chief"
+        old, new = cache / "1.0.0", cache / "2.0.0"
+        source = Path(pg.__file__).resolve().parent.parent
+        for release, version in ((old, "1.0.0"), (new, "2.0.0")):
+            shutil.copytree(source / "scripts", release / "scripts")
+            (release / ".claude-plugin").mkdir()
+            (release / ".claude-plugin/plugin.json").write_text(json.dumps({"version": version}))
+            (release / "requirements.txt").touch()
+            if release == old:
+                # This is the actual pre-selector module, not a stubbed selector.
+                shutil.copyfile(source / "evals/fixtures/legacy_supervisor.py", release / "scripts/supervisor.py")
+                self.assertNotIn("def selected_release(", (release / "scripts/supervisor.py").read_text())
+            page_file = release / "scripts/pages.py"
+            page_file.write_text(page_file.read_text().replace(
+                'POLL = 5  # seconds between healthy server checks',
+                'POLL = 0.1  # seconds between healthy server checks'))
+        code = ("import sys; from pathlib import Path; "
+                f"sys.path.insert(0, {str(old / 'scripts')!r}); "
+                "import pages; pages.POLL = pages.RETRY_MIN = pages.RETRY_MAX = 0.1; "
+                "pages.supervisor.ensure_venv = lambda *a, **k: Path(sys.executable); "
+                f"sys.exit(pages.main(['--root', {str(self.root)!r}, 'supervise']))")
+        log = self.root / "supervisor-test.log"
+        with log.open("w") as output:
+            proc = subprocess.Popen([sys.executable, "-c", code], stdout=output, stderr=output)
+        def cleanup():
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+        self.addCleanup(cleanup)
+        def wait_for(predicate):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    if predicate():
+                        return True
+                except (OSError, ValueError):
+                    pass
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+            return False
+        def server_id(release):
+            return f"release-{hashlib.sha256(os.fsencode(release.resolve())).hexdigest()[:24]}"
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and server_id(old) in (pg._who(self.port) or "")))
+        initial_pid = int((self.pages / ".pid").read_text())
+        marker = pg.supervisor.state_dir(self.root) / "engine-plugin-release"
+        marker.write_text(str(new))
+        def new_server_recorded():
+            try:
+                pid = int((self.pages / ".pid").read_text())
+                return (pid != initial_pid and server_id(new) in (pg._who(self.port) or "")
+                        and pg.is_pages_serve(pid, self.port))
+            except (OSError, ValueError):
+                return False
+        self.assertTrue(wait_for(new_server_recorded), f"selected release did not start: {log.read_text()}")
+        upgraded_pid = int((self.pages / ".pid").read_text())
+        # The old engine's board thread must not replace the selected server.
+        code_ensure = (f"import sys; sys.path.insert(0, {str(old / 'scripts')!r}); "
+                       "import pages; from pathlib import Path; "
+                       f"pages.ensure(Path({str(self.pages)!r}), {self.port}, Path({str(self.root / 'pages.log')!r}), Path({str(self.root)!r}))")
+        subprocess.run([sys.executable, "-c", code_ensure], check=True, timeout=10)
+        self.assertEqual(int((self.pages / ".pid").read_text()), upgraded_pid)
+        os.kill(upgraded_pid, signal.SIGTERM)
+        self.assertTrue(wait_for(lambda: server_id(new) in (pg._who(self.port) or "") and
+                                 int((self.pages / ".pid").read_text()) != upgraded_pid),
+                        "selected release did not restore the server")
+        self.assertIsNone(proc.poll())
+
+    def test_old_supervisor_keeps_the_selected_newer_server(self):
+        selected = self.root.parent / "newer"
+        selected_id = hashlib.sha256(os.fsencode(selected.resolve())).hexdigest()[:24]
+        with mock.patch.object(pg.supervisor, "selected_release", return_value=selected, create=True), \
+             mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0 release-{selected_id}"), \
+             mock.patch.object(pg, "_stop") as stopped, \
+             mock.patch.object(pg.subprocess, "Popen", side_effect=AssertionError("unexpected server start")):
+            self.assertEqual(pg.ensure(self.pages, self.port, self.root / "pages.log", self.root), "pages: serving")
+        stopped.assert_not_called()
+
+    def test_standalone_follows_plugin_selected_release(self):
+        release = self.root.parent / "new"
+        (release / "scripts").mkdir(parents=True)
+        (release / "scripts/pages.py").touch()
+        stop, attempted = threading.Event(), threading.Event()
+        def prepare(*args, **kwargs):
+            attempted.set()
+            stop.set()
+            return Path(sys.executable)
+        with mock.patch.object(pg.supervisor, "selected_release", return_value=release, create=True), \
+             mock.patch.object(pg.supervisor, "current_release", return_value=pg.supervisor.RELEASE), \
+             mock.patch.object(pg.supervisor, "ensure_venv", side_effect=prepare), \
+             mock.patch.object(pg, "ensure", return_value="pages: serving"), \
+             mock.patch.object(pg, "POLL", 0.05):
+            thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
+            thread.start()
+            try:
+                self.assertTrue(attempted.wait(2), "plugin-selected upgrade was not prepared")
+            finally:
+                stop.set()
+                thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+    def test_failed_upgrade_keeps_supervising_and_shutdown_releases_the_lock(self):
+        release = self.root.parent / "new"
+        (release / "scripts").mkdir(parents=True)
+        (release / "scripts" / "pages.py").touch()
+        stop, failed, serving = threading.Event(), threading.Event(), threading.Event()
+        def prepare(*args, **kwargs):
+            failed.set()
+            raise pg.supervisor.ServiceError("pip offline")
+        def ensure(*args, **kwargs):
+            serving.set()
+            return "pages: serving"
+        with mock.patch.object(pg.supervisor, "current_release", return_value=release), \
+             mock.patch.object(pg.supervisor, "ensure_venv", side_effect=prepare), \
+             mock.patch.object(pg, "ensure", side_effect=ensure), \
+             mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg.subprocess, "Popen") as popen:
+            thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
+            thread.start()
+            try:
+                self.assertTrue(failed.wait(2))
+                self.assertTrue(serving.wait(2))
+                self.assertTrue(thread.is_alive())
+                popen.assert_not_called()
+            finally:
+                stop.set()
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            with pg.supervisor.lock(pg.supervisor.state_dir(self.root) / "pages-supervisor.lock"):
+                pass
+
+    def test_failed_child_launch_resumes_supervision(self):
+        release = self.root.parent / "new"
+        (release / "scripts").mkdir(parents=True)
+        (release / "scripts" / "pages.py").touch()
+        stop, attempted, resumed = threading.Event(), threading.Event(), threading.Event()
+        def ensure(*args, **kwargs):
+            if attempted.is_set():
+                resumed.set()
+            return "pages: serving"
+        def fail_start(*args, **kwargs):
+            attempted.set()
+            raise OSError("exec failed")
+        with mock.patch.object(pg.supervisor, "current_release", return_value=release), \
+             mock.patch.object(pg.supervisor, "ensure_venv", return_value=Path(sys.executable)), \
+             mock.patch.object(pg, "ensure", side_effect=ensure), \
+             mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg.subprocess, "Popen", side_effect=fail_start):
+            thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
+            thread.start()
+            try:
+                self.assertTrue(attempted.wait(2))
+                self.assertTrue(resumed.wait(2))
+            finally:
+                stop.set()
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
 
     def test_a_stale_pid_goes_even_when_the_start_fails(self):
         (self.pages / ".pid").write_text(str(dead_pid()))
@@ -1724,7 +2180,7 @@ class StandaloneBoardTest(unittest.TestCase):
         stop, waits = threading.Event(), []
         with mock.patch.object(pg, "supervise") as supervised, \
              mock.patch.object(stop, "wait", side_effect=lambda s: (waits.append(s), len(waits) == 2 and stop.set())[1]):
-            pg.supervise_standalone(self.root, stop)
+            pg.supervise_with_retry(self.root, stop)
         self.assertEqual(supervised.call_count, 2)  # it does not exit for launchd to relaunch it every ten seconds
 
     def test_install_writes_one_board_agent_for_the_configured_workspace(self):
@@ -1738,19 +2194,47 @@ class StandaloneBoardTest(unittest.TestCase):
         self.assertTrue(job["RunAtLoad"] and job["KeepAlive"])
         self.assertEqual(job["WorkingDirectory"], str(self.root.resolve()))
 
-    def test_install_leaves_an_engine_workspace_to_its_engine_and_refuses_without_a_board(self):
+    def test_install_with_an_engine_adds_a_fallback_and_refuses_without_a_board(self):
         engine = pg.supervisor.job_path(pg.supervisor.label("engine", self.root), self.jobs)
         engine.parent.mkdir(parents=True)
         engine.write_bytes(b"")
-        self.assertEqual(pg.install(self.root, self.jobs), "pages: supervised by the engine")
-        self.assertEqual(list(self.jobs.glob("*.plist")), [engine])
+        self.assertEqual(pg.install(self.root, self.jobs), "pages: started")
+        board = pg.supervisor.job_path(pg.supervisor.label("pages", self.root), self.jobs)
+        self.assertTrue(board.exists())
         (self.root / "CLAUDE.md").write_text(
             "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
             f"- Timezone: {ZONE}\n- Board: none\n")
         engine.unlink()
+        board.unlink()
         with self.assertRaises(pg.PagesError):
             pg.install(self.root, self.jobs)
         self.assertEqual(list(self.jobs.glob("*.plist")), [])
+
+    def test_waiter_takes_over_after_the_active_supervisor_stops(self):
+        stop = threading.Event()
+        entered = threading.Event()
+        lock_path = pg.supervisor.state_dir(self.root) / "pages-supervisor.lock"
+
+        def ensure(*args, **kwargs):
+            entered.set()
+            return "pages: serving"
+        with mock.patch.object(pg, "RETRY_MAX", 0.05), mock.patch.object(pg, "ensure", side_effect=ensure):
+            thread = threading.Thread(target=pg.supervise_with_retry, args=(self.root, stop), daemon=True)
+            try:
+                with pg.supervisor.lock(lock_path):
+                    thread.start()
+                    self.assertFalse(entered.wait(0.15))
+                self.assertTrue(entered.wait(2), "waiting supervisor did not acquire the released lock")
+            finally:
+                stop.set()
+                thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+    def test_status_prefers_the_independent_board_agent_when_both_are_installed(self):
+        self.assertEqual(pg.install(self.root, self.jobs), "pages: started")
+        engine = pg.supervisor.job_path(pg.supervisor.label("engine", self.root), self.jobs)
+        engine.write_bytes(b"")
+        self.assertEqual(pg.status(self.root, self.jobs)["agent"], "board")
 
     def test_status_tells_a_missing_engine_from_a_healthy_board(self):
         self.addCleanup(self.stop_server)

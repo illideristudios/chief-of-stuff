@@ -40,6 +40,7 @@ import notify
 import policy
 import readiness
 import reconcile
+import release_selection
 import runtimes
 import settings
 import shell_setup
@@ -1032,15 +1033,22 @@ def _handoff(release: Path, python: Path, root: Path, interval: float, once: boo
                               "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []))
 
 
+def _pending_explicit_install(root: Path) -> bool:
+    reader = getattr(supervisor, "_explicit_install", None)
+    if reader is not None:
+        return reader(root) is not None
+    return (supervisor.state_dir(root) / "engine-explicit-install.json").exists()
+
+
 def _persist_launchd_handoff(root: Path, release: Path) -> bool:
     """Reload launchd from a detached helper while this engine holds its pass lock."""
     path = supervisor.job_path(supervisor.label("engine", root), None)
-    if sys.platform != "darwin" or not path.exists():
+    if "commit-handoff" not in supervisor.ACTIONS or sys.platform != "darwin" or not path.exists():
         return False
     job = plistlib.loads(path.read_bytes())
     if (supervisor.current_release_from_job(job) != supervisor.RELEASE
-            and not (supervisor.state_dir(root) / supervisor.HANDOFF_MARKER).exists()
-            and not (supervisor.state_dir(root) / supervisor.EXPLICIT_INSTALL_MARKER).exists()):
+            and not (supervisor.state_dir(root) / getattr(supervisor, "HANDOFF_MARKER", "engine-handoff.json")).exists()
+            and not _pending_explicit_install(root)):
         return False
     target = f"gui/{os.getuid()}/{supervisor.label('engine', root)}"
     if not supervisor.launchctl("print", target, missing_ok=True):
@@ -1079,14 +1087,14 @@ def main(argv: list[str] | None = None) -> int:
             raise KeyboardInterrupt
         previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
     try:
-        installed = supervisor.selected_release(root)
-        if ((supervisor.state_dir(root) / supervisor.HANDOFF_MARKER).exists()
-                or (supervisor.state_dir(root) / supervisor.EXPLICIT_INSTALL_MARKER).exists()):
+        installed = release_selection.selected_release(root, supervisor)
+        if ((supervisor.state_dir(root) / getattr(supervisor, "HANDOFF_MARKER", "engine-handoff.json")).exists()
+                or _pending_explicit_install(root)):
             with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
                 if _persist_launchd_handoff(root, installed):
                     return 0
         if installed != supervisor.RELEASE:
-            if (python := _prepare_handoff(installed)) is not None and supervisor.selected_release(root) == installed:
+            if (python := _prepare_handoff(installed)) is not None and release_selection.selected_release(root, supervisor) == installed:
                 with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
                     if _persist_launchd_handoff(root, installed):
                         return 0
@@ -1215,10 +1223,10 @@ def main(argv: list[str] | None = None) -> int:
                             release=release,
                         )
                     time.sleep(args.interval)
-                    installed = supervisor.selected_release(root)
+                    installed = release_selection.selected_release(root, supervisor)
                     if (installed != supervisor.RELEASE or
-                            (supervisor.state_dir(root) / supervisor.EXPLICIT_INSTALL_MARKER).exists()):
-                        if (python := _prepare_handoff(installed)) is not None and supervisor.selected_release(root) == installed:
+                            _pending_explicit_install(root)):
+                        if (python := _prepare_handoff(installed)) is not None and release_selection.selected_release(root, supervisor) == installed:
                             newer = installed, python
                             break
                     if page_thread is not None and not page_thread.is_alive():

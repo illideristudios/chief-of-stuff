@@ -190,7 +190,7 @@ def selected_release(root: Path) -> Path:
         chosen = Path(intent["release"])
         current = current_release()
         # Installed versions follow the user's current pointer; cache choices stay pinned.
-        if chosen.parent.name == "versions" and current.parent == chosen.parent:
+        if not intent["pending"] and chosen.parent.name == "versions" and current.parent == chosen.parent:
             return current
         return chosen
     pending = _explicit_install(root)
@@ -229,6 +229,17 @@ def _explicit_intent(root: Path) -> dict | None:
                 or not isinstance(intent.get("pending"), bool)):
             raise ServiceError("invalid explicit intent")
     return intent
+
+
+def _recover_uninstall(root: Path, jobs_dir: Path | None) -> None:
+    intent = _explicit_intent(root)
+    if intent and intent["operation"] == "uninstall" and intent.get("pending"):
+        unload_agent(label("engine", root), root, jobs_dir)
+        atomic_write(state_dir(root) / DISABLED_MARKER, b"")
+        (state_dir(root) / HANDOFF_MARKER).unlink(missing_ok=True)
+        (state_dir(root) / EXPLICIT_INSTALL_MARKER).unlink(missing_ok=True)
+        atomic_write(state_dir(root) / EXPLICIT_INTENT_MARKER,
+                     json.dumps({"operation": "uninstall", "pending": False}).encode())
 
 
 def _disabled(root: Path) -> bool:
@@ -441,6 +452,7 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
     root, data = root.resolve(), data_dir()
     with lock(data / "supervisor.lock", timeout=ENSURE_LOCK_TIMEOUT if respect_disabled else None):
         if respect_disabled and _disabled(root):
+            _recover_uninstall(root, jobs_dir)
             return "engine: disabled"
         if respect_disabled:
             pending = _explicit_install(root)
@@ -549,7 +561,10 @@ def commit_handoff(root: Path, selected: Path, jobs_dir: Path | None = None) -> 
     root = root.resolve()
     with lock(data_dir() / "supervisor.lock", timeout=ENSURE_LOCK_TIMEOUT):
         path = job_path(label("engine", root), jobs_dir)
-        if _disabled(root) or selected_release(root) != selected:
+        if _disabled(root):
+            _recover_uninstall(root, jobs_dir)
+            return "engine: handoff superseded"
+        if selected_release(root) != selected:
             return "engine: handoff superseded"
         pending_install = _explicit_install(root)
         if pending_install is not None:
@@ -599,11 +614,8 @@ def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
     require_macos()
     resolved = root.resolve()
     with lock(data_dir() / "supervisor.lock"):
-        atomic_write(state_dir(resolved) / EXPLICIT_INTENT_MARKER, json.dumps({"operation": "uninstall"}).encode())
-        unload_agent(label("engine", resolved), resolved, jobs_dir)
-        atomic_write(state_dir(resolved) / DISABLED_MARKER, b"")
-        (state_dir(resolved) / HANDOFF_MARKER).unlink(missing_ok=True)
-        (state_dir(resolved) / EXPLICIT_INSTALL_MARKER).unlink(missing_ok=True)
+        atomic_write(state_dir(resolved) / EXPLICIT_INTENT_MARKER, json.dumps({"operation": "uninstall", "pending": True}).encode())
+        _recover_uninstall(resolved, jobs_dir)
     return "engine: stopped"
 
 
