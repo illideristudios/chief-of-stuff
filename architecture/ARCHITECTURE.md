@@ -137,7 +137,7 @@ The decision trio's models are not fixed (owner, 2026-10-18; issue #879). Its th
 - **Quota.** A quota stop moves that member to the next distinct entry. When no entry can run, the decision falls back to the owner as an exhausted retry.
 - **Outage.** Any other model failure, such as a timeout or an answer with no structure, moves that member to another entry once (#928). A second failure is kept as the member's vote, and the decision is retried as an outage. A failure is never read as a concern. Each call has at most 300 seconds (owner, 2026-10-19: "we need to bump timeout").
 - **Bounded per pass.** Consults run inside the engine pass, so all of a pass's consults share one budget of 480 seconds (#927), more than one call's limit so a slow vote leaves time for the others. No model call starts once the budget is spent, and each call's limit is cut to what remains of it. A consult that runs out of time is an outage, asked again at its retry time like any other. A permission ask is never denied for want of time.
-- **Asked once.** A decision whose newest row waits on the owner, after a split or an exhausted retry, is not put to the trio again; later passes wait on it (#927). A retryable outage is asked again only at its retry time.
+- **Asked once.** A decision whose newest row waits on the owner, after a split or an exhausted retry, is not put to the trio again; later passes wait on it (#927). Whether that wait on the owner survives section 15 is open (section 19). A retryable outage is asked again only at its retry time.
 - **Which denials bind.** A worker's permission ask is never an owner decision: the guard's rule or the trio answers it (#890). A deny binds every later attempt at the same request only when it is a trio verdict or a person's answer. A deny the engine records itself (the guard's rule, an unavailable trio, a trio that adopted no answer), an ask with no decision row, and a reversed decision stop only the stage and attempt that got them, so a retry asks again (#958). The rule is `guard_rules.denial_binds`, applied by `worker_guard.py`.
 
 ```
@@ -519,4 +519,72 @@ Hit := a rejected alternative matches a      Sl := the tool returns that alterna
 6.  Rj ∧ ¬Nm → ¬Ap                           [owner: harsh; call: a vague request names no approach]
 7.  Rj ∧ Nm ∧ Ap ∧ Hit → Sl                  [owner, 2026-10-29]
 ∴   history reaches a worker only on a justified, approved and logged request, and a rejected approach reaches it without the history around it
+```
+
+## 18. Observability, heartbeat and stalls
+
+The coordinator's dashboards are shown in T3 (owner, 2026-10-29, T3 design §10). The board, the decisions, the per-issue pages and the flow and Gantt charts are still rendered by the page server from the tracker and the store, and T3 shows them. Each task links to its worker's thread. The page server still records and never acts (section 6).
+
+Chief-of-stuff drives T3 from outside and does not fork it (T3 design §3). A patch to T3 is a last resort (owner, 2026-10-29): it is written only after a live test shows that a needed capability cannot be had from outside, it is as small as possible, and it is kept as a patch file outside the T3 tree.
+
+```
+Nd := a capability the design needs      Ob := it can be had from outside T3      Lt := a live test showed that it cannot      Pt := T3 is patched
+1.  Pt → Nd ∧ ¬Ob ∧ Lt      [owner, 2026-10-29: "last resort"]
+2.  ¬Lt → ¬Pt               [from 1]
+∴   no patch is written on a guess
+```
+
+The engine has a heartbeat, in both of two forms (owner, 2026-10-29).
+- **A. A status thread.** A standing T3 thread whose title carries the engine's status, such as alive time, running count and waiting count. It costs no model turns. It needs the rename path from outside T3, which is untested (section 19).
+- **B. The pinned board.** The board pinned in a T3 Browser panel, with the heartbeat's age at its top. T3 does not keep a pin across restarts. If the rename path fails, B alone carries the heartbeat (call).
+- **Deep links.** A dashboard page links to a thread as `t3code://threads/<environment>/<thread>`. The `<environment>` part is read from T3's data directory (its `environment-id`) and is never hard-coded (call). The `t3-thread://` form works only as a chat chip and is never written into HTML. Behaviour in the desktop app is untested (section 19).
+
+The stall watcher is a small, non-model watcher in the engine (call, T3 design §10). It is not in the page server, which records and never acts, and not in the coordinator, which stays on prioritization and execution.
+- **Stalled** means a worker's item count and update time have stopped moving past a threshold, after a startup grace period. The grace period defaults to three minutes and is configurable; the thresholds are the builder's.
+- **Waiting is not stalled.** A pending request count above zero is a worker waiting: the coordinator answers it as section 17 describes, and it counts as a stall only when it stays unanswered past a threshold.
+- **Recovery follows section 15's outcomes** (call), and a relaunch after a stall counts as a failure.
+- **The judgement is pure.** It belongs with the stall judgement already in `worker_health.py` (Use Cases), fed the thread's state as plain facts; the engine gathers the facts, acts on the verdict, and the page server displays it (architect, by section 1: one stall judgement, not two).
+
+```
+Ic := the item count and update time have stopped moving past the threshold      Gp := the startup grace period has passed
+Pr := the pending request count is above zero      Pu := a pending request stayed unanswered past its threshold
+St := the worker is stalled      Wt := the worker is waiting      Rc := recovery follows section 15
+
+1.  Gp ∧ Ic ∧ ¬Pr → St      [call, T3 design §10]
+2.  Pr ∧ ¬Pu → Wt ∧ ¬St     [call, T3 design §10: waiting is not stalled]
+3.  Pr ∧ Pu → St            [call, T3 design §10]
+4.  St → Rc                 [call, T3 design §10]
+∴   every stall is detected without a model turn and recovered by the unattended outcomes, and a waiting worker is answered, not relaunched
+```
+
+An unattended run ends with a report to the owner: done, done on assumptions, and parked (architectural, or failed twice, with what was tried). An append-only action log backs it, and the engine's store is its natural home; where it lives is the builder's. The mockup `design/since-you-last-looked-laptop.html` appears to be its surface, and the builder confirms it.
+
+```
+H := the owner returns after being away      P := significant progress was made      S := the owner learns of a stall late or never
+X := the integration counts as a success
+1.  X ↔ (H → P) ∧ ¬S        [owner, 2026-10-29: the two failure tests]
+∴   the heartbeat, the stall watcher and the report exist to make ¬S hold
+```
+
+## 19. Open items of the T3 design
+
+These are unsettled. Nothing in this document settles them, and work that depends on one waits for the owner's answer.
+- The definition of success, which also blocks auto mode (section 9).
+- The names of modes beyond auto, deferred until the system is tried (section 9).
+- The view for traversing the decision graph (section 17).
+- Deep-link behaviour in the real app, which needs a click in the desktop app (section 18).
+- Named-agent launch parity: whether the agent's model, tools and initial prompt apply under T3's own session options (section 13).
+- Renaming a thread from outside T3, which needs an outside-agent login and an MCP client in the engine (section 18, heartbeat A).
+- A cross-project meta dashboard, deferred (section 12).
+- Dependencies between issues in different projects, which section 12 leaves uncovered (`compliance.md` row C29).
+- How a T3 worker reaches the engine's report and ask server, and which runtime mode it runs under (section 13).
+- How T3's worktrees and the engine's worktrees reconcile (section 13).
+- Whether the trio's fallback to the owner stays. The T3 design keeps the trio "as it is" in section 6, where a split or an exhausted retry leaves a non-architectural decision waiting on the owner, and also rules that a non-architectural decision never waits on the owner or the architect (section 15). Both cannot hold for a trio split; this reconciliation does not choose between them.
+
+```
+Tf := a trio split or exhausted retry leaves the decision waiting on the owner      D := the decision is architectural      U := the work waits for the owner or the architect
+1.  ¬D ∧ Tf → U       [section 6, kept by T3 design §5: "the trio stays as it is"]
+2.  ¬D → ¬U           [owner, 2026-10-29: T3 design §5]
+3.  ¬D ∧ Tf → ⊥       [1, 2]
+∴   one of the two premises has to give for a trio split, and that choice is the owner's
 ```
