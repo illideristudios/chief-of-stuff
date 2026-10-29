@@ -456,6 +456,89 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         raise StartFailed(chosen, exc) from exc
 
 
+NEVER_WRITTEN = "it was never written to the worker session"
+
+
+def deliver_messages(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system) -> None:
+    """Hand queued operator messages to their Claude runner's mailbox and settle earlier handoffs (#1160).
+
+    Delivered means the CLI replayed the message's uuid; failed means it provably never reached the session. A message
+    written but never echoed stays sending: it is ambiguous, so it is neither failed nor written again.
+    """
+    for item in store.items():
+        for message in store.worker_messages(item.issue_key):
+            if message.status not in ("queued", "sending"):
+                continue
+            try:
+                _deliver(store, root, message)
+            except ValueError:
+                pass  # another engine resolved it first; the store refuses conflicting outcomes
+            except (OSError, RuntimeError) as exc:
+                store.add_log(item.issue_key, f"worker message {message.id} not handed off: {exc}", clock().isoformat())
+
+
+def _deliver(store: Any, root: Path, message: Any) -> None:
+    identity = (message.id, message.issue_key, message.stage, message.attempt, message.session_id)
+
+    def fail(reason: str) -> None:
+        store.fail_worker_message(*identity, reason=reason)
+
+    run_dir = _run_dir(root, message.issue_key, message.stage, message.attempt)
+    record = _resume(store, message.issue_key).get("runs", {}).get(f"{message.stage}-{message.attempt}")
+    if not isinstance(record, dict) or record.get("session_id") != message.session_id \
+            or Path(record.get("run_dir", "")).resolve() != run_dir.resolve():
+        record = None
+    if message.status == "queued":
+        segment = next((s for s in store.segments(message.issue_key)
+                        if (s.stage, s.attempt) == (message.stage, message.attempt)), None)
+        if segment is None or segment.ended_at is not None:
+            return fail(f"the worker attempt ended before delivery; {NEVER_WRITTEN}")
+        if record is None:
+            return  # the run record is saved just after launch verifies the start
+        runtime = record.get("runtime", "claude")
+        if runtime != "claude":
+            return fail(f"{runtime} workers cannot receive live messages; {NEVER_WRITTEN}")
+        if not claude_adapter.messaging(run_dir):
+            return fail(f"this worker was started without live messaging; {NEVER_WRITTEN}")
+        with claude_adapter.mailbox_lock(run_dir):
+            if (run_dir / claude_adapter.MAILBOX / "closed").exists() or not _runner_live(record, run_dir):
+                return fail(f"the worker session ended before delivery; {NEVER_WRITTEN}")
+            if not claude_adapter.intake_open(run_dir):
+                return  # the runner has not sent the assignment yet
+            claim = store.begin_worker_message_delivery(*identity)
+            try:
+                claude_adapter.post(run_dir, {"delivery_id": claim.delivery_id, "session_id": message.session_id,
+                                              "body": message.body})
+            except OSError as exc:
+                if claude_adapter.handoff_state(run_dir, claim.delivery_id)[0] == "missing":
+                    fail(f"handoff failed ({exc}); {NEVER_WRITTEN}")
+                raise
+        return
+    if record is None or not claude_adapter.messaging(run_dir):
+        return  # nothing can prove where a sending message went; leave it unconfirmed
+    # The lock orders this judgement after any handoff holding it: a claim with no file is then a crashed handoff.
+    with claude_adapter.mailbox_lock(run_dir):
+        state, ack = claude_adapter.handoff_state(run_dir, message.delivery_id)
+        if state == "acked":
+            if ack.get("session_id") != message.session_id or ack.get("delivery_id") != message.delivery_id:
+                raise RuntimeError("acknowledgment names a different session or delivery")
+            store.ack_worker_message(*identity, delivery_id=message.delivery_id,
+                                     evidence=f"Claude CLI replayed uuid {message.delivery_id} at {ack.get('at')}; "
+                                              "the CLI read it, which does not show the model acted on it")
+        elif state == "missing":
+            fail(f"the handoff was interrupted before the mailbox write; {NEVER_WRITTEN}")
+        elif state == "rejected" or (state == "inbox" and not _runner_live(record, run_dir)
+                                      and claude_adapter.revoke(run_dir, message.delivery_id)):
+            fail(f"the worker closed its intake before taking the message; {NEVER_WRITTEN}")
+
+
+def _runner_live(record: dict, run_dir: Path) -> bool:
+    """The pipe owner is up. An unavailable process view raises; it never reads as a stopped runner."""
+    if (run_dir / "exit.json").exists():
+        return False
+    return process_status.identity(record["runner_pid"], record["session_id"]) == record.get("runner_identity")
+
+
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
             trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False,
             finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None) -> reconcile.Facts | None:
