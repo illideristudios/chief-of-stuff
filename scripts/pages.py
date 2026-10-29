@@ -34,6 +34,9 @@ import email.utils
 import errno
 import functools
 import hashlib
+import hmac
+import secrets
+import uuid
 import http.server
 import io
 import json
@@ -71,6 +74,9 @@ RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.h
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
 ISSUE = re.compile(r"/issues/([a-z0-9_.-]+:[A-Za-z0-9_./-]+#\d+|\d+)(/source)?")
 WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
+WORKER_MESSAGE = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})/messages")
+MAX_WORKER_MESSAGE = 8 * 1024
+MAX_WORKER_FORM = MAX_WORKER_MESSAGE * 3 + 1024
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
 MAX_RESPONSE = 16 * 1024 * 1024  # bound the snapshot held while preparing a response
@@ -372,7 +378,10 @@ def _worker_config_dir(root: Path, data, segment_id: int) -> Path | None:
         if not isinstance(command, dict):
             return None
         env = command.get("env")
-        home = env.get("CLAUDE_CONFIG_DIR") if isinstance(env, dict) else None
+        explicit_home = env.get("CLAUDE_CONFIG_DIR") if isinstance(env, dict) else None
+        home = command.get("config_dir", explicit_home)
+        if explicit_home is not None and explicit_home != home:
+            return None
         if (command.get("session_id") != run["session_id"] or not isinstance(command.get("cwd"), str)
                 or Path(command["cwd"]).resolve() != Path(run["tree"]).resolve()
                 or not isinstance(home, str) or not Path(home).is_absolute()):
@@ -380,6 +389,51 @@ def _worker_config_dir(root: Path, data, segment_id: int) -> Path | None:
         return Path(home)
     except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError):
         return None
+
+
+def _worker_identity(data, segment_id: int):
+    seg = next((s for s in data.segments() if s.id == segment_id), None)
+    if seg is None:
+        return None, None
+    resume = data.resume(seg.issue_key)
+    runs = resume.get("runs") if isinstance(resume, dict) else None
+    run = runs.get(f"{seg.stage}-{seg.attempt}") if isinstance(runs, dict) else None
+    return seg, run if isinstance(run, dict) else None
+
+
+def _message_token(server, host: str, seg, session_id: str) -> str:
+    identity = json.dumps([host, seg.id, seg.issue_key, seg.stage, seg.attempt, session_id], separators=(",", ":"))
+    return hmac.new(server.message_secret, identity.encode(), hashlib.sha256).hexdigest()
+
+
+def _message_available(root, seg, run, home) -> str:
+    import claude_adapter
+    import worker
+    if seg.ended_at:
+        return "This worker has finished; messages cannot be delivered."
+    if seg.runtime != "claude":
+        return "Live messaging is not available for this runtime."
+    if not run or not isinstance(run.get("session_id"), str) or not run["session_id"] or home is None:
+        return "Messaging unavailable: this attempt's identity could not be verified."
+    try:
+        from workspace import worktrees_dir
+        tree = Path(run["tree"]).resolve()
+        trees = (root / worktrees_dir((root / "CLAUDE.md").read_text())).resolve()
+        if tree == trees or not tree.is_relative_to(trees):
+            return "Messaging unavailable: this attempt's identity could not be verified."
+        expected = worker._run_dir(root, seg.issue_key, seg.stage, seg.attempt)
+        if Path(run.get("run_dir", "")).resolve() != expected.resolve() or not claude_adapter.messaging(expected):
+            return "This worker was started without live messaging."
+        if (expected / claude_adapter.MAILBOX / "closed").exists() or (expected / "exit.json").exists():
+            return "This worker has finished accepting messages."
+        if (type(run.get("runner_pid")) is not int or run["runner_pid"] <= 0
+                or not isinstance(run.get("runner_identity"), str) or not run["runner_identity"]):
+            return "Messaging unavailable: the worker process could not be verified."
+        if not worker._runner_live(run, expected):
+            return "This worker has finished accepting messages."
+    except (OSError, ValueError, TypeError, RuntimeError, KeyError):
+        return "Messaging unavailable: this attempt's identity could not be verified."
+    return ""
 
 
 def inside(pages_dir: Path | str, name: str) -> Path | None:
@@ -496,7 +550,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     server_version = f"{SERVER}/{VERSION}"
     banner = ""
 
-    def _refusal(self, status, message, *, answer=None, state=None, retry=None, words_name="answer", link=None):
+    def _refusal(self, status, message, *, answer=None, state=None, retry=None, words_name="answer", link=None,
+                 link_label="Reload the decision"):
         """A transient recovery page; never write a submitted draft or raw exception to a page file."""
         import decision_page
         details = ""
@@ -505,7 +560,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                        f'<p>Current status: <b>{escape(state.status)}</b></p>'
                        f'<p><a href="/decisions/{state.id}">View the current decision</a></p></div>')
         if link:
-            details += f'<p><a href="{escape(link)}">Reload the decision</a></p>'
+            details += f'<p><a href="{escape(link)}">{escape(link_label)}</a></p>'
         if answer is not None:
             field = f'<label>Your draft <textarea name="{words_name}" rows="4">{escape(answer)}</textarea></label>'
             if retry:
@@ -897,7 +952,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.send_error(404, "no such worker session")
             trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
             home = _worker_config_dir(root, data, segment_id)
-            page = workers_page.render_session(data, segment_id, trees, config_dir=home, cursor=cursor)
+            seg, run = _worker_identity(data, segment_id)
+            if seg is None:
+                return self.send_error(404, "no such worker session")
+            reason = _message_available(root, seg, run, home)
+            session_id = run.get("session_id") if run else None
+            messages = []
+            if isinstance(session_id, str) and session_id and (root / "store.db").is_file():
+                import store_access
+                db = store_access.migrated_store(root)
+                try:
+                    messages = db.worker_messages(seg.issue_key, stage=seg.stage, attempt=seg.attempt, session_id=session_id)
+                finally:
+                    db.engine.dispose()
+            token = _message_token(self.server, self.headers["Host"], seg, session_id) if not reason else ""
+            page = workers_page.render_session(data, segment_id, trees, config_dir=home, cursor=cursor,
+                                               messages=messages, message_reason=reason, csrf=token,
+                                               request_id=str(uuid.uuid4()))
         except Exception:
             return self.send_error(500, "could not read worker session")
         if page is None:
@@ -1010,6 +1081,76 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _post_worker_message(self, segment_id: int):
+        import store_access
+        root = getattr(self.server, "root", None)
+        if root is None:
+            return self.send_error(404)
+        host = self.headers.get("Host", "")
+        # Require the exact origin, including hostname and port; a missing Origin is not a browser authorization.
+        if (len(self.headers.get_all("Host", [])) != 1 or len(self.headers.get_all("Origin", [])) != 1
+                or self.headers.get("Origin") != f"http://{host}"):
+            return self.send_error(403, "origin required")
+        if self.headers.get_content_type() != "application/x-www-form-urlencoded" or self.headers.get("Transfer-Encoding"):
+            return self.send_error(400, "invalid form")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,8}", lengths[0]):
+            return self.send_error(411, "content length required")
+        size = int(lengths[0])
+        if size > MAX_WORKER_FORM:
+            self.close_connection = True
+            return self.send_error(413, "message form is too large")
+        try:
+            self.connection.settimeout(5)
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                return self.send_error(400, "incomplete form")
+            form = parse_qs(raw.decode("utf-8", "strict"), keep_blank_values=True, max_num_fields=3, strict_parsing=True, errors="strict")
+            if set(form) != {"csrf", "request_id", "message"} or any(len(v) != 1 for v in form.values()):
+                raise ValueError
+            text, request_id, token = (form[k][0] for k in ("message", "request_id", "csrf"))
+            if not text.strip() or len(text.encode("utf-8")) > MAX_WORKER_MESSAGE:
+                return self._refusal(400, "Message must contain text and fit within 8 KiB.", answer=text,
+                                     link=f"/workers/sessions/{segment_id}", link_label="Return to the worker")
+            if str(uuid.UUID(request_id)) != request_id:
+                raise ValueError
+        except (UnicodeError, ValueError, OSError):
+            return self.send_error(400, "invalid form")
+        db = None
+        try:
+            db = store_access.migrated_store(root)
+            import task_forge
+            with db.transaction():
+                data = task_forge.page_data(db)
+                seg, run = _worker_identity(data, segment_id)
+                if seg is None or not run or not isinstance(run.get("session_id"), str):
+                    return self.send_error(404, "no such worker session")
+                session_id = run["session_id"]
+                if not re.fullmatch(r"[0-9a-f]{64}", token) or not hmac.compare_digest(
+                        token, _message_token(self.server, host, seg, session_id)):
+                    return self.send_error(403, "invalid attempt authorization")
+                prior = next((m for m in db.worker_messages(seg.issue_key, stage=seg.stage, attempt=seg.attempt,
+                                                             session_id=session_id) if m.request_id == request_id), None)
+                if prior is None:
+                    reason = _message_available(root, seg, run, _worker_config_dir(root, data, segment_id))
+                    if reason:
+                        return self._refusal(409, reason, answer=text, link=f"/workers/sessions/{segment_id}", link_label="Return to the worker")
+                try:
+                    db.queue_worker_message(seg.issue_key, seg.stage, seg.attempt, session_id, text, request_id=request_id)
+                except ValueError:
+                    return self._refusal(409, "This message was not saved: the attempt or request changed.", answer=text,
+                                         link=f"/workers/sessions/{segment_id}", link_label="Return to the worker")
+        except Exception:
+            return self._refusal(503, "The message could not be saved. Check its status before trying again.", answer=text,
+                                 link=f"/workers/sessions/{segment_id}", link_label="Return to the worker")
+        finally:
+            if db is not None:
+                db.engine.dispose()
+        self.send_response(303)
+        self.send_header("Location", f"/workers/sessions/{segment_id}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
         self._snapshot_response(self._post)
 
@@ -1022,6 +1163,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.headers.get("Host", "") not in own or (origin is not None and origin not in [f"http://{h}" for h in own]):
             return self.send_error(403, "not a page of this server")
         route_path = re.split(r"[?#]", self.path, maxsplit=1)[0]
+        message_route = WORKER_MESSAGE.fullmatch(route_path)
+        if message_route:
+            return self._post_worker_message(int(message_route[1]))
         if route_path == "/":
             try:
                 size = int(self.headers["Content-Length"])
@@ -1105,7 +1249,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return f"{kind}; charset=utf-8" if kind.startswith("text/") else kind
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-store" if WORKER_SESSION.fullmatch(urlsplit(self.path).path) else "no-cache")
+        self.send_header("Cache-Control", "no-store" if (WORKER_SESSION.fullmatch(urlsplit(self.path).path) or WORKER_MESSAGE.fullmatch(urlsplit(self.path).path)) else "no-cache")
         if page_reload.RELOAD_COOKIE in ((getattr(self, "headers", None) or {}).get("Cookie") or ""):
             # Consumed by the request that carries it, so it cannot mark another tab's navigation (Codex on #579).
             self.send_header("Set-Cookie", f"{page_reload.RELOAD_COOKIE.split('=')[0]}=; Max-Age=0; Path=/")
@@ -1141,6 +1285,7 @@ def make_server(pages_dir: Path, port: int, root: Path | None = None, refresh=No
     except OSError:
         server.static_root_identity = None
     server.root, server.refresher, server.slots = root, None, threading.BoundedSemaphore(_workers(root))
+    server.message_secret = secrets.token_bytes(32)
     if root is not None:
         if refresh is None:
             from board_sources import refresh
