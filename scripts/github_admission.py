@@ -26,8 +26,20 @@ only a caller-declared query-shape bound, not a guarantee about GitHub. Known co
 above it block for a window. Other participating calls serialize under a host lock;
 non-participating calls are outside this accounting. The state directory and parents
 must be trusted against deletion/replacement and use a local filesystem with reliable
-flock and fsync. Clock rollback fails closed. Forward clock jumps can expire known
-charges or cooldowns early; callers need a reasonably accurate shared system clock.
+flock, atomic same-directory replace, file fsync and directory fsync. All cooperating
+clients must use this version's stable ledger.lock; stop older clients before upgrading.
+Do not delete or replace that lock file. A crash can leave temporary files, which may
+be removed only while all clients are stopped. Durability across power loss depends
+on the filesystem and hardware honoring fsync; network filesystems are unsupported.
+A server deadline outside the supported range blocks indefinitely until an operator
+verifies it has passed and calls clear_unsupported_cooldown(); clear_quarantine()
+does not clear it. A response lost before it is durably recorded, including a crash
+after dispatch, cannot communicate its server cooldown to later callers. Forked
+callback children must exit or exec and must not continue the parent's request.
+Python-managed forks close the lock descriptor in the child, and exec closes it via
+close-on-exec. Callbacks must not duplicate it or use native forks that bypass
+Python's fork hooks and leave descendants alive. Clock rollback fails closed. Forward clock
+jumps can expire known charges or cooldowns early; callers need a reasonably accurate shared system clock.
 """
 from __future__ import annotations
 
@@ -41,8 +53,26 @@ import math
 import os
 import re
 import stat
+import tempfile
+import threading
 import time
 from pathlib import Path
+
+
+# Serialize descriptor registration with fork, including forks from other threads.
+_fork_lock = threading.RLock()
+_lock_fds = set()
+
+
+def _after_fork_child():
+    for fd in _lock_fds:
+        os.close(fd)
+    _lock_fds.clear()
+    _fork_lock.release()
+
+
+os.register_at_fork(before=_fork_lock.acquire, after_in_parent=_fork_lock.release,
+                    after_in_child=_after_fork_child)
 
 
 class StateError(RuntimeError):
@@ -59,6 +89,10 @@ class HostQuarantined(StateError):
     def __init__(self, until):
         self.until = until
         super().__init__(f'GitHub outcome unknown; budget stale, retry after {until}')
+
+
+class UnsupportedCooldown(StateError):
+    """A server deadline cannot be represented; operator verification is required."""
 
 
 class CooldownActive(BudgetExhausted):
@@ -127,6 +161,7 @@ class GitHubAdmission:
         self.path = Path(state_dir) if state_dir is not None else default_state_dir()
         self.host_dir = self.path / hashlib.sha256(host.encode()).hexdigest()
         self.path = self.host_dir / 'ledger.json'
+        self.lock_path = self.host_dir / 'ledger.lock'
         self.policy, self.lock_timeout, self.clock = policy, lock_timeout, clock
 
     def _now(self):
@@ -136,26 +171,35 @@ class GitHubAdmission:
         return now
 
     def _read(self, fd):
-        os.lseek(fd, 0, os.SEEK_SET)
-        raw = os.read(fd, 2_000_001)
+        record = os.open(self.path, os.O_RDWR | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
+        try:
+            self._check_file(record)
+            os.fchmod(record, 0o600)
+            raw = os.read(record, 2_000_001)
+        finally:
+            os.close(record)
         if len(raw) > 2_000_000:
             raise StateError('ledger exceeds size bound')
         try:
             state = json.loads(raw, object_pairs_hook=_unique)
-            if not isinstance(state, dict) or type(state.get('version')) is not int or state['version'] not in (1, 2, 3):
+            if not isinstance(state, dict) or type(state.get('version')) is not int or state['version'] not in (1, 2, 3, 4):
                 raise ValueError('ledger schema mismatch')
             expected = {'version', 'policy', 'last', 'events'}
             if state['version'] == 2:
                 expected |= {'quarantined', 'cooldown_until'}
-            if state['version'] == 3:
+            if state['version'] in (3, 4):
                 expected |= {'stale', 'recovery_until', 'unknown_count', 'cooldown_until'}
+            if state['version'] == 4:
+                expected.add('unsupported_cooldown')
+                if type(state.get('unsupported_cooldown')) is not bool:
+                    raise ValueError('invalid unsupported cooldown')
             if set(state) != expected or state['policy'] != dataclasses.asdict(self.policy) or not isinstance(state['policy'], dict) or any(type(v) is not int for v in state['policy'].values()):
                 raise ValueError('ledger schema or policy mismatch')
             if state['version'] == 2:
                 cooldown = state['cooldown_until']
                 if type(state['quarantined']) is not bool or isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or not math.isfinite(cooldown) or cooldown < 0:
                     raise ValueError('invalid quarantine or cooldown')
-            if state['version'] == 3:
+            if state['version'] in (3, 4):
                 recovery, count, cooldown = state['recovery_until'], state['unknown_count'], state['cooldown_until']
                 if (type(state['stale']) is not bool or type(count) is not int or not 0 <= count <= 4
                         or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0 for v in (recovery, cooldown))):
@@ -178,23 +222,43 @@ class GitHubAdmission:
             raise StateError('corrupt or incompatible GitHub admission ledger') from exc
 
     @staticmethod
-    def _write(fd, state):
+    def _check_file(fd):
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+            raise StateError('unsafe admission state file')
+
+    def _write(self, fd, state):
         data = json.dumps(state, separators=(',', ':'), allow_nan=False).encode()
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.ftruncate(fd, 0)
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            if not written:
-                raise OSError('short ledger write')
-            view = view[written:]
-        os.fsync(fd)
+        temp_fd, temp_path = tempfile.mkstemp(prefix='.ledger-', dir=self.host_dir)
+        try:
+            # Only the temporary file is truncated; the committed record stays intact.
+            os.ftruncate(temp_fd, 0)
+            view = memoryview(data)
+            while view:
+                written = os.write(temp_fd, view)
+                if not written:
+                    raise OSError('short ledger write')
+                view = view[written:]
+            os.fsync(temp_fd)
+            os.replace(temp_path, self.path)
+            directory = os.open(self.host_dir, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            os.close(temp_fd)
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
 
     @contextlib.contextmanager
     def _locked(self):
         fd = None
         locked = False
         yielded = False
+        owner = os.getpid()
         try:
             self.host_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             try:
@@ -209,11 +273,11 @@ class GitHubAdmission:
                 created = False
             if not hasattr(os, 'O_NOFOLLOW'):
                 raise StateError('O_NOFOLLOW is required')
-            flags = os.O_RDWR | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0)
-            fd = os.open(self.path, flags | (os.O_CREAT | os.O_EXCL if created else 0), 0o600)
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
-                raise StateError('unsafe ledger file')
+            flags = os.O_RDWR | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0) | os.O_CREAT
+            with _fork_lock:
+                fd = os.open(self.lock_path, flags, 0o600)
+                _lock_fds.add(fd)
+            self._check_file(fd)
             os.fchmod(fd, 0o600)
             deadline = time.monotonic() + self.lock_timeout
             while True:
@@ -233,17 +297,19 @@ class GitHubAdmission:
                 raise
             raise StateError('GitHub admission state unavailable') from exc
         finally:
-            if fd is not None:
-                if locked:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+            if fd is not None and os.getpid() == owner:
+                with _fork_lock:
+                    if locked:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    _lock_fds.discard(fd)
+                    os.close(fd)
 
     def _load(self, fd, created):
         now = self._now()
         if created:
-            state = {'version': 3, 'policy': dataclasses.asdict(self.policy), 'last': now,
+            state = {'version': 4, 'policy': dataclasses.asdict(self.policy), 'last': now,
                      'events': [], 'stale': False, 'recovery_until': 0,
-                     'unknown_count': 0, 'cooldown_until': 0}
+                     'unknown_count': 0, 'cooldown_until': 0, 'unsupported_cooldown': False}
             self._write(fd, state)
             directory = os.open(self.path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
             try:
@@ -257,11 +323,13 @@ class GitHubAdmission:
         state['last'] = now
         events = state['events']
         legacy_unknown = state['version'] == 1 or (state['version'] == 2 and state['quarantined'])
-        if state['version'] != 3:
+        if state['version'] in (1, 2):
             cooldown = state.get('cooldown_until', 0)
             state.pop('quarantined', None)
             state.update(version=3, stale=False, recovery_until=0, unknown_count=0,
                          cooldown_until=cooldown)
+        if state['version'] == 3:
+            state.update(version=4, unsupported_cooldown=False)
         if legacy_unknown or (events and events[-1][2]):
             self._mark_unknown(state, now)
         self._write(fd, state)
@@ -272,7 +340,10 @@ class GitHubAdmission:
         dispatch_error = None
         try:
             with self._locked() as (fd, created):
+                owner = os.getpid()
                 state, now = self._load(fd, created)
+                if state['unsupported_cooldown']:
+                    raise UnsupportedCooldown('unsupported server deadline requires operator verification')
                 if now < state['recovery_until']:
                     raise HostQuarantined(state['recovery_until'])
                 if now < state['cooldown_until']:
@@ -286,15 +357,18 @@ class GitHubAdmission:
                     outcome = dispatch()
                     if isinstance(outcome, Response):
                         result, cost = outcome.result, outcome.cost
-                        cooldown = self._cooldown(outcome, self._now())
+                        cooldown, unsupported = self._cooldown(outcome, self._now())
                     else:
                         result, cost = outcome
-                        cooldown = 0
+                        cooldown, unsupported = 0, False
+                    if os.getpid() != owner:
+                        raise StateError('forked callback child must exit or exec')
                 except BaseException as exc:
                     dispatch_error = exc
-                    self._finish(fd, state, None, unknown=True)
+                    if os.getpid() == owner:
+                        self._finish(fd, state, None, unknown=True)
                     raise
-                self._finish(fd, state, cost, cooldown=cooldown)
+                self._finish(fd, state, cost, cooldown=cooldown, unsupported=unsupported)
                 return result
 
         except OSError as exc:
@@ -311,7 +385,8 @@ class GitHubAdmission:
             with self._locked() as (fd, created):
                 state, now = self._load(fd, created)
                 return {'stale': state['stale'], 'recovery_until': state['recovery_until'],
-                        'cooldown_until': state['cooldown_until'], 'as_of': now}
+                        'cooldown_until': state['cooldown_until'],
+                        'unsupported_cooldown': state['unsupported_cooldown'], 'as_of': now}
         except OSError as exc:
             raise StateError('GitHub admission state unavailable') from exc
 
@@ -324,6 +399,16 @@ class GitHubAdmission:
             with self._locked() as (fd, created):
                 state, now = self._load(fd, created)
                 state.update(stale=False, recovery_until=0, unknown_count=0)
+                self._write(fd, state)
+        except OSError as exc:
+            raise StateError('GitHub admission state unavailable') from exc
+
+    def clear_unsupported_cooldown(self):
+        """Clear only after an operator verifies that the server deadline has passed."""
+        try:
+            with self._locked() as (fd, created):
+                state, _ = self._load(fd, created)
+                state['unsupported_cooldown'] = False
                 self._write(fd, state)
         except OSError as exc:
             raise StateError('GitHub admission state unavailable') from exc
@@ -365,14 +450,24 @@ class GitHubAdmission:
         limited = (response.status == 429 or secondary or headers.get('x-ratelimit-remaining') == '0'
                    or (response.status == 403 and 'retry-after' in headers))
         if not limited:
-            return 0
-        deadlines = [now + 60] if response.status == 429 or secondary else []
+            return 0, False
+        fallback = now + 60
+        unsupported = not math.isfinite(fallback) or fallback - now < 60
+        if unsupported:
+            fallback = now
+        deadlines = [fallback] if response.status == 429 or secondary else []
         retry = headers.get('retry-after')
         if retry:
             if re.fullmatch(r'[0-9]+', retry):
-                if len(retry) > 12:
-                    raise StateError('Retry-After exceeds supported range')
-                deadlines.append(now + int(retry))
+                if len(retry.lstrip('0')) > 12:
+                    unsupported = True
+                else:
+                    seconds = int(retry.lstrip('0') or '0')
+                    deadline = now + seconds
+                    if not math.isfinite(deadline) or deadline - now < seconds:
+                        unsupported = True
+                    else:
+                        deadlines.append(deadline)
             else:
                 try:
                     date = email.utils.parsedate_to_datetime(retry)
@@ -382,16 +477,20 @@ class GitHubAdmission:
                     if math.isfinite(stamp):
                         deadlines.append(stamp)
                 except (ValueError, TypeError, OverflowError, OSError):
-                    pass
+                    # A syntactically date-like future year outside datetime's range
+                    # cannot safely be treated as a missing header.
+                    if re.search(r'\b[0-9]{5,}\b', retry):
+                        unsupported = True
         reset = headers.get('x-ratelimit-reset')
         if reset and re.fullmatch(r'[0-9]+', reset):
-            if len(reset) > 12:
-                raise StateError('rate-limit reset exceeds supported range')
-            deadlines.append(int(reset))
+            if len(reset.lstrip('0')) > 12:
+                unsupported = True
+            else:
+                deadlines.append(int(reset.lstrip('0') or '0'))
         # Invalid/missing deadlines cannot be interpreted as permission to retry.
-        return max(deadlines) if deadlines and max(deadlines) > now else now + 60
+        return (max(deadlines) if deadlines and max(deadlines) > now else fallback), unsupported
 
-    def _finish(self, fd, state, cost, *, unknown=False, cooldown=0):
+    def _finish(self, fd, state, cost, *, unknown=False, cooldown=0, unsupported=False):
         now = self._now()
         if now < state['last']:
             raise StateError('clock moved backwards during request; reservation retained')
@@ -399,6 +498,7 @@ class GitHubAdmission:
         violation = valid and cost > self.policy.max_request_cost
         state['last'] = now
         state['cooldown_until'] = max(state['cooldown_until'], cooldown)
+        state['unsupported_cooldown'] |= unsupported
         if unknown or not valid:
             self._mark_unknown(state, now)
         else:
@@ -407,5 +507,7 @@ class GitHubAdmission:
         self._write(fd, state)
         if not unknown and not valid:
             raise StateError(f'missing or invalid GraphQL cost; budget stale, retry after {state["recovery_until"]}')
+        if unsupported:
+            raise UnsupportedCooldown('unsupported server deadline requires operator verification')
         if not unknown and violation:
             raise StateError('above-bound GraphQL cost')

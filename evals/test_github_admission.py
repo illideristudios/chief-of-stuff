@@ -28,6 +28,55 @@ def crash(root):
     ledger(root).request(dispatch)
 
 
+def crash_during_finish(root, phase):
+    gate = ledger(root, lambda: 1000)
+    original_write = gate._write
+    writes = 0
+
+    def inject(fd, state):
+        nonlocal writes
+        writes += 1
+        if writes != 3:  # Existing state load, reservation, then outcome.
+            return original_write(fd, state)
+        if phase == 'truncate':
+            original = os.ftruncate
+            def truncate(temp_fd, size):
+                original(temp_fd, size)
+                os._exit(71)
+            admission.os.ftruncate = truncate
+        elif phase == 'partial':
+            original = os.write
+            def partial(temp_fd, data):
+                original(temp_fd, data[:max(1, len(data) // 2)])
+                os._exit(72)
+            admission.os.write = partial
+        else:
+            original = os.replace
+            def replace(source, target):
+                original(source, target)
+                os._exit(73)
+            admission.os.replace = replace
+        return original_write(fd, state)
+
+    gate._write = inject
+    gate.request(lambda: ('dispatched', 7))
+
+
+def crash_with_fork_child(root, ready, release, pidfile):
+    def dispatch():
+        pid = os.fork()
+        if pid == 0:
+            Path(ready).touch()
+            while not Path(release).exists():
+                time.sleep(.01)
+            os._exit(0)
+        Path(pidfile).write_text(str(pid))
+        while not Path(ready).exists():
+            time.sleep(.01)
+        os._exit(7)
+    ledger(root).request(dispatch)
+
+
 def concurrent(root, started, release, result):
     def dispatch():
         started.set()
@@ -150,7 +199,7 @@ class AdmissionTests(unittest.TestCase):
         self.gate.request(lambda: ('ok', 1))
         path = next(Path(self.tmp.name).rglob('*.json'))
         original = path.read_text()
-        for bad in ('', '{', '{"a":1,"a":2}', original.replace('"version":3', '"version":99')):
+        for bad in ('', '{', '{"a":1,"a":2}', original.replace('"version":4', '"version":99')):
             path.write_text(bad)
             with self.assertRaises(admission.StateError):
                 self.gate.request(lambda: self.fail('corrupt state'))
@@ -165,6 +214,53 @@ class AdmissionTests(unittest.TestCase):
         gate = ledger(self.tmp.name)
         with self.assertRaises(admission.HostQuarantined):
             gate.request(lambda: self.fail('crashed dispatch was not quarantined'))
+
+    def test_atomic_outcome_write_survives_real_crashes(self):
+        for phase, exitcode in (('truncate', 71), ('partial', 72), ('rename', 73)):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as root:
+                gate = ledger(root, lambda: 1000)
+                gate.status()  # Establish a committed record first.
+                lock_path = gate.lock_path
+                inode = lock_path.stat().st_ino
+                process = multiprocessing.Process(target=crash_during_finish, args=(root, phase))
+                process.start(); process.join(5)
+                self.assertEqual(process.exitcode, exitcode)
+                state = json.loads(gate.path.read_text())
+                self.assertEqual(state['events'][0][1], 7)
+                self.assertEqual(lock_path.stat().st_ino, inode)
+                if phase != 'rename':
+                    self.assertTrue(state['events'][0][2])
+                    with self.assertRaises(admission.HostQuarantined):
+                        gate.request(lambda: self.fail('pending reservation must recover'))
+                    state = json.loads(gate.path.read_text())
+                    self.assertEqual(state['events'][0], [1000, 7, False, False])
+                    self.assertTrue(state['stale'])
+                else:
+                    self.assertEqual(state['events'][0], [1000, 7, False, False])
+                    gate.request(lambda: ('next', 7))
+                    with self.assertRaises(admission.BudgetExhausted):
+                        gate.request(lambda: self.fail('finished cost must not be refunded'))
+
+    @unittest.skipUnless(hasattr(os, 'fork'), 'requires fork')
+    def test_fork_without_exec_does_not_hold_parent_flock_after_crash(self):
+        root = Path(self.tmp.name)
+        ready, release, pidfile = (str(root / name) for name in ('ready', 'release', 'pid'))
+        parent = multiprocessing.Process(target=crash_with_fork_child,
+                                         args=(root / 'shared', ready, release, pidfile))
+        parent.start(); parent.join(5)
+        try:
+            self.assertEqual(parent.exitcode, 7)
+            self.assertTrue(Path(ready).exists())
+            os.kill(int(Path(pidfile).read_text()), 0)
+            gate = ledger(root / 'shared', timeout=.5)
+            with self.assertRaises(admission.HostQuarantined):
+                gate.request(lambda: self.fail('reservation must recover'))
+            self.assertTrue(gate.status()['stale'])
+            os.kill(int(Path(pidfile).read_text()), 0)  # Child remains alive.
+        finally:
+            Path(release).touch()
+            if parent.is_alive():
+                parent.terminate(); parent.join()
 
     def test_cross_process_lock_covers_dispatch_and_lock_timeout(self):
         started, release = multiprocessing.Event(), multiprocessing.Event()
@@ -213,7 +309,7 @@ class AdmissionTests(unittest.TestCase):
 
     def test_failure_recording_outcome_keeps_durable_reservation(self):
         self.gate.request(lambda: ('initial', 0))
-        write = admission.GitHubAdmission._write
+        write = self.gate._write
         count = 0
         def fail_finish(fd, state):
             nonlocal count
@@ -348,13 +444,30 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(reader.exitcode, 0)
             self.assertEqual(result.get(timeout=1), (expected, True))
 
+    def test_version_three_migrates_existing_cooldown_and_pending_reservation(self):
+        self.gate.status()
+        state = json.loads(self.gate.path.read_text())
+        state.update(version=3, cooldown_until=1200,
+                     events=[[1000, 7, True, False]])
+        del state['unsupported_cooldown']
+        self.gate.path.write_text(json.dumps(state))
+        with self.assertRaises(admission.HostQuarantined):
+            self.gate.request(lambda: self.fail('pending reservation'))
+        status = self.gate.status()
+        self.assertTrue(status['stale'])
+        self.assertFalse(status['unsupported_cooldown'])
+        self.assertEqual(status['cooldown_until'], 1200)
+        self.now = 1060
+        with self.assertRaises(admission.CooldownActive):
+            self.gate.request(lambda: self.fail('migrated cooldown'))
+
     def test_version_two_quarantine_migrates_with_bounded_recovery(self):
         self.gate.request(lambda: ('ok', 1))
         path = next(Path(self.tmp.name).rglob('*.json'))
         state = json.loads(path.read_text())
         state['version'] = 2
         state['quarantined'] = True
-        for key in ('stale', 'recovery_until', 'unknown_count'):
+        for key in ('stale', 'recovery_until', 'unknown_count', 'unsupported_cooldown'):
             del state[key]
         path.write_text(json.dumps(state))
         with self.assertRaises(admission.HostQuarantined):
@@ -397,11 +510,24 @@ class AdmissionTests(unittest.TestCase):
         with self.assertRaises(admission.CooldownActive):
             self.gate.request(lambda: self.fail('cooldown survives clearing'))
 
-    def test_unrepresentable_cooldown_quarantines_instead_of_shortening(self):
-        with self.assertRaises(admission.StateError):
-            self.gate.request(lambda: admission.Response('limited', 1, 429, {'Retry-After': '9999999999999'}))
-        with self.assertRaises(admission.HostQuarantined):
-            self.gate.request(lambda: self.fail('unsupported cooldown must fail closed'))
+    def test_unrepresentable_cooldowns_require_explicit_operator_clear(self):
+        cases = [({'Retry-After': '9999999999999'}, 1),
+                 ({'X-RateLimit-Reset': '9999999999999'}, None),
+                 ({'Retry-After': 'Thu, 01 Jan 10000 00:00:00 GMT'}, 1)]
+        for headers, cost in cases:
+            with self.subTest(headers=headers, cost=cost), tempfile.TemporaryDirectory() as root:
+                self.now = 1000
+                gate = ledger(root, lambda: self.now)
+                with self.assertRaises(admission.StateError):
+                    gate.request(lambda: admission.Response('limited', cost, 429, headers))
+                self.now += 100_000
+                restarted = ledger(root, lambda: self.now)
+                self.assertTrue(restarted.status()['unsupported_cooldown'])
+                restarted.clear_quarantine()
+                with self.assertRaises(admission.UnsupportedCooldown):
+                    restarted.request(lambda: self.fail('unsupported deadline'))
+                restarted.clear_unsupported_cooldown()  # Operator attests deadline passed.
+                self.assertEqual(restarted.request(lambda: ('ok', 1)), 'ok')
 
     def test_graphql_200_secondary_error_sets_cooldown(self):
         result = {'errors': [{'message': 'You have exceeded a secondary rate limit'}]}
@@ -468,7 +594,7 @@ class AdmissionTests(unittest.TestCase):
         path = next(Path(self.tmp.name).rglob('*.json'))
         state = json.loads(path.read_text())
         state['version'] = 1
-        for key in ('cooldown_until', 'stale', 'recovery_until', 'unknown_count'):
+        for key in ('cooldown_until', 'stale', 'recovery_until', 'unknown_count', 'unsupported_cooldown'):
             del state[key]
         path.write_text(json.dumps(state))
         with self.assertRaises(admission.HostQuarantined):
