@@ -944,7 +944,7 @@ class ReconcileTest(unittest.TestCase):
                                   progress=((KEY, NOW - timedelta(hours=2)),),
                                   stall_after=timedelta(minutes=45))
         self.assertEqual(self.plan(history=[replace(open_seg, started_at=NOW - timedelta(hours=2))], facts=stalled),
-                         [reconcile.Wait(KEY, "stalled")])
+                         [reconcile.Wait(KEY, "suspected stall")])
         overlap = reconcile.Facts(blockers=(), alive=(((other, "implement", 1), True),))
         actions = reconcile.plan([Item(), replace(Item(), issue_key=other)],
                                  {KEY: (), other: [open_seg]}, self.p, {}, 4, NOW, {}, facts=overlap)

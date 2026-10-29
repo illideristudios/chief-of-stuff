@@ -411,8 +411,23 @@ class WorkerTest(unittest.TestCase):
         run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
         (run / "exit.json").write_text('{"exit_code": -15}')
         with mock.patch.object(worker.t3_adapter, "refresh", return_value={"status": "running"}), \
+             mock.patch.object(worker.t3_adapter, "observe", return_value=worker.t3_adapter.Evidence(alive=False, launcher="t3")), \
              mock.patch.object(worker, "teardown_once") as teardown:
             worker.collect(self.db, self.root, lambda: NOW)
+        teardown.assert_not_called()
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+
+    def test_incomplete_terminal_t3_evidence_preserves_the_attempt_before_refresh(self):
+        self.t3_launched()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run / "t3.json").write_text(json.dumps({"cli": "/t3", "home": ""}))
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        shown = json.dumps({"thread": {"threadId": "mcp:t-1", "status": "completed"}})
+        with mock.patch.object(worker.t3_adapter, "_t3", return_value=subprocess.CompletedProcess([], 0, shown, "")), \
+             mock.patch.object(worker.t3_adapter, "refresh") as refresh, \
+             mock.patch.object(worker, "teardown_once") as teardown:
+            worker.collect(self.db, self.root, lambda: NOW)
+        refresh.assert_not_called()
         teardown.assert_not_called()
         self.assertIsNone(self.db.segments(KEY)[0].ended_at)
 
@@ -437,6 +452,7 @@ class WorkerTest(unittest.TestCase):
         (run / "exit.json").write_text(json.dumps({"exit_code": 0}))
         with mock.patch.object(worker.process_status, "identity", return_value=None), \
              mock.patch.object(worker.t3_adapter, "refresh", return_value={"status": "completed"}), \
+             mock.patch.object(worker.t3_adapter, "observe", return_value=worker.t3_adapter.Evidence(alive=False, launcher="t3")), \
              mock.patch.object(worker.host_adapter, "moved_outside_engine", return_value="trunk moved") as moved:
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         moved.assert_called_once()

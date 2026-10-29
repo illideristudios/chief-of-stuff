@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
 PAGES = frozenset({"render_board", "decision_page", "issue_page", "source_page", "workers_page", "pages",
-                   "flow_chart", "gantt", "panels", "columns", "fragment", "page_common", "module_graph", "page_reload"})
+                   "flow_chart", "gantt", "panels", "columns", "fragment", "page_common", "module_graph", "page_reload", "heartbeat_page"})
 
 # The leaf page modules: each imports at most fragment (the shared escaping), so a chart or the reload check lifts out with it.
 LEAVES = ("fragment", "gantt", "columns", "panels", "page_reload")
@@ -69,6 +69,8 @@ DRAWS_NOTHING = (
     "readiness",
     "completion",
     "worker_health",
+    "heartbeat",
+    "heartbeat_store",
     "cleanup",
     "engine",
     "engine_facts",
@@ -228,14 +230,14 @@ CIRCLES: dict[str, frozenset[str]] = {
         "task_forge", "model_port", "issue_gate", "architect_signals", "trio_gate", "decision_actions", "decision_escalation", "engine_merge",
         "decision_history",
         "forge_port",
-        "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance",
+        "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance", "heartbeat",
     }),
     "adapters": frozenset({
         "fragment", "page_common", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
         "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge", "private_state",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
         "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
-        "architect_signal_store", "precedent_source",
+        "architect_signal_store", "precedent_source", "heartbeat_store", "heartbeat_page",
         # §4: store's migrations/ — path keys, not top-level stems.
         "migrations/env",
         "migrations/versions/0001_initial",

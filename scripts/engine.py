@@ -31,6 +31,7 @@ import engine_facts
 import engine_merge
 import forge
 import guard_commands
+import heartbeat_store
 import host_adapter
 import issue_gate
 import limits_history
@@ -133,6 +134,7 @@ def _planning_inputs(store: Any, items: list) -> dict:
         "usage": {key: nums for key, state in states.items() if (nums := _measured(state))},
         "waived_gates": {key: tuple(state.get("waived_gates") or ())
                          for key, state in states.items() if state.get("waived_gates")},
+        "failure_acknowledged": {key: state.get("failure_acknowledged", ()) for key, state in states.items()},
     }
 
 
@@ -643,6 +645,87 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
     _close_segment(forge, store, key, segment.stage, segment.attempt, outcome, reason, held, now)
 
 
+def _wait_log(store: Any, key: str, reason: str, at: str) -> None:
+    message = f"wait: {reason}"
+    last = next((entry.message for entry in reversed(store.log(key)) if entry.message.startswith("wait: ")), None)
+    if last != message:
+        store.add_log(key, message, at)
+
+
+def _stop_stall(store: Any, root: Path, key: str, at: str, teardown_command: str) -> None:
+    """Resume a durable stop intent. Only a verified stop releases the slot; no files are removed."""
+    data = _resume(store, key)
+    recovery = data["stall_recovery"]
+    stage, attempt = recovery["stage"], recovery["attempt"]
+    record = data.get("runs", {}).get(f"{stage}-{attempt}", {})
+    worker.stop(record)
+    worker.teardown_once(store, root, key, stage, attempt, teardown_command, at)
+    with store.transaction():
+        store.end_segment(key, stage, attempt, at, "stopped")
+        store.update_resume(key, lambda d: d["stall_recovery"].update(phase="stopped", stopped_at=at))
+        store.add_log(key, f"suspected stall recovery: {stage} attempt {attempt} stopped; awaiting relaunch", at)
+
+
+def _complete_stall_relaunch(store: Any, key: str, at: str) -> None:
+    data = _resume(store, key)
+    recovery = data.get("stall_recovery", {})
+    if recovery.get("phase") != "stopped":
+        return
+    stage, attempt = recovery["stage"], recovery["attempt"]
+    history = store.segments(key)
+    replacement = next((s for s in history if s.stage == stage and s.attempt > attempt
+                        and data.get("runs", {}).get(f"{stage}-{s.attempt}")), None)
+    if replacement is None:
+        return  # a reservation or refused launch is not a relaunch
+    old = next(s for s in history if s.stage == stage and s.attempt == attempt)
+    with store.transaction():
+        store.record_segment(key, stage, attempt, old.started_at, old.ended_at, "stalled")
+        def complete(d):
+            d["runs"][f"{stage}-{attempt}"]["recovery"] = {
+                **d.pop("stall_recovery"), "relaunched_as": f"{stage}-{replacement.attempt}"}
+        store.update_resume(key, complete)
+        store.add_log(key, f"stall relaunch: {stage} attempt {attempt} counts as a failure; "
+                          f"replacement attempt {replacement.attempt}", at)
+
+
+def _stall_action(store: Any, root: Path, key: str, workers: settings.Workers, at: str,
+                  teardown_command: str) -> str:
+    data = _resume(store, key)
+    segment = next((s for s in store.segments(key) if s.ended_at is None), None)
+    if segment is None:
+        return "suspected stall"
+    record = data.get("runs", {}).get(f"{segment.stage}-{segment.attempt}", {})
+    if workers.stall.action == "wait":
+        return "suspected stall"
+    if record.get("launcher") == "t3":
+        return "suspected stall: T3 cannot cancel a thread"
+    acknowledged = data.get("failure_acknowledged", ())
+    restarts = sum(s.outcome == "stalled" and f"{s.stage}-{s.attempt}" not in acknowledged
+                   for s in store.segments(key))
+    if restarts >= workers.stall.max_restarts:
+        return "suspected stall: max_restarts reached"
+    store.update_resume(key, lambda d: d.update(stall_recovery={
+        "stage": segment.stage, "attempt": segment.attempt, "phase": "stopping", "requested_at": at}))
+    try:
+        _stop_stall(store, root, key, at, teardown_command)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return f"suspected stall: recovery waiting for verified termination: {exc}"
+    return "suspected stall: prior process ended; relaunch pending"
+
+
+def _remember_health(store: Any, facts: reconcile.Facts) -> None:
+    for key, evidence in facts.activity:
+        segment = next((s for s in store.segments(key) if s.ended_at is None), None)
+        if segment is None:
+            continue
+        store.update_resume(key, lambda d: d.update(worker_health={
+            "run": f"{segment.stage}-{segment.attempt}", "status": evidence.status,
+            "launcher": evidence.launcher, "pending_requests": evidence.pending_requests,
+            "pending_since": evidence.pending_since.isoformat() if evidence.pending_requests and evidence.pending_since else None,
+            "last_activity_at": evidence.last_activity_at.isoformat() if evidence.last_activity_at else None,
+            "error": evidence.error}))
+
+
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
              max_concurrency: int | None = None, require_green: bool = False, teardown_command: str = "",
@@ -652,8 +735,6 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
-    if workers.stall.action != "wait":
-        raise ValueError("automatic stall restart is not supported until activity and safe recovery are implemented")
     _record_limits(workers)
 
     snapshots = list(forge.snapshots())
@@ -678,12 +759,16 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                    gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
                                   now=clock(), require_green=require_green,
                                   stall_after=timedelta(minutes=workers.stall.after_minutes),
+                                  account=workers.claude_as_profile,
                                   hold_observations=tuple((row["issue_key"], row.get("human_review")) for row in snapshots)),
                    finish=partial(_finish_worker, forge, store, policies=policies),
                    require_green=require_green, teardown_command=teardown_command)
 
     now = clock()
     at = now.isoformat()
+    _remember_health(store, facts)
+    for item in store.items():
+        _complete_stall_relaunch(store, item.issue_key, at)
     _sync_suite_holds(forge, store, snapshots, at)
     for item in store.items():
         _promote_merge_pending(store, item)
@@ -776,13 +861,35 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                      for item in store.items() for row in store.asks(item.issue_key))
         if asks != facts.asks:
             facts = replace(facts, asks=asks)
+    for item in store.items():
+        key = item.issue_key
+        if _resume(store, key).get("stall_recovery", {}).get("phase") != "stopping":
+            continue
+        history = store.segments(key)
+        segment = next((s for s in history if s.ended_at is None), None)
+        if segment is None:
+            continue
+        verdict = reconcile.stall_state(key, segment, facts, now, store.decisions(key), history,
+                                        _workflow_for(policies, store, item).start)
+        if verdict in ("ok", "watch", "waiting"):
+            store.update_resume(key, lambda d: d.pop("stall_recovery", None))
+            _wait_log(store, key, "stall recovery cancelled: worker is active or waiting", at)
+        elif verdict in ("suspected", "gone"):
+            try:
+                _stop_stall(store, root, key, at, teardown_command)
+            except (OSError, ValueError, RuntimeError) as exc:
+                _wait_log(store, key, f"suspected stall: recovery waiting for verified termination: {exc}", at)
+        else:
+            _wait_log(store, key, "stall recovery waiting for verified worker evidence", at)
     items = [item for item in store.items()
-             if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
+             if _resume(store, item.issue_key).get("stall_recovery", {}).get("phase") != "stopping"
+             and (not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold"))]
     _remember_verified(store, facts)
     inputs = _planning_inputs(store, items)
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              hold_stages=board.hold_stages if board is not None else (),
+                             failure_limit=workers.failure_limit,
                              facts=facts, **inputs)
     intents = {key: decision_actions.current_intent(rows) for key, rows in inputs["decisions"].items()}  # what planning saw
     stages = {item.issue_key: item.stage for item in items}
@@ -874,6 +981,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 _clear_interrupt(store, key, "limit", scope={"stage": stage})
                 # A successful relaunch after a raised limit must not keep the exhausted interrupt (#963).
                 _clear_interrupt(store, key, "exhausted", scope={})
+                store.update_resume(key, lambda d: d.pop("park", None))
+                _complete_stall_relaunch(store, key, at)
                 if planned is not None:
                     # The intent's worker launched: a re-route is done, and a reversal's done phase is its restart.
                     _settle(store, key, decision_actions.advance, planned.intent_id, stage, action.attempt)
@@ -882,7 +991,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                         trio_gate.record(store, key, rev)
             elif isinstance(action, reconcile.Merge):
                 if engine_merge.execute(action, forge, store, at, policies=policies,
-                                        inputs=_planning_inputs(store, [by_key[key]]), hold_stages=()):
+                                        inputs={**_planning_inputs(store, [by_key[key]]), "failure_limit": workers.failure_limit}, hold_stages=()):
                     stage = "merge"
                     _clear_waived_gates(store, key)
             elif isinstance(action, reconcile.Close):
@@ -920,10 +1029,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     # hold later works without editing the engine's resume records.
                     _retire_ownership(forge, store, key, stages[key], at)
             elif isinstance(action, reconcile.Wait):
-                message = f"wait: {action.reason}"
-                last = next((entry.message for entry in reversed(store.log(key)) if entry.message.startswith("wait: ")), None)
-                if last != message:
-                    store.add_log(key, message, at)
+                reason = (_stall_action(store, root, key, workers, at, teardown_command)
+                          if action.reason == "suspected stall" else action.reason)
+                _wait_log(store, key, reason, at)
             if stage is not None and stage != stages[key]:
                 op = OP_STAGE_WRITE
                 pending = {"stage": stage, "expected": stages[key]}  # the engine's own move: it names no decision
@@ -1067,6 +1175,19 @@ def _persist_launchd_handoff(root: Path, release: Path) -> bool:
     if child.wait(timeout=1500):
         raise supervisor.ServiceError("launchd handoff failed; see engine log")
     return True
+
+
+def _beat(db: Any, forge: Any, root: Path, trees: Path, workers: settings.Workers, tick: datetime) -> None:
+    """Deliver the heartbeat after a pass (#1179). A failure is logged to the engine log and never stops the engine."""
+    try:
+        now = datetime.now(timezone.utc)
+        limit = timedelta(minutes=workers.stall.after_minutes)
+        facts = engine_facts.gather(forge=forge, store=db, root=root, trees=trees, now=now, stall_after=limit)
+        failures = heartbeat_store.beat(db, now, tick, dict(facts.progress), limit, sinks=heartbeat_store.sinks(root))
+    except Exception as exc:
+        failures = [f"heartbeat: {exc}"]
+    for failure in failures:
+        db.add_engine_log(failure, "heartbeat")
 
 
 def _message_loop(root: Path, stop: threading.Event, *, every: float = 1.0) -> None:
@@ -1244,6 +1365,7 @@ def main(argv: list[str] | None = None) -> int:
                         error_kind = None
                     if args.once:
                         return 1 if failed else 0
+                    _beat(db, source, root, trees, config.workers, datetime.now(timezone.utc))
                     with contextlib.suppress(OSError):
                         write_engine_status(
                             root,

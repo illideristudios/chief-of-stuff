@@ -114,6 +114,32 @@ def _exit_code(run_dir: Path) -> int:
     return _exit_record(run_dir)[0]
 
 
+def stop(record: dict) -> None:
+    """Stop a local run by its verified identities, then prove both runner and host ended.
+
+    The T3 polling process is not the server-owned worker. It must never be used as
+    a cancellation handle. Identity failures and unavailable process reads fail closed.
+    """
+    if record.get("launcher") == "t3":
+        raise RuntimeError("T3 cannot cancel a thread")
+    session = record.get("session_id")
+    if not isinstance(session, str) or not session:
+        raise RuntimeError("cannot verify worker identity")
+    for pid_key, identity_key, host in (("pid", "identity", True), ("runner_pid", "runner_identity", False)):
+        pid, expected = record.get(pid_key), record.get(identity_key)
+        if type(pid) is not int or pid <= 0 or not isinstance(expected, str) or not expected:
+            raise RuntimeError("cannot verify worker identity")
+        actual = process_status.identity(pid, session, host=host)
+        if actual is not None and actual != expected:
+            raise RuntimeError("worker process identity changed; refusing to stop it")
+    process_status.stop_session(session)
+    for pid_key, host in (("pid", True), ("runner_pid", False)):
+        if process_status.identity(record[pid_key], session, host=host) is not None:
+            raise RuntimeError("cannot verify prior worker ended")
+    if process_status.carriers(session):
+        raise RuntimeError("cannot verify prior worker ended: session processes remain")
+
+
 def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                   trees: Path, clock: engine_clock.Clock) -> dict | None:
     """Recover a detached start before changing its tree or moving its exit evidence."""
@@ -655,6 +681,10 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             continue
         key = segment.issue_key
         data = _resume(store, key)
+        recovery = data.get("stall_recovery", {})
+        if (recovery.get("stage"), recovery.get("attempt"), recovery.get("phase")) == (
+                segment.stage, segment.attempt, "stopping"):
+            continue  # the engine owns this intentional stop, including an interrupted recovery
         now = clock()
         outcome, reason, reply, exited_at = "failed", "", None, None
         try:
@@ -676,6 +706,10 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     record = data["runs"][f"{segment.stage}-{segment.attempt}"]
             if not isinstance(record, dict):
                 raise ValueError("missing run record")
+            if record.get("launcher") == "t3":
+                observed = t3_adapter.observe(record)
+                if observed.error or observed.alive is not False:
+                    continue  # a dead polling process cannot close a live or unverified T3 thread
             if (type(record.get("pid")) is not int or record["pid"] <= 0
                     or any(not isinstance(record.get(field), str) or not record[field]
                            for field in ("session_id", "run_dir", "tree"))):

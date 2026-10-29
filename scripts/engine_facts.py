@@ -17,7 +17,9 @@ import git_trees
 import git_view
 import process_status
 import readiness
+import session_logs
 import t3_adapter
+import worker_health
 from forge_port import ForgeError
 from orphans import Claim
 from reconcile import Facts, latest_segment
@@ -48,8 +50,8 @@ def _alive(record: dict | None) -> bool | None:
     run_dir = record.get("run_dir")
     if record.get("launcher") == "t3":
         try:
-            state = t3_adapter.observe(Path(run_dir))
-            return True if t3_adapter.outcome(state) is None else None
+            evidence = t3_adapter.observe(record)
+            return True if evidence.alive is True and not evidence.error else None
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
             return None
     if isinstance(run_dir, str) and run_dir and (Path(run_dir) / "exit.json").exists():
@@ -99,6 +101,28 @@ def _progress(tree: Path, view: git_view.View) -> datetime | None | object:
     except ValueError:
         return object()
     return when if when.utcoffset() is not None else object()
+
+
+def _activity(record: dict | None, started: datetime, now: datetime, progress, account: str) -> datetime | None:
+    """Repository and transcript evidence for this attempt, bounded by its start and this pass."""
+    stamps = [progress] if isinstance(progress, datetime) else []
+    if record:
+        run_dir = record.get("run_dir")
+        for name in ("stdout", "stderr"):
+            try:
+                path = Path(run_dir) / name
+                if path.stat().st_size:
+                    stamps.append(datetime.fromtimestamp(path.stat().st_mtime, now.tzinfo))
+            except (OSError, TypeError):
+                pass
+        if record.get("runtime", "claude") == "claude" and record.get("tree") and record.get("session_id"):
+            try:
+                for path, _, event in session_logs.activity_events(account, Path(record["tree"])):
+                    if path.stem == record["session_id"]:
+                        stamps.append(datetime.fromisoformat(event["timestamp"]))
+            except (OSError, ValueError, TypeError, KeyError):
+                pass
+    return max((stamp for stamp in stamps if stamp.utcoffset() is not None and started <= stamp <= now), default=None)
 
 
 def _tree_facts(tree: Path) -> tuple[Any, bool | None, datetime | None | object]:
@@ -186,7 +210,7 @@ def _implementation_requests(forge: Any, store: Any, observed: dict[str, bool | 
 
 def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
            require_green: bool = False, hold_observations: tuple[tuple[str, bool | None], ...] = (),
-           stall_after: timedelta = timedelta(minutes=45)) -> Facts:
+           stall_after: timedelta = timedelta(minutes=3), account: str = "") -> Facts:
     """Read recorded worker trees directly; discovery is not evidence that a recorded tree is unreadable."""
     if now.utcoffset() is None:
         raise ValueError("timestamps must include a timezone")
@@ -201,6 +225,7 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     names: list[tuple[str, str]] = []
     tree_claims: list[tuple[str, tuple]] = []
     progress: list[tuple[str, datetime | None]] = []
+    activity = []
     suite_on_main: list[tuple[str, bool | None]] = []
     recorded_trees: dict[str, Path] = {}
     pipeline = None
@@ -215,6 +240,10 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     for segment in latest.values():
         record = _record(store, segment.issue_key, segment.stage, segment.attempt)
         flag = _alive(record) if segment.ended_at is None else False
+        evidence = None
+        if segment.ended_at is None and record and record.get("launcher") == "t3":
+            evidence = t3_adapter.observe(record)
+            flag = evidence.alive
         if flag is not None:
             alive.append(((segment.issue_key, segment.stage, segment.attempt), flag))
         raw = record.get("tree") if record else None
@@ -232,6 +261,20 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
             on_main.append((segment.issue_key, landed))
         # Unknown progress is no evidence of progress; the bounded silence rule must still run.
         progress.append((segment.issue_key, stamp if isinstance(stamp, datetime) else None))
+        if segment.ended_at is None:
+            started = datetime.fromisoformat(segment.started_at)
+            if evidence is None:
+                evidence = worker_health.Evidence(alive=flag,
+                    last_activity_at=_activity(record, started, now, stamp, account))
+            pending = [ask for ask in store.asks(segment.issue_key)
+                       if not ask.answer and (ask.stage, ask.attempt) == (segment.stage, segment.attempt)]
+            data = store.resume(segment.issue_key) or {}
+            observed = data.get("worker_health", {})
+            same = observed.get("run") == f"{segment.stage}-{segment.attempt}"
+            since = observed.get("pending_since") if same else None
+            evidence = replace(evidence, pending_requests=max(evidence.pending_requests, len(pending)),
+                pending_since=datetime.fromisoformat(since) if since else now)
+            activity.append((segment.issue_key, evidence))
         suite = None
         if state is not None and pipeline is not None and isinstance(pipeline.sha, str) and pipeline.sha:
             code = git_trees.git(["merge-base", "--is-ancestor", "HEAD", pipeline.sha], tree)[0]
@@ -287,6 +330,7 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
                  unreadable=tuple(unreadable), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
                  landing_heads=tuple(landing_heads.items()), landed_trees=tuple(landed_trees),
                  trees=tuple(tree_rows), tree_names=tuple(names),
+                 activity=tuple(activity),
                  tree_claims=tuple(tree_claims), progress=tuple(progress), landing_errors=tuple(landing_errors.items()),
                  suites=tuple(suites), require_green=require_green, stall_after=stall_after,
                  hold_observations=hold_observations,
