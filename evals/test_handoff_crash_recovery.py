@@ -46,7 +46,7 @@ class HandoffCrashRecovery(SupervisorTest):
                 (self.root / 'store.db').touch()
                 marker = supervisor.state_dir(self.root) / supervisor.PLUGIN_RELEASE_MARKER
                 with mock.patch.object(supervisor, 'RELEASE', old):
-                    supervisor.install(self.root, jobs_dir=self.jobs)
+                    supervisor.ensure(self.root, jobs_dir=self.jobs)
                     marker.write_text(str(new))
                     def crash(*args, **kwargs):
                         result = self.launchctl(*args, **kwargs)
@@ -328,3 +328,69 @@ with mock.patch.object(supervisor, 'RELEASE', Path(os.environ['TEST_OLD'])), moc
         while not result.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertTrue(result.exists(), 'helper died before bootstrap after parent received SIGTERM')
+
+    def test_explicit_cache_choice_survives_later_newer_ensures_and_recovery(self):
+        for interrupted in (False, True):
+            with self.subTest(interrupted=interrupted):
+                self.doCleanups(); self.setUp()
+                old, new = self.releases()
+                (self.root / 'store.db').touch()
+                with mock.patch.object(supervisor, 'RELEASE', new):
+                    supervisor.ensure(self.root, jobs_dir=self.jobs)
+                with mock.patch.object(supervisor, 'RELEASE', old):
+                    if interrupted:
+                        with mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
+                            with self.assertRaises(SystemExit):
+                                supervisor.install(self.root, jobs_dir=self.jobs)
+                    else:
+                        supervisor.install(self.root, jobs_dir=self.jobs)
+                with mock.patch.object(supervisor, 'RELEASE', new):
+                    supervisor.ensure(self.root, jobs_dir=self.jobs)
+                    supervisor.ensure(self.root, jobs_dir=self.jobs)
+                    self.assertEqual(supervisor.selected_release(self.root), old)
+                    self.assertEqual(supervisor.current_release_from_job(self.job()), old)
+                    with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
+                        supervisor.ensure(self.root, jobs_dir=self.jobs)
+                    self.assertEqual(supervisor.selected_release(self.root), old)
+                with mock.patch.object(supervisor, 'RELEASE', new):
+                    supervisor.install(self.root, jobs_dir=self.jobs)
+                    self.assertEqual(supervisor.selected_release(self.root), new)
+
+    def test_reinstall_after_uninstall_recovers_at_ensure_and_boundary(self):
+        for boundary in (False, True):
+            with self.subTest(boundary=boundary):
+                self.doCleanups(); self.setUp()
+                old, new = self.releases()
+                (self.root / 'store.db').touch()
+                with mock.patch.object(supervisor, 'RELEASE', new):
+                    supervisor.ensure(self.root, jobs_dir=self.jobs)
+                supervisor.uninstall(self.root, self.jobs)
+                with mock.patch.object(supervisor, 'RELEASE', old), mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
+                    with self.assertRaises(SystemExit):
+                        supervisor.install(self.root, jobs_dir=self.jobs)
+                with mock.patch.object(supervisor, 'RELEASE', new):
+                    if boundary:
+                        supervisor.commit_handoff(self.root, old, self.jobs)
+                    else:
+                        supervisor.ensure(self.root, jobs_dir=self.jobs)
+                    self.assertTrue(self.loaded)
+                    self.assertEqual(supervisor.current_release_from_job(self.job()), old)
+                supervisor.uninstall(self.root, self.jobs)
+                with mock.patch.object(supervisor, 'RELEASE', new):
+                    self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: disabled')
+                    self.assertEqual(supervisor.commit_handoff(self.root, old, self.jobs), 'engine: handoff superseded')
+                self.assertFalse(self.loaded)
+
+    def test_uninstall_intent_wins_if_interrupted_before_cleanup(self):
+        old, new = self.releases()
+        (self.root / 'store.db').touch()
+        with mock.patch.object(supervisor, 'RELEASE', old), mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                supervisor.install(self.root, jobs_dir=self.jobs)
+        with mock.patch.object(supervisor, 'unload_agent', side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                supervisor.uninstall(self.root, self.jobs)
+        with mock.patch.object(supervisor, 'RELEASE', new):
+            self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: disabled')
+            self.assertEqual(supervisor.commit_handoff(self.root, old, self.jobs), 'engine: handoff superseded')
+        self.assertFalse(self.loaded)

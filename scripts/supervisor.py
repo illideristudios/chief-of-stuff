@@ -25,6 +25,7 @@ DISABLED_MARKER = "engine.disabled"
 PLUGIN_RELEASE_MARKER = "engine-plugin-release"
 HANDOFF_MARKER = "engine-handoff.json"
 EXPLICIT_INSTALL_MARKER = "engine-explicit-install.json"
+EXPLICIT_INTENT_MARKER = "engine-explicit-intent.json"
 ENSURE_LOCK_TIMEOUT = 1200.0
 
 # Run after the venv python, with the workspace as working directory (engine --root defaults to ".").
@@ -184,6 +185,14 @@ def _plugin_version(release: Path) -> tuple[int, ...] | None:
 
 def selected_release(root: Path) -> Path:
     """Follow the installed pointer, or a validated newer sibling requested by a plugin session."""
+    intent = _explicit_intent(root)
+    if intent and intent["operation"] == "install":
+        chosen = Path(intent["release"])
+        current = current_release()
+        # Installed versions follow the user's current pointer; cache choices stay pinned.
+        if chosen.parent.name == "versions" and current.parent == chosen.parent:
+            return current
+        return chosen
     pending = _explicit_install(root)
     if pending is not None:
         return Path(pending["release"])
@@ -202,8 +211,38 @@ def selected_release(root: Path) -> Path:
     return current
 
 
+def _explicit_intent(root: Path) -> dict | None:
+    """The last explicit operation, atomically ordered before its launchd side effects."""
+    try:
+        intent = json.loads((state_dir(root) / EXPLICIT_INTENT_MARKER).read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise ServiceError(f"cannot read explicit intent: {exc}") from exc
+    if not isinstance(intent, dict) or intent.get("operation") not in ("install", "uninstall"):
+        raise ServiceError("invalid explicit intent")
+    if intent["operation"] == "install":
+        if (not isinstance(intent.get("release"), str) or not Path(intent["release"]).is_absolute()
+                or not isinstance(intent.get("job"), dict)
+                or intent["job"].get("Label") != label("engine", root)
+                or intent["job"].get("WorkingDirectory") != str(root.resolve())
+                or not isinstance(intent.get("pending"), bool)):
+            raise ServiceError("invalid explicit intent")
+    return intent
+
+
+def _disabled(root: Path) -> bool:
+    intent = _explicit_intent(root)
+    if intent is not None:
+        return intent["operation"] == "uninstall"
+    return (state_dir(root) / DISABLED_MARKER).is_file()
+
+
 def _explicit_install(root: Path) -> dict | None:
     """Read an incomplete explicit install; malformed state must not select another release."""
+    intent = _explicit_intent(root)
+    if intent is not None:
+        return intent if intent["operation"] == "install" and intent["pending"] else None
     path = state_dir(root) / EXPLICIT_INSTALL_MARKER
     try:
         pending = json.loads(path.read_text())
@@ -235,6 +274,14 @@ def _finish_explicit_install(root: Path, pending: dict, jobs_dir: Path | None, *
     (state_dir(root) / PLUGIN_RELEASE_MARKER).unlink(missing_ok=True)
     (state_dir(root) / HANDOFF_MARKER).unlink(missing_ok=True)
     (state_dir(root) / DISABLED_MARKER).unlink(missing_ok=True)
+    intent = _explicit_intent(root)
+    if intent is not None and intent["operation"] == "install":
+        atomic_write(state_dir(root) / EXPLICIT_INTENT_MARKER,
+                     json.dumps({**intent, "pending": False}).encode())
+    else:
+        # Upgrade legacy pending records to durable explicit selections.
+        atomic_write(state_dir(root) / EXPLICIT_INTENT_MARKER,
+                     json.dumps({**pending, "operation": "install", "pending": False}).encode())
     (state_dir(root) / EXPLICIT_INSTALL_MARKER).unlink(missing_ok=True)
     return "engine: " + outcome
 
@@ -393,7 +440,7 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
     require_macos()
     root, data = root.resolve(), data_dir()
     with lock(data / "supervisor.lock", timeout=ENSURE_LOCK_TIMEOUT if respect_disabled else None):
-        if respect_disabled and (state_dir(root) / DISABLED_MARKER).is_file():
+        if respect_disabled and _disabled(root):
             return "engine: disabled"
         if respect_disabled:
             pending = _explicit_install(root)
@@ -413,7 +460,7 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                         raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
                     registered = current_release_from_job(existing)
                     selected_version, registered_version = _plugin_version(selected), _plugin_version(registered)
-                    if (registered.parent == selected.parent and selected_version is not None
+                    if (_explicit_intent(root) is None and registered.parent == selected.parent and selected_version is not None
                             and registered_version is not None and registered_version > selected_version):
                         selected = registered
                 engine = (str(selected / "scripts/engine.py"),)
@@ -444,6 +491,8 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
             _request_plugin_release(root, selected, existing)
         if not respect_disabled:
             pending = {"release": str(selected), "job": desired}
+            atomic_write(state_dir(root) / EXPLICIT_INTENT_MARKER,
+                         json.dumps({**pending, "operation": "install", "pending": True}).encode())
             atomic_write(state_dir(root) / EXPLICIT_INSTALL_MARKER, json.dumps(pending).encode())
             return _finish_explicit_install(root, pending, jobs_dir, replay=False)
         outcome = load_agent(desired, jobs_dir)
@@ -456,8 +505,6 @@ def ensure(root: Path, jobs_dir: Path | None = None) -> str:
     resolved = root.resolve()
     if not (resolved / "store.db").is_file():
         return "engine: not configured"
-    if (state_dir(resolved) / DISABLED_MARKER).is_file():
-        return "engine: disabled"
     return install(resolved, jobs_dir=jobs_dir, respect_disabled=True)
 
 
@@ -502,11 +549,13 @@ def commit_handoff(root: Path, selected: Path, jobs_dir: Path | None = None) -> 
     root = root.resolve()
     with lock(data_dir() / "supervisor.lock", timeout=ENSURE_LOCK_TIMEOUT):
         path = job_path(label("engine", root), jobs_dir)
-        if (state_dir(root) / DISABLED_MARKER).exists() or not path.exists() or selected_release(root) != selected:
+        if _disabled(root) or selected_release(root) != selected:
             return "engine: handoff superseded"
         pending_install = _explicit_install(root)
         if pending_install is not None:
             return _finish_explicit_install(root, pending_install, jobs_dir, replay=True)
+        if not path.exists():
+            return "engine: handoff superseded"
         job = plistlib.loads(path.read_bytes())
         if job.get("Label") != label("engine", root) or job.get("WorkingDirectory") != str(root):
             raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
@@ -550,6 +599,7 @@ def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
     require_macos()
     resolved = root.resolve()
     with lock(data_dir() / "supervisor.lock"):
+        atomic_write(state_dir(resolved) / EXPLICIT_INTENT_MARKER, json.dumps({"operation": "uninstall"}).encode())
         unload_agent(label("engine", resolved), resolved, jobs_dir)
         atomic_write(state_dir(resolved) / DISABLED_MARKER, b"")
         (state_dir(resolved) / HANDOFF_MARKER).unlink(missing_ok=True)
