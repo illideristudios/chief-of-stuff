@@ -180,17 +180,31 @@ def parse(diff: str) -> list[File]:
     return files
 
 
-def diff(change: board_sources.Change, clone: Path, pages: Path) -> tuple[str, str]:
-    """(merge base, `git diff` of the change's head against it), cached for that comparison."""
-    base = module_graph.fetch(change, clone)
+def diff_result(change: board_sources.Change, clone: Path, pages: Path) -> tuple[str, str, bool]:
+    """The comparison and diff, with a stale flag when its base cannot be refreshed."""
+    index = pages / CACHE / '.comparisons'
+    base, stale = module_graph.comparison(change, clone, index)
     out = pages / CACHE / f"{module_graph.cache_key(change, clone, base)}.diff"
     if not out.is_file():
+        if stale:
+            raise ValueError('cached diff is unavailable while offline')
         # ponytail: the whole diff, however big; cap it per file if a change's page gets slow.
         text = module_graph.run(["git", "-C", str(clone), "diff", "--no-color", "--no-renames", "--no-ext-diff",
                                  "--end-of-options", base, change.head])
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(f"{base}\n{text}")
-    base, _, text = out.read_text().partition("\n")
+    cached_base, separator, text = out.read_text().partition("\n")
+    if not separator or cached_base != base:
+        raise ValueError('cached diff has an invalid comparison identity')
+    if not stale:
+        module_graph.remember_comparison(change, clone, index, base)
+    return base, text, stale
+
+
+def diff(change: board_sources.Change, clone: Path, pages: Path) -> tuple[str, str]:
+    base, text, stale = diff_result(change, clone, pages)
+    if stale:
+        raise ValueError('diff is stale: the current base could not be verified')
     return base, text
 
 
@@ -310,9 +324,11 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     if change:
         if graph and pages and root:
             try:
-                base, text = diff(change, root / graph.clone, pages)
+                base, text, stale = diff_result(change, root / graph.clone, pages)
                 files = parse(text)
                 compare = f"{escape(change.base)}@{escape(base[:7])} → {escape(change.head[:7])}"
+                if stale:
+                    note = 'Stale cached diff: the current base could not be verified.'
             except (OSError, ValueError) as e:
                 note = f"The diff is unavailable: {escape(str(e))}"
         else:

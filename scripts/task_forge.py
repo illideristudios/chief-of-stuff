@@ -49,6 +49,8 @@ def lookup_keys(refs: Iterable[str], home) -> tuple[str, ...]:
         text = raw.strip()
         if not text or text == tracker.WORKFLOW:
             continue
+        if home is None and text.startswith('#') and text[1:].isdecimal():
+            continue  # a bare tracker reference has no verified forge identity
         if (isinstance(home, board_sources.backlog.Backlog) and board_sources.ambiguous_gitlab_label(text)):
             continue  # legacy host labels and nested project shorthand have identical spellings
         # URLs are converted to cache keys; a raw foreign URL in an old change cache must not match.

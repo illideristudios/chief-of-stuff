@@ -107,7 +107,8 @@ OTHER = bs.Change("!50", "https://forge.example/grp/app/-/merge_requests/50", "W
 
 
 def sources(*changes: bs.Change, issue: bs.Issue = ISSUE) -> bs.Sources:
-    return bs.Sources({}, {"#109": issue}, {c.ref: c for c in changes}, (), {})
+    return bs.Sources({}, {"#109": issue}, {c.ref: c for c in changes}, (), {},
+                      bs.backlog.Backlog('https://forge.example', 'grp/app'))
 
 
 def page(number: int = 109, src: bs.Sources | None = None, today: str | None = None,

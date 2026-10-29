@@ -176,3 +176,71 @@ class PartialRefreshIdentity(unittest.TestCase):
             loaded = bs.load(Path(tmp))
             self.assertEqual(set(loaded.issues), {'foreign/repo#7'})
             self.assertEqual(loaded.issues['foreign/repo#7'].ref, 'foreign/repo#7')
+
+class ReviewRegressions(unittest.TestCase):
+    def test_homeless_bare_closer_cannot_finish_bare_tracker_task(self):
+        import task_forge
+        from settings import Lane
+        from tracker import Task
+        task = Task('item', '', '', '', '', '', issue='#7', lane='build', stage='merge')
+        merged = replace(change(), state='merged', issues=('#7',))
+        with tempfile.TemporaryDirectory() as tmp:
+            bs._write(Path(tmp) / bs.CACHE, bs.Sources({}, {}, {'#42': merged}, (), {}))
+            sources = bs.load(Path(tmp))
+            self.assertEqual(task_forge.task_changes(task, sources), ())
+            self.assertEqual(task_forge.effective_stage(task, sources, {'build': Lane(('merge', 'done'))}), 'merge')
+            known = replace(sources, home=bs.backlog.GitHubBacklog('o/app'))
+            self.assertEqual(task_forge.effective_stage(task, known, {'build': Lane(('merge', 'done'))}), 'done')
+
+    def test_gitlab_credentials_change_keeps_stale_panels_but_project_change_does_not(self):
+        import shutil
+        from test_board_sources import workspace
+        old_home = bs.backlog.Backlog('https://labs.example.test', 'team/app', env='OLD', account='old')
+        issue = bs.Issue('#7', 'https://labs.example.test/team/app/-/issues/7', 'old', 'open', ())
+        old_change = replace(change('!42', 'https://labs.example.test/team/app/-/merge_requests/42'), issues=('#7',))
+        for host, project, retained in [('labs.example.test', 'team/app', True),
+                                        ('labs.example.test', 'team/other', False),
+                                        ('other.example.test', 'team/app', False)]:
+            for fresh_issues in (True, False):
+                root = workspace(f'GitLab; host https://{host}; project {project}; token env NEW')
+                self.addCleanup(shutil.rmtree, root, True)
+                bs._write(root / 'pages' / bs.CACHE, bs.Sources({'kanban': NOW, 'merge requests': NOW}, {'#7': issue}, {'!42': old_change}, (), {}, old_home))
+                result = ({}, None, {'merge requests': 'offline'}) if fresh_issues else (None, {}, {'kanban': 'offline'})
+                with mock.patch.object(bs, 'forge', return_value=result):
+                    got = bs.refresh(root, NOW)
+                self.assertEqual(bool(got.changes if fresh_issues else got.issues), retained)
+                self.assertEqual(bs.load(root / 'pages').home, got.home)
+
+    def test_offline_cached_diff_and_graph_are_explicitly_stale_and_isolated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pages, clone, graph = Path(tmp), Path(tmp) / 'clone', Graph('clone', 'src')
+            first = change()
+            def run(cmd):
+                if cmd[0] == 'branch-graph':
+                    Path(cmd[-1]).with_suffix('.mmd').write_text('graph TD\n A-->B')
+                    return 'views=1'
+                return 'diff text'
+            with mock.patch.object(module_graph, 'fetch', return_value='base1'), mock.patch.object(module_graph, 'run', side_effect=run):
+                source_page.diff_result(first, clone, pages)
+                module_graph.draw_result(first, graph, clone, pages)
+            with mock.patch.object(module_graph, 'fetch', side_effect=ValueError('offline')), mock.patch.object(module_graph, 'run') as run:
+                self.assertEqual(source_page.diff_result(first, clone, pages), ('base1', 'diff text', True))
+                views, _, stale = module_graph.draw_result(first, graph, clone, pages)
+                self.assertTrue(stale)
+                self.assertIn('A-->B', views[0])
+                self.assertIn('stale', module_graph.section(first, graph, pages, Path(tmp)).lower())
+                for other in (replace(first, base='other'), replace(first, head='b' * 40), change('#43', 'https://github.com/o/other/pull/43')):
+                    with self.assertRaisesRegex(ValueError, 'offline'):
+                        source_page.diff_result(other, clone, pages)
+                    with self.assertRaisesRegex(ValueError, 'offline'):
+                        module_graph.draw_result(other, graph, clone, pages)
+                with self.assertRaisesRegex(ValueError, 'offline'):
+                    module_graph.draw_result(first, replace(graph, root='other'), clone, pages)
+                index = pages / source_page.CACHE / '.comparisons' / module_graph.cache_key(first, clone, '')
+                index.write_text('{"base":"other", "key":"wrong"}')
+                with self.assertRaisesRegex(ValueError, 'offline'):
+                    source_page.diff_result(first, clone, pages)
+                sibling = change('o/sibling#42', 'https://github.com/o/sibling/pull/42')
+                with self.assertRaisesRegex(ValueError, 'sibling'):
+                    source_page.diff_result(sibling, clone, pages)
+                run.assert_not_called()

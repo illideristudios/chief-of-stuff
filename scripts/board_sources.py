@@ -739,13 +739,18 @@ def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call) ->
     home = cfg.backlog
     # Both failed panels may be carried together under their old home. When only one
     # succeeded under a different home, the other panel cannot safely share its keys.
-    changed_home = prev.home != home and (issues is not None or changes is not None)
+    same_home = (prev.home is None and home is None) or (
+        prev.home is not None and home is not None and type(prev.home) is type(home)
+        and backlog.home_of(prev.home) == backlog.home_of(home))
+    changed_home = not same_home and (issues is not None or changes is not None)
     if issues is None:
         if changed_home:
             issues = {}
             fetched.pop("kanban", None)
         else:
-            issues, home = prev.issues, prev.home
+            issues = prev.issues
+            if changes is None:
+                home = prev.home
     elif cfg.backlog is not None:
         fetched["kanban"] = now
     if changes is None:

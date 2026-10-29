@@ -172,7 +172,8 @@ class SourcePage(unittest.TestCase):
 
     def sources(self, *changes: bs.Change) -> bs.Sources:
         changes = changes or (self.mr, self.other, self.merged)
-        return bs.Sources({}, {"#109": ISSUE}, {c.ref: c for c in changes}, (), {})
+        return bs.Sources({}, {"#109": ISSUE}, {c.ref: c for c in changes}, (), {},
+                          bs.backlog.Backlog('https://forge.example', 'grp/app'))
 
     def render(self, number: int = 109, src: bs.Sources | None = None, graph: bool = True) -> str | None:
         if sp is None:
@@ -189,6 +190,15 @@ class SourcePage(unittest.TestCase):
 
 
 class RenderTest(SourcePage):
+    def test_offline_warm_diff_is_shown_with_stale_warning(self):
+        from unittest import mock
+        import module_graph
+        self.render()  # populate a verified comparison
+        with mock.patch.object(module_graph, 'fetch', side_effect=ValueError('offline')):
+            html = self.render()
+        self.assertIn('Stale cached diff: the current base could not be verified.', html)
+        self.assertIn('data-path="src/app/limits.py"', html)
+
     def test_no_header_prints_a_rendered_clock(self) -> None:
         # #215: the source crumb keeps the task and board links and the sources' read times, not a render clock.
         self.assertNotRegex(self.page(), r"\brendered \d{1,2}:\d{2}")
@@ -418,7 +428,8 @@ class StoreAndCrossRepoSourcePageTest(unittest.TestCase):
         )
         mr = bs.Change("!48", "https://forge.example/grp/app/-/merge_requests/48", "Cap uploads", "open",
                        False, "passed", False, 0, None, "main", ("src/a.py",), ("#109",))
-        html = sp.render(109, TRACKERS, bs.Sources({}, {"#109": ISSUE}, {"!48": mr}, (), {}), NOW, notes=[note])
+        html = sp.render(109, TRACKERS, bs.Sources({}, {"#109": ISSUE}, {"!48": mr}, (), {},
+                                                    bs.backlog.Backlog('https://forge.example', 'grp/app')), NOW, notes=[note])
         self.assertNotRegex(html, r'(?i)href="\s*javascript:')
         self.assertNotIn('href=""', html)
         self.assertIn("Check bounds", text(html))
