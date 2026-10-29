@@ -49,6 +49,10 @@ DRAWS_NOTHING = (
     "trio_gate",
     "decision_actions",
     "decision_escalation",
+    "decision_graph",  # Entities: decision DAG leaves, ancestors and rejected alternatives.
+    "decision_history",  # Use Cases: harsh justification judgement and PrecedentSource seam.
+    "precedent_source",  # Interface Adapters: tracker and decision-graph PrecedentSource gateways.
+    "decisions_cli",  # Frameworks and Drivers: coordinator/architect/owner decision graph CLI.
     "performance",
     "performance_report",
     "limits", "limits_history", "limits_probe", "limits_cli", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
@@ -217,10 +221,12 @@ CIRCLES: dict[str, frozenset[str]] = {
     "entities": frozenset({
         "tracker", "md", "clock", "runtimes", "policy", "findings", "orphans",
         "estimate", "tracker_log", "tree_state", "guard_commands", "limits",
+        "decision_graph",
     }),
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
         "task_forge", "model_port", "issue_gate", "architect_signals", "trio_gate", "decision_actions", "decision_escalation", "engine_merge",
+        "decision_history",
         "forge_port",
         "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance",
     }),
@@ -229,7 +235,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge", "private_state",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
         "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
-        "architect_signal_store",
+        "architect_signal_store", "precedent_source",
         # §4: store's migrations/ — path keys, not top-level stems.
         "migrations/env",
         "migrations/versions/0001_initial",
@@ -244,6 +250,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "migrations/versions/0009_drop_ownership",
         "migrations/versions/0010_worker_messages",
         "migrations/versions/0011_rotation_records",
+        "migrations/versions/0012_decision_graph",
     }),
     "drivers": frozenset({
         "claude_adapter", "host_adapter", "t3_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor", "release_selection", "engine_intent",
@@ -252,7 +259,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
         "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
-        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "architect_signals_cli",
+        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "architect_signals_cli", "decisions_cli",
         "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }
@@ -425,6 +432,16 @@ class DependencyRuleTest(unittest.TestCase):
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
         self.assertEqual(forbidden_reach(SCRIPTS, "guard_commands", set(),
                          frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
+
+    def test_decision_graph_imports_no_other_script_or_io(self) -> None:
+        self.assertEqual(import_graph(SCRIPTS)["decision_graph"], set())
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_graph", set(),
+                         frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
+
+    def test_decision_history_reaches_no_adapter_or_io_module(self) -> None:
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_history",
+                         {"store", "store_access", "forge", "claude_adapter", "settings", "trio_gate", "pages", "workspace"},
+                         frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
 
     def test_guard_rules_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_rules"], set())

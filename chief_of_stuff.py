@@ -43,6 +43,7 @@ COMMANDS = {
     "health": "scripts/probe_health.py",
     "pages": "scripts/pages.py",
     "decision": "scripts/decision_page.py",
+    "decisions": "scripts/decisions_cli.py",
     "log": "scripts/tracker_write.py",
     "tracker": "scripts/tracker_read.py",
     "merge-approved": "scripts/merge_approved.py",
@@ -55,7 +56,7 @@ COMMANDS = {
     "architect-signals": "scripts/architect_signals_cli.py",
 }
 # Commands whose scripts import store (SQLAlchemy/Alembic).
-STORE_BACKED = frozenset({"adopt", "board", "decision", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
+STORE_BACKED = frozenset({"adopt", "board", "decision", "decisions", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
 
 
 def wrapper_text(current: Path) -> str:

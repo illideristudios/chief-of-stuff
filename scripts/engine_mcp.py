@@ -1,14 +1,20 @@
-"""The engine's stdio report/ask channel (design 10); all identities come from the launch environment."""
+"""The engine's stdio report/ask/decisions channel (design 10, §17); all identities come from the launch environment."""
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import select
 from typing import Literal
 
+import anyio
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
+import decision_history
 from guard_binding import Binding
+import inbox
 from policy import SEVERITIES
-from store import Store
+from store import Store, verdict_fifo_path
 
 
 class Finding(BaseModel):
@@ -46,6 +52,26 @@ class AskInput(BaseModel):
     context: str
 
 
+class DecisionsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    action: Literal["leaves", "ancestors", "was_rejected"] = "leaves"
+    leaf_id: int | None = None
+    other_leaf_id: int | None = None
+    requested_depth: int = Field(default=1, ge=1)
+    approach: str = ""
+    justification: str = ""
+    evidence: str = ""
+
+
+def _wait_fifo_once(fd: int, timeout: float) -> None:
+    ready, _, _ = select.select([fd], [], [], timeout)
+    if ready:
+        try:
+            os.read(fd, 64)
+        except OSError:
+            pass
+
+
 class EngineTools:
     def __init__(self, binding: Binding, store: Store) -> None:
         self.binding, self.store = binding, store
@@ -77,12 +103,128 @@ class EngineTools:
         return {"ask_id": ask_id, "message": "Report outcome=blocked, then stop and wait for the engine. "
                 "An ask is not an approval; the engine routes the decision."}
 
+    async def _await_verdict(self, request_id: int) -> None:
+        fifo: Path | None = verdict_fifo_path(self.binding.root, request_id)
+        assert fifo is not None
+        fifo.parent.mkdir(parents=True, exist_ok=True)
+        rfd: int | None = None
+        try:
+            try:
+                os.mkfifo(fifo, 0o600)
+            except FileExistsError:
+                pass
+            except OSError:
+                fifo = None
+            if fifo is not None:
+                try:
+                    rfd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+                except OSError:
+                    rfd = None
+            while True:
+                row = self.store.history_request(request_id)
+                if row is None or row.status != "pending":
+                    return
+                if rfd is not None:
+                    await anyio.to_thread.run_sync(_wait_fifo_once, rfd, 0.25)
+                else:
+                    await anyio.sleep(0.05)
+        finally:
+            if rfd is not None:
+                try:
+                    os.close(rfd)
+                except OSError:
+                    pass
+            if fifo is not None:
+                try:
+                    fifo.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    async def decisions(
+        self,
+        action: Literal["leaves", "ancestors", "was_rejected"] = "leaves",
+        leaf_id: int | None = None,
+        other_leaf_id: int | None = None,
+        requested_depth: int = 1,
+        approach: str = "",
+        justification: str = "",
+        evidence: str = "",
+    ) -> dict:
+        """Read current decision leaves, or submit a justified history / was_rejected request and await the verdict."""
+        data = DecisionsInput.model_validate({
+            "action": action,
+            "leaf_id": leaf_id,
+            "other_leaf_id": other_leaf_id,
+            "requested_depth": requested_depth,
+            "approach": approach,
+            "justification": justification,
+            "evidence": evidence,
+        })
+        if data.action == "leaves":
+            return {"leaves": [self.store._serialize_leaf(leaf) for leaf in self.store.decision_leaves()]}
+
+        b = self.binding
+        req = decision_history.HistoryRequest(
+            kind=data.action,
+            justification=data.justification,
+            leaf_id=data.leaf_id,
+            other_leaf_id=data.other_leaf_id,
+            requested_depth=data.requested_depth,
+            approach=data.approach,
+            evidence=data.evidence,
+            issue_key=b.issue_key,
+            worker_id=b.session_id,
+        )
+        refusal = decision_history.validate_worker_request(req)
+        if refusal is not None:
+            return {"status": "refused", "kind": data.action, "message": refusal}
+
+        # Pre-create the wakeup FIFO before persisting so a fast coordinator cannot race past wakeup registration.
+        row = self.store.submit_history_request(req, stage=b.stage, attempt=b.attempt)
+        fifo = verdict_fifo_path(b.root, row.id)
+        fifo.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.mkfifo(fifo, 0o600)
+        except OSError:
+            pass
+
+        mailbox_dir = b.root / ".chief-of-stuff" / "mailbox"
+        inbox.send_message(
+            recipient="coordinator",
+            sender=b.session_id,
+            msg_type="ask",
+            task=b.issue_key,
+            mailbox_dir=mailbox_dir,
+            body=(
+                f"Decision history request #{row.id} ({row.kind}) from {b.session_id} on {b.issue_key}: "
+                f"{row.justification}"
+            ),
+            payload={
+                "kind": "decision_history_request",
+                "request_id": row.id,
+                "request_kind": row.kind,
+                "issue_key": b.issue_key,
+                "stage": b.stage,
+                "attempt": b.attempt,
+                "session_id": b.session_id,
+                "leaf_id": row.leaf_id,
+                "other_leaf_id": row.other_leaf_id,
+                "requested_depth": row.requested_depth,
+                "approach": row.approach,
+                "justification": row.justification,
+                "evidence": row.evidence,
+            },
+        )
+        await self._await_verdict(row.id)
+        return self.store.fulfill_history_request(row.id)
+
 
 def create_server(binding: Binding, store: Store) -> MCPServer:
     server = MCPServer("chief-of-stuff-engine")
     tools = EngineTools(binding, store)
     server.tool()(tools.report)
     server.tool()(tools.ask)
+    server.tool()(tools.decisions)
     return server
 
 
