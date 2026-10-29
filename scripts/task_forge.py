@@ -352,7 +352,10 @@ class PageData:
         return self.resumes.get(key)
 
     def exhaustion(self, key) -> RetryExhaustion | None:
-        """Current retry exhaustion for `key`, or None when a live run or recovery supersedes it."""
+        """Current retry exhaustion, unless the issue is closed or a live run supersedes it."""
+        item = self.item(key)
+        if item is None or item.forge_state == "closed":
+            return None
         segs = [s for s in self.stage_segments if s.issue_key == key]
         return retry_exhaustion(self.resumes.get(key), segs, [e for e in self.issue_logs if e.issue_key == key])
 
