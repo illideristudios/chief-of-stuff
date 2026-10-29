@@ -1,4 +1,4 @@
-# Tracker {today}
+# Tracker {{today}}
 
 Coordinator: coordinator. Board: self-hosted.
 
