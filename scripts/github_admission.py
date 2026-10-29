@@ -306,18 +306,17 @@ class GitHubAdmission:
 
     def _load(self, fd, created):
         now = self._now()
-        if created:
+        try:
+            state = self._read(fd)
+        except FileNotFoundError:
+            # No request may dispatch until the stable lock records successful
+            # initialization. A missing record after that point fails closed.
+            if os.fstat(fd).st_size:
+                raise
             state = {'version': 4, 'policy': dataclasses.asdict(self.policy), 'last': now,
                      'events': [], 'stale': False, 'recovery_until': 0,
                      'unknown_count': 0, 'cooldown_until': 0, 'unsupported_cooldown': False}
             self._write(fd, state)
-            directory = os.open(self.path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        else:
-            state = self._read(fd)
         if now < state['last']:
             raise StateError('clock moved backwards')
         state['last'] = now
@@ -333,6 +332,12 @@ class GitHubAdmission:
         if legacy_unknown or (events and events[-1][2]):
             self._mark_unknown(state, now)
         self._write(fd, state)
+        if not os.fstat(fd).st_size:
+            # Persist the marker before any caller can dispatch. It also migrates
+            # an existing valid ledger created by earlier stable-lock versions.
+            if os.pwrite(fd, b"1", 0) != 1:
+                raise OSError('short initialization marker write')
+            os.fsync(fd)
         return state, now
 
     def request(self, dispatch):

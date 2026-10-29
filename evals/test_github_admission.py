@@ -290,6 +290,12 @@ class AdmissionTests(unittest.TestCase):
         with self.assertRaises(admission.HostQuarantined):
             self.gate.request(lambda: self.fail('reservation lost'))
 
+    def test_initialization_interruption_recovers_without_dispatch(self):
+        with mock.patch.object(self.gate, "_write", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                self.gate.request(lambda: self.fail("must not dispatch before initialization"))
+        self.assertEqual(self.gate.request(lambda: ("recovered", 1)), "recovered")
+
     def test_missing_established_ledger_fails_closed(self):
         self.gate.request(lambda: ('ok', 1))
         next(Path(self.tmp.name).rglob('*.json')).unlink()
