@@ -540,6 +540,53 @@ class EnsureTest(unittest.TestCase):
                      mock.patch.object(pg.subprocess, "Popen", side_effect=AssertionError("server replaced")):
                     self.assertEqual(pg.ensure(self.dir, self.port, self.log, selected), "pages: serving")
 
+    def test_unselected_caller_preserves_equal_or_unordered_server(self):
+        root = self.dir.parent / "workspace"
+        for version in ("1.2.3", "1.2.3.0", "unknown"):
+            for identity in ("", " release-" + "a" * 24):
+                for selected in (None, root):
+                    with self.subTest(version=version, identity=identity, root=selected), \
+                         mock.patch.object(pg, "VERSION", "1.2.3"), \
+                         mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/{version}{identity}"), \
+                         mock.patch.object(pg, "_stop", side_effect=AssertionError("running server stopped")):
+                        self.assertEqual(pg.ensure(self.dir, self.port, self.log, selected), "pages: serving")
+
+    def test_selected_same_version_release_replaces_different_or_unidentified_server(self):
+        root = self.dir.parent / "workspace"
+        with tempfile.TemporaryDirectory() as tmp:
+            release = Path(tmp) / "versions" / "new"
+            release.mkdir(parents=True)
+            (release / "chief_of_stuff.py").touch()
+            (release.parent.parent / "current").symlink_to(release)
+            for identity in ("", " release-" + "a" * 24):
+                with self.subTest(identity=identity), \
+                     mock.patch.object(pg.supervisor, "RELEASE", release), \
+                     mock.patch.object(pg, "VERSION", "1.2.3"), \
+                     mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.2.3{identity}"), \
+                     mock.patch.object(pg, "_stop", side_effect=RuntimeError("selected upgrade")):
+                    with self.assertRaisesRegex(RuntimeError, "selected upgrade"):
+                        pg.ensure(self.dir, self.port, self.log, root)
+
+    def test_plugin_marker_selects_same_version_release_for_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            release = Path(tmp) / "plugins/cache/market/chief/1.2.3"
+            (release / "scripts").mkdir(parents=True)
+            (release / "scripts/engine.py").touch()
+            (release / "requirements.txt").touch()
+            (release / ".claude-plugin").mkdir()
+            (release / ".claude-plugin/plugin.json").write_text('{"version":"1.2.3"}')
+            marker = pg.supervisor.state_dir(root) / "engine-plugin-release"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(release))
+            with mock.patch.object(pg.supervisor, "RELEASE", release), \
+                 mock.patch.object(pg.supervisor, "current_release", return_value=release), \
+                 mock.patch.object(pg, "VERSION", "1.2.3"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.2.3"), \
+                 mock.patch.object(pg, "_stop", side_effect=RuntimeError("marker selected")):
+                with self.assertRaisesRegex(RuntimeError, "marker selected"):
+                    pg.ensure(self.dir, self.port, self.log, root)
+
     def test_authoritative_installed_rollback_replaces_newer_server(self):
         root = self.dir.parent / "workspace"
         with tempfile.TemporaryDirectory() as tmp:
@@ -569,12 +616,13 @@ class EnsureTest(unittest.TestCase):
                     self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
                     stopped.assert_not_called()
 
-    def test_versions_compare_numerically_and_equal_versions_can_change_release(self):
+    def test_versions_compare_numerically_and_unordered_versions_are_preserved(self):
         with mock.patch.object(pg, "VERSION", "1.9.0"):
-            self.assertTrue(pg._newer_server(f"{pg.SERVER}/1.10.0"))
-            self.assertFalse(pg._newer_server(f"{pg.SERVER}/1.9"))
-            self.assertFalse(pg._newer_server(f"{pg.SERVER}/1.9.0.0"))
-            self.assertFalse(pg._newer_server(f"{pg.SERVER}/1.10.0-rc1"))
+            self.assertTrue(pg._server_not_older(f"{pg.SERVER}/1.10.0"))
+            self.assertTrue(pg._server_not_older(f"{pg.SERVER}/1.9"))
+            self.assertTrue(pg._server_not_older(f"{pg.SERVER}/1.9.0.0"))
+            self.assertTrue(pg._server_not_older(f"{pg.SERVER}/1.10.0-rc1"))
+            self.assertFalse(pg._server_not_older(f"{pg.SERVER}/1.8.0"))
 
     def test_an_older_server_is_restarted(self):
         # A server started before `--root` existed never renders; `--ensure` replaces it, by its pid file.
@@ -582,7 +630,8 @@ class EnsureTest(unittest.TestCase):
         old = start_old_server(self.dir, self.port)
         self.addCleanup(old.kill)
         (self.dir / ".pid").write_text(str(old.pid))
-        self.assertEqual(pg.ensure(self.dir, self.port, self.log), "pages: restarted")
+        with mock.patch.object(pg, "_selected_for_rollback", return_value=True):
+            self.assertEqual(pg.ensure(self.dir, self.port, self.log), "pages: restarted")
         self.assertIsNotNone(old.wait(timeout=5))
         self.assertIn(f"{pg.SERVER}/{pg.VERSION}", pg._who(self.port))
 
@@ -592,8 +641,9 @@ class EnsureTest(unittest.TestCase):
         other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         self.addCleanup(other.kill)
         (self.dir / ".pid").write_text(str(other.pid))
-        with self.assertRaisesRegex(pg.PagesError, "not it"):
-            pg.ensure(self.dir, self.port, self.log)
+        with mock.patch.object(pg, "_selected_for_rollback", return_value=True):
+            with self.assertRaisesRegex(pg.PagesError, "not it"):
+                pg.ensure(self.dir, self.port, self.log)
         self.assertIsNone(other.poll())
         self.assertIsNone(old.poll())
 
@@ -1789,6 +1839,13 @@ class StandaloneBoardTest(unittest.TestCase):
                 return None
         self.assertTrue(wait_for(lambda: server_pid() is not None and pg.is_pages_serve(server_pid(), self.port)))
         first_pid = server_pid()
+        # A stale caller with no selection of its own must leave the new, same-version server running.
+        code_ensure = (f"import sys; sys.path.insert(0, {str(versions / 'old' / 'scripts')!r}); "
+                       "import pages; from pathlib import Path; "
+                       f"pages.ensure(Path({str(self.pages)!r}), {self.port}, "
+                       f"Path({str(self.root / 'pages.log')!r}), Path({str(self.root)!r}))")
+        subprocess.run([sys.executable, "-c", code_ensure], check=True, timeout=10)
+        self.assertEqual(server_pid(), first_pid)
         os.kill(first_pid, signal.SIGTERM)
         self.assertTrue(wait_for(lambda: server_pid() is not None and server_pid() != first_pid and
                                  (pg._who(self.port) or "").startswith(pg.SERVER + "/1.0.0")),
