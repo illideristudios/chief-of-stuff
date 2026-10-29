@@ -75,5 +75,6 @@
     }
   ],
   "max_turns": 14,
-  "timeout_seconds": 400
+  "timeout_seconds": 400,
+  "superseded_by": "autonomy-interactive-dispatch"
 }
