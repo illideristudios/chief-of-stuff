@@ -240,11 +240,10 @@ def _config(path: Path | str) -> Config:
 
 def is_current(path: Path | str) -> bool:
     """True when the database at `path` is already at the latest revision. Only reads, so it is safe beside a live writer."""
-    private_state.store_files(Path(path), create=False)
     if not Path(path).exists():
         return False
     head = ScriptDirectory.from_config(_config(path)).get_current_head()
-    with closing(sqlite3.connect(path, timeout=30)) as conn:
+    with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=30)) as conn:
         try:
             return conn.execute("SELECT version_num FROM alembic_version").fetchall() == [(head,)]
         except sqlite3.OperationalError:  # no alembic_version table: never migrated

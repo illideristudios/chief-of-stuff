@@ -128,6 +128,15 @@ s.engine.dispose()
             finally:
                 db.engine.dispose()
 
+    def test_revision_check_reads_a_read_only_database_without_changing_permissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'store.db'
+            store.migrate(path)
+            path.chmod(0o444)
+            with patch.object(store.private_state, 'store_files', side_effect=AssertionError('unexpected permission change')):
+                self.assertTrue(store.is_current(path))
+            self.assertEqual(mode(path), 0o444)
+
     def test_messaging_run_rejects_symlinked_mailbox_without_touching_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); run = root / 'run'; run.mkdir()
