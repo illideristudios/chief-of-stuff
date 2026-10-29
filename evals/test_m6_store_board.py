@@ -171,8 +171,9 @@ class StoreGanttAndBoardTest(unittest.TestCase):
 
     def test_board_write_renders_from_store_without_any_tracker_file(self) -> None:
         self.db.add_decision(KEY2, "design", "Keep cache warmup pool?")
+        (self.root / "CLAUDE.md").write_text(CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n")
         sources = replace(
-            bs.EMPTY,
+            bs.EMPTY, home=bs.backlog.GitHubBacklog("example/repo"),
             changes={
                 "!21": bs.Change("!21", "https://github.com/example/repo/pull/21", "Upload size limit", "open",
                                  False, "passed", True, 1, None, "main", ("src/upload.py",), (KEY, "#12")),
@@ -690,8 +691,9 @@ class StorePagesAndRoutesTest(unittest.TestCase):
         self.db.engine.dispose()
         self.db = store.Store(self.root / "store.db")
         self.addCleanup(self.db.engine.dispose)
+        (self.root / "CLAUDE.md").write_text(CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n")
         sources = replace(
-            bs.EMPTY,
+            bs.EMPTY, home=bs.backlog.GitHubBacklog("example/repo"),
             issues={
                 KEY: bs.Issue("#12", "https://github.com/example/repo/issues/12", "Upload size limit", "open",
                               ("In progress",), body="Limit uploads to 10MB."),

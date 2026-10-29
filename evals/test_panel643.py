@@ -193,6 +193,7 @@ class PanelTest(unittest.TestCase):
         self.db.upsert_item(OTHER, title="Other repository", stage="implement")
         from dataclasses import replace
         from backlog_ref import GitHubBacklog
+        (self.root / "CLAUDE.md").write_text(fixtures.CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n")
         fixtures.bs._write(self.root / "pages" / fixtures.bs.CACHE, replace(
             fixtures.bs.EMPTY, home=GitHubBacklog("example/repo"), issues={
                 "#12": fixtures.bs.Issue("#12", "https://github.com/example/repo/issues/12", "First repository", "open", (), body="First source proof"),
