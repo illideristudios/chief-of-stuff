@@ -41,6 +41,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -705,15 +706,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _open_static(self, path):
         """Open a resolved in-tree file without following a changed symlink during traversal."""
-        base = Path(self.directory).resolve()
-        resolved = inside(base, os.path.relpath(path, base))
+        base = self.server.static_root
+        resolved = inside(base, os.path.relpath(path, self.directory))
         if resolved is None:
             raise OSError("outside pages directory")
-        parts = resolved.relative_to(base).parts
+        try:
+            parts = resolved.relative_to(base).parts
+        except ValueError:
+            raise OSError("pages directory changed") from None
         if not parts or any(part.startswith(".") for part in parts):
             raise OSError("hidden path")
-        directory = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+        directory = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
+            stat = os.fstat(directory)
+            if (stat.st_dev, stat.st_ino) != self.server.static_root_identity:
+                raise OSError("pages directory changed")
             for part in parts[:-1]:
                 child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
                 os.close(directory)
@@ -726,6 +733,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _send_static(self, body):
         path = self.translate_path(self.path)
         file = None
+        snapshot = None
         try:
             file = self._open_static(path)
             stat = os.fstat(file.fileno())
@@ -750,17 +758,40 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         return None
                 except (TypeError, IndexError, OverflowError, ValueError):
                     pass
+            # An open descriptor survives rename, but not an in-place rewrite. Copy to an
+            # anonymous disk file before publishing headers, and reject changes during the copy.
+            snapshot = tempfile.TemporaryFile()
+            remaining = stat.st_size
+            while remaining:
+                chunk = file.read(min(64 * 1024, remaining))
+                if not chunk:
+                    raise OSError("file changed during snapshot")
+                snapshot.write(chunk)
+                remaining -= len(chunk)
+            after = os.fstat(file.fileno())
+            if (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise OSError("file changed during snapshot")
+            snapshot.seek(0)
+            file.close()
             self.send_response(200)
             self.send_header("Content-Type", self.guess_type(path))
             self.send_header("Content-Length", str(stat.st_size))
             self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
             self.end_headers()
             if body:
-                return file, stat.st_size
+                return snapshot, stat.st_size
+            snapshot.close()
+            return None
+        except OSError:
             file.close()
+            if snapshot is not None:
+                snapshot.close()
+            self.send_error(404, "File not found")
             return None
         except BaseException:
             file.close()
+            if snapshot is not None:
+                snapshot.close()
             raise
 
     def do_GET(self):
@@ -1022,6 +1053,16 @@ def make_server(pages_dir: Path, port: int, root: Path | None = None, refresh=No
     """With `root`, pages render on request and a Refresher keeps `.sources.json` current."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port),
                                              functools.partial(Handler, directory=str(pages_dir)))
+    server.static_root = pages_dir.resolve()
+    try:
+        directory = os.open(server.static_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            stat = os.fstat(directory)
+            server.static_root_identity = (stat.st_dev, stat.st_ino)
+        finally:
+            os.close(directory)
+    except OSError:
+        server.static_root_identity = None
     server.root, server.refresher, server.slots = root, None, threading.BoundedSemaphore(_workers(root))
     if root is not None:
         if refresh is None:

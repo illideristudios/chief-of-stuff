@@ -1985,6 +1985,98 @@ server.serve_forever()
         self.assertEqual(response.status, 404)
         self.assertNotIn(b"secret", response.body)
 
+    def test_static_root_swap_cannot_redirect_open(self):
+        (self.pages / "asset.bin").write_bytes(b"safe")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "asset.bin").write_bytes(b"secret")
+        moved = self.root / "moved-pages"
+        real_open = os.open
+        swapped = threading.Event()
+        def swap_before_open(path, flags, *args, **kwargs):
+            if os.fspath(path) == str(self.pages.resolve()) and not swapped.is_set():
+                self.pages.rename(moved)
+                self.pages.symlink_to(outside, target_is_directory=True)
+                swapped.set()
+            return real_open(path, flags, *args, **kwargs)
+        try:
+            with mock.patch.object(pg.os, "open", side_effect=swap_before_open):
+                response = get(self.port, "/asset.bin")
+            self.assertTrue(swapped.is_set())
+            self.assertEqual(response.status, 404)
+            self.assertNotIn(b"secret", response.body)
+        finally:
+            if swapped.is_set():
+                self.pages.unlink()
+                moved.rename(self.pages)
+
+    def test_replaced_static_root_is_refused_for_get_and_head(self):
+        (self.pages / "asset.bin").write_bytes(b"safe")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "asset.bin").write_bytes(b"secret")
+        moved = self.root / "moved-pages"
+        self.pages.rename(moved)
+        self.pages.symlink_to(outside, target_is_directory=True)
+        try:
+            for method in ("GET", "HEAD"):
+                response = get(self.port, "/asset.bin", method=method)
+                self.assertEqual(response.status, 404)
+                self.assertNotIn(b"secret", response.body)
+        finally:
+            self.pages.unlink()
+            moved.rename(self.pages)
+
+    def test_static_in_place_truncate_while_transmitting_keeps_body_and_metadata(self):
+        path = self.pages / "asset.bin"
+        original = b"original data" * 100_000
+        path.write_bytes(original)
+        head = get(self.port, "/asset.bin", method="HEAD")
+        real_send = pg.Handler._send_static
+        class TruncateDuringTransmission:
+            def __init__(self, stream):
+                self.stream = stream
+                self.reads = 0
+            def read(self, size):
+                self.reads += 1
+                if self.reads == 2:
+                    path.write_bytes(b"changed")
+                return self.stream.read(size)
+            def close(self):
+                self.stream.close()
+        def wrap_stream(handler, body):
+            result = real_send(handler, body)
+            return (TruncateDuringTransmission(result[0]), result[1])
+        with mock.patch.object(pg.Handler, "_send_static", wrap_stream):
+            response = get(self.port, "/asset.bin")
+        self.assertEqual(path.read_bytes(), b"changed")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, original)
+        self.assertEqual(head.body, b"")
+        for header in ("Content-Length", "Last-Modified", "Content-Type"):
+            self.assertEqual(head.getheader(header), response.getheader(header))
+        self.assertEqual(response.getheader("Content-Length"), str(len(original)))
+
+    def test_static_change_during_snapshot_is_refused(self):
+        path = self.pages / "asset.bin"
+        path.write_bytes(b"original" * 100_000)
+        real_open = pg.Handler._open_static
+        class ChangingFile:
+            def __init__(self, stream):
+                self.stream = stream
+            def fileno(self):
+                return self.stream.fileno()
+            def read(self, size):
+                data = self.stream.read(size)
+                path.write_bytes(b"changed")
+                return data
+            def close(self):
+                self.stream.close()
+        with mock.patch.object(pg.Handler, "_open_static", lambda handler, name: ChangingFile(real_open(handler, name))):
+            response = get(self.port, "/asset.bin")
+        self.assertEqual(response.status, 404)
+        self.assertNotIn(b"original", response.body)
+
     def test_static_conditional_request_uses_open_file_timestamp(self):
         (self.pages / "asset.bin").write_bytes(b"asset")
         response = get(self.port, "/asset.bin")
