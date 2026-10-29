@@ -46,6 +46,11 @@ class GapRowsTest(unittest.TestCase):
         import architect_signals as sig
         self.assertEqual([r.id for r in sig.unassigned_gaps(COMPLIANCE) if r.id == "C10"], [])
 
+    def test_markdown_pipes_in_gap_prose_do_not_drop_the_signal(self):
+        import architect_signals as sig
+        text = r"| C4 | 3 | P2 | `b.py:2` | support a \| b and `x|y` | unassigned | open |"
+        self.assertEqual([r.id for r in sig.unassigned_gaps(text)], ["C4"])
+
 
 class LedgerTest(unittest.TestCase):
     def setUp(self):

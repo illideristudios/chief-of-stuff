@@ -10,12 +10,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any, Collection, Mapping, Sequence
+from md import split_row
 
 KEY_PREFIX = "architect-signal:"
-ROW = re.compile(
-    r"^\|\s*(?P<id>C\d+)\s*\|\s*(?P<section>[^|]+)\|\s*(?P<severity>[^|]+)\|\s*"
-    r"(?P<file>[^|]+)\|\s*(?P<gap>[^|]+)\|\s*(?P<owner>[^|]+)\|\s*(?P<status>[^|]+)\|?\s*$"
-)
 
 
 @dataclass(frozen=True)
@@ -33,19 +30,19 @@ def unassigned_gaps(text: str) -> list[GapRow]:
     """Open compliance rows whose owner is still `unassigned` — the coordinator's intake."""
     out: list[GapRow] = []
     for line in text.splitlines():
-        m = ROW.match(line.strip())
-        if not m:
+        cells = [cell.strip() for cell in split_row(line)]
+        if not line.strip().startswith("|") or len(cells) != 7 or not re.fullmatch(r"C\d+", cells[0]):
             continue
-        owner = m.group("owner").strip()
-        status = m.group("status").strip().lower()
+        gap_id, section, severity, file_line, gap, owner, status = cells
+        status = status.lower()
         if owner.lower() != "unassigned" or status != "open":
             continue
         out.append(GapRow(
-            id=m.group("id").strip(),
-            section=m.group("section").strip(),
-            severity=m.group("severity").strip(),
-            file_and_line=m.group("file").strip(),
-            gap=m.group("gap").strip(),
+            id=gap_id,
+            section=section,
+            severity=severity,
+            file_and_line=file_line,
+            gap=gap,
             owner=owner,
             status=status,
         ))
