@@ -966,6 +966,21 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
         self.assertNotIn("re-dispatch", workers)  # no inert or unverified retry action
         self.assertIn("/issues/", workers)
 
+    def test_closing_an_exhausted_issue_clears_current_needs_input(self) -> None:
+        _seed_exhausted(self.db, KEY_A, title="Closed after exhaustion", failure="dispatch failed")
+        self.db.upsert_item(KEY_A, forge_state="closed")
+        data = task_forge.page_data(self.db)
+        self.assertIsNone(data.exhaustion(KEY_A))
+        _, _, need, _ = workers_page._store_rows(data, set(), NOW, self.root / "trees", "")
+        self.assertEqual(need, 0)
+        body = issue_page.render(KEY_A, [], bs.EMPTY, NOW, root=self.root, db=data)
+        self.assertNotIn('class="chip retries-exhausted"', body)
+        self.assertIn("Nothing happens next: the issue is closed", body)
+
+    def test_exhaustion_guidance_does_not_claim_resetting_the_worktree_retries(self) -> None:
+        self.assertNotIn("Reset the worktree", task_forge.EXHAUSTED_UNBLOCK)
+        self.assertIn("retry limit", task_forge.EXHAUSTED_UNBLOCK)
+
     def test_a_recovered_issue_is_not_labelled_from_stale_exhausted_log_lines(self) -> None:
         _seed_exhausted(self.db, KEY_C, title="Recovered after raise",
                         failure="dispatch failed: worktree missing", clear_interrupt=True)
