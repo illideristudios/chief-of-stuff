@@ -15,6 +15,7 @@ import board_sources
 import decision_actions
 from estimate import estimates, history, task_end
 import kanban as kanban_tool
+from readiness import EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, RetryExhaustion, retry_exhaustion
 from md import section
 from settings import Kanban
 import tracker
@@ -349,6 +350,11 @@ class PageData:
 
     def resume(self, key):
         return self.resumes.get(key)
+
+    def exhaustion(self, key) -> RetryExhaustion | None:
+        """Current retry exhaustion for `key`, or None when a live run or recovery supersedes it."""
+        segs = [s for s in self.stage_segments if s.issue_key == key]
+        return retry_exhaustion(self.resumes.get(key), segs, [e for e in self.issue_logs if e.issue_key == key])
 
 
 def page_data(store) -> PageData:

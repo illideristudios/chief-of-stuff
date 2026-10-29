@@ -869,6 +869,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     raise
                 _clear_waived_gates(store, key)
                 _clear_interrupt(store, key, "limit", scope={"stage": stage})
+                # A successful relaunch after a raised limit must not keep the exhausted interrupt (#963).
+                _clear_interrupt(store, key, "exhausted", scope={})
                 if planned is not None:
                     # The intent's worker launched: a re-route is done, and a reversal's done phase is its restart.
                     _settle(store, key, decision_actions.advance, planned.intent_id, stage, action.attempt)

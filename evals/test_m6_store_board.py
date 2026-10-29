@@ -875,5 +875,118 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         self.assertNotIn("<form", done)
 
 
+def _seed_exhausted(db: store.Store, key: str, *, title: str, failure: str,
+                    live: bool = False, clear_interrupt: bool = False) -> None:
+    """An issue whose retries burned out: failed segments, exhausted interrupt, optional live recovery."""
+    fail_at = NOW - timedelta(minutes=10)
+    db.upsert_item(key, workflow="build", stage="plan", forge_state="open", title=title)
+    db.record_segment(key, "plan", 1, fail_at.isoformat(), fail_at.isoformat(), "failed",
+                      runtime="claude", model="opus", agent_type="plan", runner="plan-1")
+    db.record_segment(key, "plan", 2, (fail_at + timedelta(minutes=1)).isoformat(),
+                      (fail_at + timedelta(minutes=1)).isoformat(), "failed",
+                      runtime="claude", model="opus", agent_type="plan", runner="plan-2")
+    db.add_log(key, failure, (fail_at + timedelta(minutes=1)).isoformat())
+    db.add_log(key, "exhausted: retry limit reached for plan",
+               (fail_at + timedelta(minutes=2)).isoformat())
+    resume = {"interrupt": {"kind": "exhausted", "reason": "retry limit reached for plan", "stage": "plan"}}
+    if clear_interrupt:
+        resume = {}
+    if live:
+        db.record_segment(key, "plan", 3, (NOW - timedelta(minutes=2)).isoformat(), None, None,
+                          runtime="claude", model="opus", agent_type="plan", runner="plan-3")
+        if clear_interrupt:
+            resume = {}
+    db.set_resume(key, resume)
+
+
+class RetryExhaustionDisplayTest(unittest.TestCase):
+    """#963: exhausted retries read as needs-input with evidence; live or recovered runs are not mislabelled."""
+
+    def test_latest_exhaustion_uses_the_latest_failure(self):
+        import readiness
+        evidence = readiness.retry_exhaustion(
+            {"interrupt": {"kind": "exhausted", "reason": "retry limit reached"}}, (),
+            ["dispatch failed: first", "exhausted: retry limit reached",
+             "dispatch failed: second", "exhausted: retry limit reached"])
+        self.assertEqual(evidence.failure, "dispatch failed: second")
+
+    def setUp(self) -> None:
+        self.root, self.db = make_store_workspace()
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW.astimezone(tz)
+        frozen = mock.patch.object(workers_page, "datetime", FrozenDatetime)
+        frozen.start()
+        self.addCleanup(frozen.stop)
+        self.addCleanup(self.db.engine.dispose)
+
+    def test_exhausted_issue_flags_board_flow_task_and_workers(self) -> None:
+        failure = "dispatch failed: existing worktree is missing or no longer on the work branch"
+        _seed_exhausted(self.db, KEY_A, title="Classification metrics", failure=failure)
+        data = task_forge.page_data(self.db)
+        evidence = data.exhaustion(KEY_A)
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence.failure, failure)
+        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+                           if r.href.endswith(urllib.parse.quote(KEY_A, safe="")))
+        self.assertEqual(status, "needs input")
+        self.assertIn(task_forge.EXHAUSTED_CHIP, row.note)
+        self.assertIn("hold", [g.kind for g in row.segments])
+        counts = decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+        self.assertEqual(counts["dispatch"], 0)
+        self.assertGreaterEqual(counts["workers"], 1)
+        board = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
+        self.assertIn(task_forge.EXHAUSTED_CHIP, board)
+        self.assertIn("NEEDS INPUT", board)
+        self.assertRegex(board, r'data-cat="hold"[^>]*>NEEDS INPUT')
+        body = issue_page.render(KEY_A, [], bs.EMPTY, NOW, root=self.root, db=data)
+        self.assertIn(f'class="chip retries-exhausted">{task_forge.EXHAUSTED_CHIP.upper()}', body)
+        self.assertIn(failure, body)
+        self.assertIn(task_forge.EXHAUSTED_UNBLOCK, body)
+        self.assertNotIn('class="chip running"', body)
+        workers = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data)
+        self.assertIn(task_forge.EXHAUSTED_CHIP, workers)
+        self.assertNotIn("re-dispatch", workers)
+        self.assertIn(failure, workers)
+
+    def test_a_live_segment_wins_over_a_stale_exhausted_interrupt(self) -> None:
+        _seed_exhausted(self.db, KEY_B, title="Live after exhaustion",
+                        failure="dispatch failed: worktree missing", live=True)
+        data = task_forge.page_data(self.db)
+        self.assertIsNone(data.exhaustion(KEY_B))
+        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+                           if r.href.endswith(urllib.parse.quote(KEY_B, safe="")))
+        self.assertEqual(status, "running")
+        self.assertNotIn(task_forge.EXHAUSTED_CHIP, row.note)
+        body = issue_page.render(KEY_B, [], bs.EMPTY, NOW, root=self.root, db=data)
+        self.assertNotIn(task_forge.EXHAUSTED_CHIP, body)
+        workers = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data)
+        self.assertIn("plan-3", workers)
+        self.assertNotIn("re-dispatch", workers)  # no inert or unverified retry action
+        self.assertIn("/issues/", workers)
+
+    def test_a_recovered_issue_is_not_labelled_from_stale_exhausted_log_lines(self) -> None:
+        _seed_exhausted(self.db, KEY_C, title="Recovered after raise",
+                        failure="dispatch failed: worktree missing", clear_interrupt=True)
+        # A fresh attempt after the interrupt was cleared: queued/open, not exhausted.
+        self.db.record_segment(KEY_C, "plan", 3, (NOW - timedelta(minutes=3)).isoformat(),
+                               (NOW - timedelta(minutes=1)).isoformat(), "done",
+                               runtime="claude", model="opus", runner="plan-3")
+        data = task_forge.page_data(self.db)
+        self.assertIsNone(data.exhaustion(KEY_C))
+        self.assertTrue(any(e.message.startswith("exhausted:") for e in data.log(KEY_C)))
+        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+                           if r.href.endswith(urllib.parse.quote(KEY_C, safe="")))
+        self.assertEqual(status, "open")
+        self.assertNotIn(task_forge.EXHAUSTED_CHIP, row.note)
+        body = issue_page.render(KEY_C, [], bs.EMPTY, NOW, root=self.root, db=data)
+        self.assertNotIn('class="chip retries-exhausted"', body)
+        self.assertNotIn(task_forge.EXHAUSTED_UNBLOCK, body)
+        workers = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data)
+        # The previous exhaustion no longer applies, and ended rows offer task links.
+        self.assertNotIn(task_forge.EXHAUSTED_CHIP, workers)
+
+
 if __name__ == "__main__":
     unittest.main()

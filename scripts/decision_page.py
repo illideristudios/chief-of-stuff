@@ -945,7 +945,8 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
             f'  <section>\n    <h2>COMPLETED · {len(done)}</h2>\n    <div class="list fin">\n'
             f'      <div class="row done head cap"><span>answered</span><span>decision</span><span>answer</span><span>{words}</span><span>since</span></div>\n'
             + ("\n".join(done) or none) + "\n    </div>\n  </section>\n")
-    nav = navigation if navigation is not None else (store_tab_counts(db.items(), db.decisions(), db.segments()) if db is not None else {})
+    nav = navigation if navigation is not None else (
+        store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes) if db is not None else {})
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             f"<title>Decisions · {escape(_day(day))}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decisions\">\n{tab_bar('Decisions', total_pending, **nav)}"

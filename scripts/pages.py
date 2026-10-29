@@ -172,7 +172,7 @@ def _navigation(root: Path, pages_dir: Path, data):
     import decision_actions
     if data is None:
         return {}
-    return decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+    return decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
 
 
 def _issue_identity(name: str, source: bool = False):

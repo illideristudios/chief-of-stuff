@@ -20,7 +20,7 @@ import board_sources
 import panels
 import session_logs
 from clock import parse_stamp
-from task_forge import PageData, segment_worker_key, source_workers
+from task_forge import EXHAUSTED_CHIP, PageData, retry_exhaustion, segment_worker_key, source_workers
 from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar, issue_href
 from md import section as _section
@@ -42,7 +42,7 @@ td{padding:6px 8px;border-top:1px dotted var(--line);vertical-align:baseline}
 .meta{color:var(--muted);font-size:12px}
 .chip{border:1px solid var(--line);color:var(--fg)}
 .chip.running{color:var(--surface);background:var(--stage-implement);border-color:var(--stage-implement)}
-.chip.looping,.chip.crashed{color:var(--dl);border-color:var(--dl)}
+.chip.looping,.chip.crashed,.chip.exhausted{color:var(--dl);border-color:var(--dl)}
 .chip.done{color:var(--surface);background:var(--stage-review);border-color:var(--stage-review)}
 .chip.stage{font-weight:500;color:var(--muted)}
 </style>
@@ -173,6 +173,12 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
     for s in all_segs:
         if s.stage.strip().casefold() == "fix":
             fix_by_issue[s.issue_key] = fix_by_issue.get(s.issue_key, 0) + 1
+    segs_by_key: dict[str, list] = {}
+    for s in all_segs:
+        segs_by_key.setdefault(s.issue_key, []).append(s)
+    exhausted_keys = {key for key, segs in segs_by_key.items()
+                      if retry_exhaustion(db.resume(key), segs, db.log(key))}
+    need += len(exhausted_keys)
     for seg in all_segs:
         item = db.item(seg.issue_key)
         runner = getattr(seg, "runner", "") or f"{seg.stage}-{seg.attempt}"
@@ -201,6 +207,16 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
             if seg.outcome == "human_review":
                 need += 1
             action = f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a>'
+            exhausted = seg.issue_key in exhausted_keys
+            if exhausted:
+                # #963: the engine has given up; never promise a re-dispatch.
+                evidence = retry_exhaustion(db.resume(seg.issue_key), segs_by_key.get(seg.issue_key, ()),
+                                            db.log(seg.issue_key))
+                action = f'<span class="chip exhausted">{escape(EXHAUSTED_CHIP)}</span> {action}'
+                if summary in ("", "failed") and evidence and evidence.failure:
+                    summary = evidence.failure
+                elif not summary:
+                    summary = evidence.summary if evidence else EXHAUSTED_CHIP
             worker_name = escape(runner)
             if type(getattr(seg, "id", None)) is int and seg.id > 0:
                 worker_name = f'<a href="/workers/sessions/{seg.id}">{worker_name}</a>'

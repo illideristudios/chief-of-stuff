@@ -2186,6 +2186,14 @@ class EngineTest(unittest.TestCase):
         self.assertIsInstance(self.run_pass()[0], reconcile.Escalate)
         self.assertEqual(self.db.resume(KEY)["interrupt"]["stage"], "implement")
 
+    def test_a_successful_launch_clears_an_exhausted_interrupt(self):
+        """#963: after a person raises the limit, the next launch must not keep the exhausted interrupt."""
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.set_resume(KEY, {"interrupt": {"kind": "exhausted",
+                                              "reason": "retry limit reached for plan", "stage": "plan"}})
+        self.assertIsInstance(self.run_pass()[0], reconcile.Dispatch)
+        self.assertNotIn("interrupt", self.db.resume(KEY) or {})
+
     def test_slow_consultations_start_backoff_when_the_failure_is_recorded(self):
         self._trio()
         self.db.upsert_item(KEY, stage="implement")

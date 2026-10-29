@@ -8,7 +8,7 @@ merge conflicts at review.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 
 @dataclass(frozen=True)
@@ -43,3 +43,56 @@ def why_not(issue_key: str, *, blockers: tuple[str, ...] | None, asks: Sequence[
     if blockers:
         return "blocked by " + ", ".join(blockers)
     return None
+
+
+EXHAUSTED_CHIP = "retries exhausted"
+EXHAUSTED_UNBLOCK = "Reset the worktree, raise the retry limit, or close the issue."
+
+
+@dataclass(frozen=True)
+class RetryExhaustion:
+    """Evidence that the engine has stopped dispatching this issue (#963)."""
+    reason: str
+    failure: str = ""
+    stage: str = ""
+    unblock: str = EXHAUSTED_UNBLOCK
+
+    @property
+    def summary(self) -> str:
+        """One line for a card mark or Workers action: failure when known, else the interrupt reason."""
+        return self.failure or self.reason
+
+
+def _failure_before_exhausted(messages: list[str]) -> str:
+    """The last concrete failure logged before the engine's exhausted line, else ""."""
+    for i in range(len(messages) - 1, -1, -1):
+        message = messages[i]
+        if not str(message).startswith("exhausted:"):
+            continue
+        for prior in reversed(messages[:i]):
+            text = str(prior)
+            low = text.casefold()
+            if text.startswith(("dispatch failed:", "failed:", "hold release failed:", "launch failed:")):
+                return text
+            if "failed" in low and not text.startswith(("wait:", "exhausted:", "ambiguity:", "limit:")):
+                return text
+        return ""
+    return ""
+
+
+def retry_exhaustion(resume: Any, segments, log_entries=()) -> RetryExhaustion | None:
+    """The issue's current exhausted interrupt when no live segment runs, else None.
+
+    The resume interrupt is the live signal: a historical `exhausted:` log line alone must not
+    mislabel a recovered or re-dispatched issue (#963). A live segment wins over a stale interrupt.
+    """
+    data = resume if isinstance(resume, dict) else {}
+    interrupt = data.get("interrupt") if isinstance(data.get("interrupt"), dict) else {}
+    if interrupt.get("kind") != "exhausted":
+        return None
+    if any(getattr(s, "ended_at", None) is None for s in segments):
+        return None
+    reason = str(interrupt.get("reason") or "retry limit reached").strip() or "retry limit reached"
+    messages = [getattr(entry, "message", entry) for entry in log_entries]
+    failure = _failure_before_exhausted([str(m) for m in messages if m])
+    return RetryExhaustion(reason=reason, failure=failure, stage=str(interrupt.get("stage") or ""))
