@@ -600,6 +600,25 @@ Hit := a rejected alternative matches a      Sl := the tool returns that alterna
 ∴   history reaches a worker only on a justified, approved and logged request, and a rejected approach reaches it without the history around it
 ```
 
+As built (#1181), the rules above hold this way:
+- **The tool.** A worker reaches the graph only through the engine MCP server's `decisions` tool: the current leaves, or a request for ancestors or for whether an approach was rejected. The coordinator, the architect and the owner use the `decisions` command line (`decisions_cli.py`), which refuses to run under a worker's binding.
+- **A grant is capped to the depth the justification names.** The coordinator's judgement (`decision_history.judge_justification`) grants one level unless the justification itself names more (a number of levels, "grandparent", "two hops"), and never more than the worker asked for. Every grant is a row in the store's grant log. Where the coordinator records a verdict by hand (`decisions decide`), the depth is not yet capped (`compliance.md` row C41).
+- **No direct read.** The worker guard denies a worker's `sqlite3` (or `sqlite`), any run of `decisions_cli.py`, and `chief-of-stuff decisions`, with the reason that history is reached only through the tool. The guard is a Claude Code hook, so a worker on a host without that Bash guard can still open the store directly (`compliance.md` row C42).
+- **The worker waits without polling a model.** The tool records the request, opens a named pipe for its verdict, and only then posts the request to the coordinator. Each wait cycle checks the store first and returns at once when a verdict is already there; otherwise it waits on the pipe, registered as a reader on the server's event loop, which the coordinator's verdict writes to. A one-second recheck of the store covers a pipe that could not be opened or a missed wake.
+- **The graph's storage is reversible.** Migration `0012_decision_graph` keeps the graph in the store and has a downgrade, as does `0011_rotation_records` (#1187). Migrations `0001` to `0010` have none, so the store steps back no further than `0010`.
+
+```
+Rq := a worker requests history      Tl := the request goes through the decisions MCP tool      Gd := the guard denies the command
+Dr := the command reads the store or the decisions CLI directly      Cg := the worker's host runs the Claude Code Bash guard
+Dj := the depth the justification names      Rd := the depth the worker asked for      Ad := the approved depth
+Vr := a verdict is recorded      Pw := the worker's tool is waiting on the pipe      Wk := the worker's tool returns
+1.  Dr ∧ Cg → Gd                         [scripts/guard_commands.py:72, :428; guard/hooks/hooks.json:4]
+2.  Dr ∧ ¬Cg → ¬Gd                       [guard/hooks/hooks.json:4: the guard is a Claude Code hook; C42]
+3.  Ad = min(Rd, Dj), Dj = 1 when the text names no depth      [scripts/decision_history.py:180; owner, 2026-10-29: "as far up as the justification requires"]
+4.  Vr → Wk                              [scripts/engine_mcp.py:132: the store is checked first; :149: the pipe wakes the loop]
+∴   on a Claude host every worker read of history goes through the tool (1), the depth granted never exceeds what the justification names (3), and a verdict reaches the waiting worker without a model loop (4); on other hosts, 2 is the open gap
+```
+
 ## 18. Observability, heartbeat and stalls
 
 The coordinator's dashboards are shown in T3 (owner, 2026-10-29, T3 design §10). The board, the decisions, the per-issue pages and the flow and Gantt charts are still rendered by the page server from the tracker and the store, and T3 shows them. Each task links to its worker's thread. The page server still records and never acts (section 6).
