@@ -24,6 +24,22 @@ class IdentityTest(unittest.TestCase):
     def setUp(self):
         self.home = bs.backlog.Backlog("https://labs.example.test", "team/app")
 
+    def test_malformed_qualified_references_never_select_home_forge_facts(self):
+        home = bs.backlog.GitHubBacklog("example/repo")
+        merged = bs.Change("#12", "https://github.com/example/repo/pull/12", "home change", "merged", False,
+                           "passed", True, 1, tip.NOW, "main", (), ("#7",))
+        closed = bs.Issue("#7", "https://github.com/example/repo/issues/7", "home issue", "closed", (), closed_at=tip.NOW)
+        src = bs.Sources({}, {"#7": closed}, {merged.ref: merged}, (), {}, home=home)
+        for ref in ("github:bad#7", "https://foreign.example/unsupported/7"):
+            with self.subTest(ref=ref):
+                task = parse_tracker(tip.TODAY_START.replace("#109", ref)).tasks[0]
+                self.assertNotIn("#7", task_forge.lookup_keys((ref,), home))
+                self.assertEqual(task_forge.task_changes(task, src), ())
+                self.assertEqual(task_forge.forge_ends([task], src, tip.NOW.tzinfo), {})
+        valid = parse_tracker(tip.TODAY_START.replace("#109", "#7")).tasks[0]
+        self.assertEqual(task_forge.task_changes(valid, src), (merged,))
+        self.assertIn(valid.name, task_forge.forge_ends([valid], src, tip.NOW.tzinfo))
+
     def test_gitlab_closing_references_are_host_safe_and_shorthand_matches(self):
         description = ("Fixes #7, team/app#8, team/other#9, team/nested/other#10 and "
                        "https://foreign.example/team/app/-/issues/11")
