@@ -167,7 +167,7 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
     """RUNNING and ENDED TODAY rows from the store's segments, the human-review count and the running one-shot count."""
     running: list[list[str]] = []
     ended: list[tuple[tuple, list[str]]] = []
-    need = store_shots = 0
+    store_shots = 0
     all_segs = db.segments()
     fix_by_issue: dict[str, int] = {}
     for s in all_segs:
@@ -179,7 +179,13 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
     exhausted_keys = {key for key, segs in segs_by_key.items()
                       if (item := db.item(key)) is not None and item.forge_state != "closed"
                       and retry_exhaustion(db.resume(key), segs, db.log(key))}
-    need += len(exhausted_keys)
+    waiting_keys = set(exhausted_keys)
+    for item in db.items():
+        if item.forge_state == "closed":
+            continue
+        segs = segs_by_key.get(item.issue_key, ())
+        if getattr(item, "human_review", False) or (segs and segs[-1].outcome == "human_review"):
+            waiting_keys.add(item.issue_key)
     for seg in all_segs:
         item = db.item(seg.issue_key)
         runner = getattr(seg, "runner", "") or f"{seg.stage}-{seg.attempt}"
@@ -205,8 +211,6 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
                 continue
             reports = db.reports(seg.issue_key, stage=seg.stage, attempt=seg.attempt)
             summary = reports[-1].summary if reports else (seg.outcome or "")
-            if seg.outcome == "human_review":
-                need += 1
             action = f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a>'
             exhausted = seg.issue_key in exhausted_keys
             if exhausted:
@@ -224,7 +228,7 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
             ended.append(((ended_dt.hour * 60 + ended_dt.minute, ended_dt.second, len(ended)),
                           [f'{_end_chip(seg.outcome)} <b>{worker_name}</b>', f"{ended_dt:%H:%M}", task_link,
                            escape(summary), action]))
-    return running, ended, need, store_shots
+    return running, ended, len(waiting_keys), store_shots
 
 
 def render(tracker_text: str, sources: board_sources.Sources, now: datetime, trees: Path, cap: int | None,
@@ -242,7 +246,8 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
         store_running, store_ended, store_need, store_shots = _store_rows(db, seen_running, now, trees, claude_account)
         running += store_running
         ended += store_ended
-        need += store_need
+        # In a store-backed workspace, the store holds current status; tracker ends are historical rows.
+        need = store_need
     ended = [r for _, r in sorted(ended, key=lambda e: e[0], reverse=True)]  # by the time shown, newest first
     shots = sum(w.kind == "one-shot" for w in source_workers(sources)) + store_shots
     boxes = [("NEEDS INPUT", str(need), " hot" if need else ""), ("RUNNING", str(len(running)), "")]
