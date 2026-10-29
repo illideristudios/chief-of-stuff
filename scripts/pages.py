@@ -902,24 +902,25 @@ def _version_tuple(value: str) -> tuple[int, ...] | None:
 def _authoritative_release(root: Path | None) -> Path | None:
     """Return only an explicit selection, never the selector's fallback to this release."""
     release = supervisor.RELEASE.resolve()
-    explicit = getattr(supervisor, "_explicit_install", None)
-    if root is not None and explicit is not None:
-        pending = explicit(root)
-        if pending is not None:
-            return Path(pending["release"]).resolve()
+    if root is not None:
+        explicit = release_selection.explicit_release(root, supervisor)
+        if explicit is not None:
+            return explicit
     pointer = release.parent.parent / "current"
     try:
         if release.parent.name == "versions":
             if pointer.is_symlink():
                 selected = pointer.resolve(strict=True)
                 if (selected / "chief_of_stuff.py").is_file():
+                    if root is not None:
+                        release_selection.validate_handoff(root, selected, supervisor)
                     return selected
         if root is not None and release_selection._plugin_version(release) is not None:
             marker = supervisor.state_dir(root) / "engine-plugin-release"
             selected = Path(marker.read_text()).resolve(strict=True)
             if _selected_release(root).resolve() == selected:
                 return selected
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError, supervisor.ServiceError):
         pass
     return None
 
@@ -1089,6 +1090,9 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                         try:
                             with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
                                 acquired = True
+                                release_selection.validate_handoff(root, release, supervisor)
+                                if _selected_release(root) != release:
+                                    continue
                                 entry = release / "scripts/pages.py"
                                 if not entry.is_file():
                                     raise supervisor.ServiceError(f"missing board entry file: {entry}")
@@ -1119,6 +1123,9 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
             child = None
             try:
                 python, entry = handoff
+                release_selection.validate_handoff(root, release, supervisor)
+                if _selected_release(root) != release:
+                    continue
                 read_fd, write_fd = os.pipe()
                 try:
                     child = subprocess.Popen(

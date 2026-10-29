@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import engine_intent
+
 
 def _plugin_version(release: Path) -> tuple[int, ...] | None:
     parent = release.parent
@@ -19,20 +21,55 @@ def _plugin_version(release: Path) -> tuple[int, ...] | None:
         return None
 
 
+def validate_handoff(root: Path, release: Path, supervisor) -> None:
+    """Reject workspace code, including symlinked inputs, at each handoff boundary."""
+    engine_intent.validate_release(root, release, supervisor.ServiceError)
+    root = root.resolve()
+    for path in (release / "scripts/pages.py", release / ".claude-plugin/plugin.json",
+                 release / "chief_of_stuff.py"):
+        try:
+            target = path.resolve()
+            if target == root or root in target.parents:
+                raise supervisor.ServiceError("board release must not point into the workspace")
+        except (OSError, RuntimeError) as exc:
+            raise supervisor.ServiceError(f"invalid board release: {exc}") from exc
+
+
+def explicit_release(root: Path, supervisor) -> Path | None:
+    intent = engine_intent.read(root, supervisor.data_dir(), supervisor.ServiceError)
+    if intent is None or intent["operation"] != "install":
+        return None
+    chosen = Path(intent["release"])
+    # Completed installed releases follow the stable current pointer, as in the engine.
+    if not intent["pending"] and chosen.parent.name == "versions":
+        current = supervisor.current_release()
+        if current.parent == chosen.parent:
+            chosen = current
+    validate_handoff(root, chosen, supervisor)
+    return chosen
+
+
 def selected_release(root: Path, supervisor) -> Path:
-    """Use the supervisor's selector when available; support older cached supervisor modules too."""
-    select = getattr(supervisor, "selected_release", None)
-    if select is not None:
-        return select(root)
+    """Select from private intent or independently verified pointer and cache marker."""
+    explicit = explicit_release(root, supervisor)
+    if explicit is not None:
+        return explicit
     current = supervisor.current_release()
+    if current != supervisor.RELEASE:
+        try:
+            validate_handoff(root, current, supervisor)
+            return current
+        except supervisor.ServiceError:
+            return supervisor.RELEASE
     current_version = _plugin_version(current)
-    if current != supervisor.RELEASE or current_version is None:
+    if current_version is None:
         return current
     try:
         candidate = Path((supervisor.state_dir(root) / "engine-plugin-release").read_text()).resolve(strict=True)
+        validate_handoff(root, candidate, supervisor)
         candidate_version = _plugin_version(candidate)
         if candidate.parent == current.parent and candidate_version is not None and candidate_version > current_version:
             return candidate
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError, supervisor.ServiceError):
         pass
     return current
