@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import email.utils
+import errno
 import functools
 import hashlib
 import hmac
@@ -43,11 +45,12 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from stat import S_ISREG
 from html import escape
@@ -57,7 +60,8 @@ import forge
 import page_reload
 import supervisor
 from backlog_ref import GitHubBacklog
-from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
+from workspace import (LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, looked_before, pages_address,
+                       read_config, record_look, unrecord_look, with_workspace_decision_deadlines)
 
 SERVER = "chief-of-stuff-pages"
 PID = ".pid"
@@ -75,24 +79,105 @@ MAX_WORKER_MESSAGE = 8 * 1024
 MAX_WORKER_FORM = MAX_WORKER_MESSAGE * 3 + 1024
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
+MAX_RESPONSE = 16 * 1024 * 1024  # bound the snapshot held while preparing a response
+# Each process permits four active static snapshots, including slow downloads.
+# Reserve 256 MiB on the temporary filesystem and account for the full size of
+# every active snapshot (conservatively double-counting bytes already written).
+MAX_STATIC_SNAPSHOT_SLOTS = 4
+STATIC_FREE_RESERVE = 256 * 1024 * 1024
+STATIC_SNAPSHOT_SLOTS = 0
+STATIC_RESERVED_BYTES = 0
+STATIC_SNAPSHOT_GUARD = threading.Lock()
+
+
+def _static_free_bytes(file):
+    stats = os.fstatvfs(file.fileno())
+    return stats.f_bavail * stats.f_frsize
+
+
+class StaticSnapshot:
+    def __init__(self, size):
+        global STATIC_SNAPSHOT_SLOTS, STATIC_RESERVED_BYTES
+        self.file = None
+        self.slot = False
+        self.reserved = 0
+        with STATIC_SNAPSHOT_GUARD:
+            if STATIC_SNAPSHOT_SLOTS >= MAX_STATIC_SNAPSHOT_SLOTS:
+                raise OSError(errno.ENOSPC, "static snapshot slots exhausted")
+            STATIC_SNAPSHOT_SLOTS += 1
+            self.slot = True
+        try:
+            self.file = tempfile.TemporaryFile()
+            with STATIC_SNAPSHOT_GUARD:
+                if _static_free_bytes(self.file) < STATIC_FREE_RESERVE + STATIC_RESERVED_BYTES + size:
+                    raise OSError(errno.ENOSPC, "insufficient temporary space for static snapshot")
+                STATIC_RESERVED_BYTES += size
+                self.reserved = size
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        global STATIC_SNAPSHOT_SLOTS, STATIC_RESERVED_BYTES
+        if self.slot:
+            try:
+                if self.file is not None:
+                    self.file.close()
+            finally:
+                with STATIC_SNAPSHOT_GUARD:
+                    STATIC_RESERVED_BYTES -= self.reserved
+                    STATIC_SNAPSHOT_SLOTS -= 1
+                    self.slot = False
+                    self.reserved = 0
+
+    def read(self, size):
+        return self.file.read(size)
+
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
 # An answer saved mid-render of another page (the board) can leave that page stale until the next forge refresh.
 PAGE_LOCKS: dict[str, threading.Lock] = {}
 PAGE_LOCKS_GUARD = threading.Lock()
-# Each page's last render by this server: (when it started, ns; the file's time after it; the sha256 of the
-# sources' bytes it consumed). Apart from the file's time, which is only when its bytes last changed (the
-# Last-Modified a tab reloads on). A page with no record, or whose file changed since (an older release's, an
-# editor's), is judged by its file's time; a None file time marks it stale. The digest decides freshness where
-# the record is this server's own render of this file: this filesystem's mtime clock reads behind the wall
-# clock by more than a render takes under load, so no mtime comparison can order a source saved just after a
-# render began against that render — the bytes can.
-RENDERED_AT: dict[str, tuple[int, int | None, str]] = {}
+# A server render records its start, the output file identity, and its input digest. An external
+# atomic replacement is never assumed current, even when its timestamp is newer than every source.
+RENDERED_AT: dict[str, tuple[int, tuple[int, int, int] | None, str]] = {}
+
+
+def _file_identity(path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = path.stat()
+        return stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns
+    except OSError:
+        return None
 
 
 def page_lock(path: Path | str) -> threading.Lock:
     """The lock one page's renders and its answer saves take, so neither overlaps another of the same page."""
     with PAGE_LOCKS_GUARD:
         return PAGE_LOCKS.setdefault(str(path), threading.Lock())
+
+
+@contextlib.contextmanager
+def publication_lock(root: Path | None, path: Path | str):
+    """Serialize one page's publication and answer saves across threads and server processes."""
+    with page_lock(path):
+        if root is None:
+            yield
+        else:
+            key = hashlib.sha256(os.fsencode(Path(path).resolve())).hexdigest()
+            with supervisor.lock(root.resolve() / ".chief-of-stuff" / "page-locks" / key, wait=True):
+                yield
+
+
+class ResponseTooLarge(Exception):
+    pass
+
+
+class ResponseSnapshot(io.BytesIO):
+    """Bound the entire prepared response, including headers, before sending any bytes."""
+    def write(self, data):
+        if self.tell() + len(data) > MAX_RESPONSE:
+            raise ResponseTooLarge
+        return super().write(data)
 
 
 def _plugin_version() -> str:
@@ -142,6 +227,15 @@ def today_board(root: Path) -> str | None:
     return f"{day}-board.html" if (root / cfg.tracker_path(day)).is_file() or (root / "store.db").is_file() else None
 
 
+def board_name(root: Path, pages_dir: Path) -> str | None:
+    """The board `/` serves: today's if available, otherwise the latest rendered board."""
+    name = today_board(root)
+    if name is not None:
+        return name
+    boards = sorted(pages_dir.glob("*-board.html"))
+    return boards[-1].name if boards else None
+
+
 def workspace_label(root: Path) -> str:
     """The name a served page carries: the Backlog repository or project the workspace's config names, else the root
     folder's name marked as such (no Backlog line, or a config that does not read) so it is not taken for a project."""
@@ -175,10 +269,80 @@ def write_board(root: Path, day: str | None = None, *, now: datetime | None = No
 
 
 def _navigation(root: Path, pages_dir: Path, data):
+    """Shared tab lead counts. Store rows when present; otherwise the tracker's counts. An unavailable source
+    omits its keys (do not invent zeros); a known zero stays in the dict and draws no badge (#965)."""
     import decision_actions
-    if data is None:
+    if data is not None:
+        # Resumes keep exhausted retries in Workers, not Dispatch (#963 / #965).
+        import decision_page
+        try:
+            day = datetime.now(read_config(root).zone).date().isoformat()
+        except (ConfigError, OSError):
+            day = ""
+        ctx = decision_page.context(root, day)
+        if ctx is not None:
+            return decision_page.store_navigation(data, decision_page.entries(pages_dir, ctx))
+        counts = decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+        if any(pages_dir.glob("decision-*.json")):
+            counts.pop("decisions", None)
+        return counts
+    return _tracker_navigation(root, pages_dir)
+
+
+def _tracker_navigation(root: Path, pages_dir: Path) -> dict:
+    """Coordinator lead counts from the tracker behind the board served at `/`.
+
+    No tracker or settings: every count is unavailable.
+
+    Loads the same since/flow lookback window the board uses so Since/Epics match when the store is absent.
+    """
+    import board_sources
+    import decision_page
+    import flow_chart
+    import task_forge
+    from settings import SettingsError, load as load_settings
+    try:
+        cfg = read_config(root)
+    except (ConfigError, OSError):
         return {}
-    return decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+    now = datetime.now(cfg.zone).replace(second=0, microsecond=0)
+    trackers = daily_trackers(root, cfg)
+    name = board_name(root, pages_dir)
+    if name is not None:
+        try:
+            tracker_day = date.fromisoformat(name[:10])
+        except ValueError:
+            return {}
+        tracker = root / cfg.tracker_path(tracker_day.isoformat())
+        if not tracker.is_file():
+            return {}
+    elif trackers:
+        tracker_day, tracker = trackers[-1]
+    else:
+        return {}
+    tracker_text = tracker.read_text()
+    cfg = with_workspace_decision_deadlines(root, cfg, tracker_text, tracker_day)
+    try:
+        settings = load_settings(root, cfg.settings_path)
+    except (SettingsError, OSError):
+        return {}
+    looked = looked_before(pages_dir)
+    since_day = looked.astimezone(cfg.zone).date() if looked else now.date()
+    reach = (now - flow_chart.WINDOWS[-1][1]).date()
+    bound = min(reach, since_day)
+    earlier = []
+    for d, path in reversed(trackers):
+        if d >= tracker_day:
+            continue
+        if d < bound:
+            break
+        earlier.append((d, path.read_text()))
+    earlier.reverse()
+    ctx = decision_page.decision_context(root, tracker_day, now)
+    pending_refs = decision_page.held_refs(decision_page.entries(pages_dir, ctx), ctx)
+    return task_forge.tab_counts(
+        tracker_text, cfg, now, settings.lanes, settings.kanban, board_sources.load(pages_dir),
+        pending_refs, looked, earlier, slots=settings.workers.max_concurrency or 1, tracker_day=tracker_day)
 
 
 def _issue_identity(name: str, source: bool = False):
@@ -308,7 +472,8 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
         if name.startswith("decision-") and not store_decision:
             if not (pages_dir / f"{name[:-5]}.json").is_file():
                 return ""
-            day = today
+            days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
+            day = today if (root / "store.db").is_file() or today in days or not days else days[-1]
         elif store_decision or name.startswith("issue-") or name == "workers.html":
             day = today
         elif name == "decisions.html":
@@ -318,44 +483,47 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             day = name[:10]
             if not (root / cfg.tracker_path(day)).is_file() and not (root / "store.db").is_file():
                 return ""
-        with page_lock(key):  # checked under the lock: a request that waited finds the page already rendered
-            sources = [*_sources(root, cfg, pages_dir, day),
-                       *([pages_dir / LOOKED_BEFORE] if name.endswith("-board.html") else []), fragment.THEME_PATH]
+        with publication_lock(root, key):  # check and record the identity under the cross-process lock
+            board = board_name(root, pages_dir) if not name.endswith("-board.html") else None
+            if (name == "decisions.html" or (name.startswith("decision-") and not store_decision)) and board:
+                day = board[:10]
+            sources = [*_sources(root, cfg, pages_dir, day), pages_dir / LOOKED_BEFORE, fragment.THEME_PATH]
+            if board:
+                sources.append(pages_dir / board)
             newest = max(RENDERER_MTIME_NS, max((p.stat().st_mtime_ns for p in sources if p.is_file()), default=0))
-            mtime = target.stat().st_mtime_ns if target.is_file() else 0
+            identity = _file_identity(target)
             digest = _digest(sources)
             record = RENDERED_AT.get(key)
-            rendered = record[0] if record and record[1] in (mtime, None) else mtime
-            if rendered >= newest and name != "workers.html":
+            if record and identity is not None and record[1] == identity and record[0] >= newest and name != "workers.html":
                 # The filesystem's mtime clock reads behind the wall clock by more than a render takes under load
                 # here, so a source saved after that render began can carry an mtime from before it. Where the
                 # record is this server's render of this file, the sources' bytes settle it: fresh only if they
                 # are still exactly what that render consumed. A source touched without a change keeps the mtime
                 # path's one confirming render — it re-renders, records the same digest, and the polls after it
                 # are fresh.
-                if not (record and record[1] == mtime and record[2] != digest):
+                if record[2] == digest:
                     return ""
             started = time.time_ns()
             with slots:
+                data = _page_data(root)
                 if name.startswith("decision-") and not store_decision:
-                    decision_page.write(root, pages_dir, name[len("decision-"):-5], day)
-                else:
-                    data = _page_data(root)
-                    if name == "workers.html" or name.startswith(("issue-", "decision-")):
-                        navigation = _navigation(root, pages_dir, data)
-                        if store_decision:
-                            decision_page.write_store(root, pages_dir, int(name[len("decision-"):-5]), day,
-                                                      db=data, navigation=navigation)
-                        elif name == "workers.html":
-                            workers_page.write(root, pages_dir, db=data, navigation=navigation)
-                        elif name.endswith("-source.html"):
-                            source_page.write(root, pages_dir, _issue_identity(name, source=True),
-                                              db=data, navigation=navigation)
-                        else:
-                            issue_page.write(root, pages_dir, _issue_identity(name), db=data, navigation=navigation)
+                    decision_page.write(root, pages_dir, name[len("decision-"):-5], day,
+                                        navigation=_navigation(root, pages_dir, data))
+                elif name == "workers.html" or name.startswith(("issue-", "decision-")):
+                    navigation = _navigation(root, pages_dir, data)
+                    if store_decision:
+                        decision_page.write_store(root, pages_dir, int(name[len("decision-"):-5]), day,
+                                                  db=data, navigation=navigation)
+                    elif name == "workers.html":
+                        workers_page.write(root, pages_dir, db=data, navigation=navigation)
+                    elif name.endswith("-source.html"):
+                        source_page.write(root, pages_dir, _issue_identity(name, source=True),
+                                          db=data, navigation=navigation)
                     else:
-                        render_board.write(root, day, db=data)
-            RENDERED_AT[key] = started, target.stat().st_mtime_ns if target.is_file() else 0, digest  # only after a render that did not raise
+                        issue_page.write(root, pages_dir, _issue_identity(name), db=data, navigation=navigation)
+                else:
+                    render_board.write(root, day, db=data, target="decisions" if name == "decisions.html" else "board")
+            RENDERED_AT[key] = started, _file_identity(target), digest  # only after a render that did not raise
         return ""
     except Exception as e:  # any renderer failure: the server keeps serving the last good page
         return f"{type(e).__name__}: {e}"
@@ -453,7 +621,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             name = None
             if root is not None:
                 try:
-                    name = today_board(root)
+                    name = board_name(root, Path(self.directory))
                 except Exception:  # an unreadable CLAUDE.md: fall back to the newest board on disk
                     pass
             boards = sorted(Path(self.directory).glob("*-board.html"))
@@ -507,7 +675,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # A look is recorded before `fresh`, so the board counts from the look before, and taken back when the
             # board cannot render; one lock around it all, so two tabs loading at once cannot interleave it.
             pages = Path(self.directory)
-            with page_lock(pages / LAST_LOOKED) if look else contextlib.nullcontext():
+            with publication_lock(root, pages / LAST_LOOKED) if look else contextlib.nullcontext():
                 prior = None
                 if look:
                     with contextlib.suppress(OSError):
@@ -591,13 +759,175 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _is_html(self) -> bool:
         return bool(self.banner) or unquote(urlsplit(self.path).path).lower().endswith(".html")
 
-    def do_GET(self):
-        if self._allowed():
-            match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
-            if match:
-                self._send_worker_session(int(match[1]), True)
+    def _serve(self, body: bool):
+        # Classify before _allowed, which may render and publish dynamic pages.
+        path = unquote(urlsplit(self.path).path)
+        dynamic = (path in ("/", "/all", "/workers", "/workers/", "/decisions", "/decisions/")
+                   or path.startswith(("/workers/sessions/", "/decisions/", "/issues/"))
+                   or path.lower().endswith(".html"))
+
+        def static():
+            finish = self._send_static(body)
+            return finish() if finish is not None else None
+
+        def prepare():
+            if not dynamic:
+                if self._allowed():
+                    return static
+                return None
+            root = getattr(self.server, "root", None)
+            if root:
+                import decision_page
+                lock = decision_page.page_render_lock(root, shared=True)
             else:
-                self._send_html(True) if self._is_html() else super().do_GET()
+                lock = contextlib.nullcontext()
+            with lock:
+                if self._allowed():
+                    match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
+                    if match:
+                        self._send_worker_session(int(match[1]), body)
+                    elif self._is_html():
+                        self._send_html(body)
+                    elif self.path == "/":  # /all is the bounded directory listing
+                        if body:
+                            super(Handler, self).do_GET()
+                        else:
+                            super(Handler, self).do_HEAD()
+                    else:
+                        return static
+        self._snapshot_response(prepare)
+
+    def _snapshot_response(self, prepare):
+        """Prepare bounded bytes before writing to a potentially stalled socket."""
+        socket_output = self.wfile
+        snapshot = ResponseSnapshot()
+        self.wfile = snapshot
+        stream = None
+        try:
+            try:
+                stream = prepare()
+                if callable(stream):
+                    stream = stream()  # the publication lock has been released
+            except ResponseTooLarge:
+                snapshot = ResponseSnapshot()
+                self.wfile = snapshot
+                self._headers_buffer = []
+                self.send_error(413, f"a response is at most {MAX_RESPONSE} bytes")
+        finally:
+            self.wfile = socket_output
+        try:
+            socket_output.write(snapshot.getvalue())
+            if stream is not None:
+                file, remaining = stream
+                while remaining:
+                    chunk = file.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    socket_output.write(chunk)
+                    remaining -= len(chunk)
+        finally:
+            if stream is not None:
+                stream[0].close()
+
+    def _open_static(self, path):
+        """Open a resolved in-tree file without following a changed symlink during traversal."""
+        base = self.server.static_root
+        resolved = inside(base, os.path.relpath(path, self.directory))
+        if resolved is None:
+            raise OSError("outside pages directory")
+        try:
+            parts = resolved.relative_to(base).parts
+        except ValueError:
+            raise OSError("pages directory changed") from None
+        if not parts or any(part.startswith(".") for part in parts):
+            raise OSError("hidden path")
+        directory = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            stat = os.fstat(directory)
+            if (stat.st_dev, stat.st_ino) != self.server.static_root_identity:
+                raise OSError("pages directory changed")
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+        return os.fdopen(fd, "rb")
+
+    def _send_static(self, body):
+        # Descriptor traversal pins the checked inode even if its pathname changes.
+        # Static file I/O does not hold the dynamic-page publication lock.
+        path = self.translate_path(self.path)
+        file = None
+        try:
+            file = self._open_static(path)
+            stat = os.fstat(file.fileno())
+            if not S_ISREG(stat.st_mode):
+                raise OSError("not a regular file")
+        except OSError as error:
+            if file is not None:
+                file.close()
+            resource = error.errno in (errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.ENOSPC, errno.EIO)
+            self.send_error(503 if resource else 404, "Static file unavailable" if resource else "File not found")
+            return None
+
+        def finish():
+            snapshot = None
+            try:
+                if "If-Modified-Since" in self.headers and "If-None-Match" not in self.headers:
+                    try:
+                        modified_since = email.utils.parsedate_to_datetime(self.headers["If-Modified-Since"])
+                        if modified_since.tzinfo is None:
+                            modified_since = modified_since.replace(tzinfo=timezone.utc)
+                        last_modified = datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0)
+                        if modified_since.tzinfo is timezone.utc and last_modified <= modified_since:
+                            self.send_response(304)
+                            self.end_headers()
+                            return None
+                    except (TypeError, IndexError, OverflowError, ValueError):
+                        pass
+                if body:
+                    # Copy with a reserved temporary-space allowance.
+                    # Detect in-place edits before sending any headers or body.
+                    snapshot = StaticSnapshot(stat.st_size)
+                    remaining = stat.st_size
+                    while remaining:
+                        chunk = file.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError("file changed during snapshot")
+                        if snapshot.file.write(chunk) != len(chunk):
+                            raise OSError(errno.ENOSPC, "short snapshot write")
+                        remaining -= len(chunk)
+                    after = os.fstat(file.fileno())
+                    if (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                        raise ValueError("file changed during snapshot")
+                    snapshot.file.seek(0)
+                file.close()
+                self.send_response(200)
+                self.send_header("Content-Type", self.guess_type(path))
+                self.send_header("Content-Length", str(stat.st_size))
+                self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
+                self.end_headers()
+                if snapshot is not None:
+                    result = snapshot, stat.st_size
+                    snapshot = None  # ownership passes to _snapshot_response
+                    return result
+                return None
+            except ValueError:
+                self.send_error(503, "Static snapshot changed; retry")
+                return None
+            except OSError:
+                self.send_error(503, "Static snapshot unavailable")
+                return None
+            finally:
+                file.close()
+                if snapshot is not None:
+                    snapshot.close()
+        return finish
+
+    def do_GET(self):
+        self._serve(True)
 
     def _send_worker_session(self, segment_id: int, body: bool):
         """Render a recorded engine attempt in memory; never publish transcript HTML into the pages directory."""
@@ -822,6 +1152,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        self._snapshot_response(self._post)
+
+    def _post(self):
         """Save the user's answer beside the decision. Only this machine's own pages may post: the Host and, when a
         browser sends one, the Origin must be this server's."""
         port = self.server.server_address[1]
@@ -858,17 +1191,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if source is None or not source.is_file():
             return self._refusal(404, "No such decision. Your answer was not saved.", answer=draft, words_name="words")
         import decision_page
-        with page_lock(Path(self.directory) / f"decision-{m[1]}.html"):
+        with publication_lock(getattr(self.server, "root", None), Path(self.directory) / f"decision-{m[1]}.html"):
             try:
                 d = decision_page.parse(json.loads(source.read_text()))
             except decision_page.BAD:
                 return self._refusal(409, "The decision cannot be read. Your answer was not saved; try reloading it later.",
                                      answer=draft, words_name="words", link=f"/decisions/{m[1]}")
             if (key and key not in [o["key"] for o in d["options"]]) or not (key or words):
+                root = getattr(self.server, "root", None)
+                pages_dir = Path(self.directory)
+                try:
+                    navigation = _navigation(root, pages_dir, _page_data(root)) if root is not None else None
+                except Exception:  # Navigation is optional; a read failure must not discard the submitted draft.
+                    navigation = None
                 page = decision_page.render(d, datetime.now().astimezone().date().isoformat(), slug=m[1],
                                             refusal="Your answer was not saved. Choose one of the options or write an answer.",
                                             draft=draft, selected=key if key in [o["key"] for o in d["options"]] else "",
-                                            back="/decisions" if form.get("back") == ["/decisions"] else "")
+                                            back="/decisions" if form.get("back") == ["/decisions"] else "",
+                                            navigation=navigation)
                 return self._send_transient(400, page.encode("utf-8"))
             d["answer"] = {"key": key or None, "words": words, "at": datetime.now().astimezone().isoformat(timespec="seconds")}
             stat = source.stat()
@@ -891,12 +1231,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_HEAD(self):
-        if self._allowed():
-            match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
-            if match:
-                self._send_worker_session(int(match[1]), False)
-            else:
-                self._send_html(False) if self._is_html() else super().do_HEAD()
+        self._serve(False)
 
     def list_directory(self, path):
         # The stdlib listing, without dotfiles (the pid file is the server's) or rendered pages (routes, not files).
@@ -939,6 +1274,16 @@ def make_server(pages_dir: Path, port: int, root: Path | None = None, refresh=No
     """With `root`, pages render on request and a Refresher keeps `.sources.json` current."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port),
                                              functools.partial(Handler, directory=str(pages_dir)))
+    server.static_root = pages_dir.resolve()
+    try:
+        directory = os.open(server.static_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            stat = os.fstat(directory)
+            server.static_root_identity = (stat.st_dev, stat.st_ino)
+        finally:
+            os.close(directory)
+    except OSError:
+        server.static_root_identity = None
     server.root, server.refresher, server.slots = root, None, threading.BoundedSemaphore(_workers(root))
     server.message_secret = secrets.token_bytes(32)
     if root is not None:
