@@ -20,7 +20,8 @@ from _vendor.markdown_it import MarkdownIt
 import flow_chart
 from backlog_ref import Backlog, GitHubBacklog, home_of, issue_ref, store_label
 from clock import parse_stamp
-from task_forge import EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, PageData, lookup_keys, source_key, source_worker_tasks
+from task_forge import (EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, PageData, change_issue_keys, lookup_keys,
+                        source_key, source_worker_tasks, tracker_issue_tasks)
 import tracker_log
 from decision_actions import addresses, state_of
 from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, store_decision_badge, write_if_changed
@@ -29,7 +30,7 @@ from page_common import drop_html_comments, markdown_blocks, markdown_inline
 from module_graph import section as _graph
 from clock import dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
-from tracker import TRAILING_NUMBER, Task, issue_number, parse_tracker, resolve_due as _resolve_due
+from tracker import TRAILING_NUMBER, Task, issue_key, issue_number, parse_tracker, resolve_due as _resolve_due
 from workspace import Config, ConfigError, daily_trackers, read_config
 from settings import Graph, Kanban, SettingsError, load as load_settings
 
@@ -321,7 +322,10 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     home = sources.home if sources.home is not None else cfg.backlog
     names = lambda t: {k.strip().casefold() for k in (t.name, t.item) if k.strip()}  # noqa: E731
     known = [t for _, text in trackers for t in parse_tracker(text).tasks]
-    mine = [t for t in known if (t.issue == full_key if full_key else issue_number(t.issue) == numeric)]
+    mine = tracker_issue_tasks(trackers, numeric, home, full_key)
+    if mine is None and db is None:
+        return None
+    mine = mine or []
     store_rows = None
     item = None
     if db is not None:
@@ -377,7 +381,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     rows = store_rows if store_rows is not None else [
         (s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
                                             ended=forge_ends(known, sources, now.tzinfo))
-        if issue_number(r.ref) == numeric
+        if r.ref and any(r.ref == issue_key(t.issue) for t in mine)
     ]
     log = [m for m in log if m.name.strip().casefold() in keys]
     latest = {k: t for t in known for k in names(t)}  # later trackers win
@@ -399,7 +403,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     order = {"open": 0, "merged": 1}
     changes = sorted(
         (c for c in sources.changes.values()
-         if issue_keys & ({*c.issues} | {_canonical_key(r, home) for r in c.issues if r})),
+         if issue_keys & (change_issue_keys(c) | {_canonical_key(r, home) for r in change_issue_keys(c) if r})),
         key=lambda c: order.get(c.state, 2),
     )
     every = list(sources.changes.values())
