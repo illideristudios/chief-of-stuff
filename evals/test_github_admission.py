@@ -67,6 +67,28 @@ def cooldown_writer(root, workspace, started, release):
     ledger(root, timeout=5).request(dispatch)
 
 
+def unknown_limit_writer(root, workspace, now, result):
+    os.chdir(workspace)
+    gate = ledger(root, lambda: now)
+    try:
+        gate.request(lambda: admission.Response(
+            {'errors': [{'type': 'RATE_LIMITED'}]}, None, 200, {'Retry-After': '120'}))
+    except admission.StateError:
+        result.put('unavailable')
+
+
+def recovery_reader(root, workspace, now, result):
+    os.chdir(workspace)
+    gate = ledger(root, lambda: now)
+    try:
+        gate.request(lambda: ('ok', 1))
+        result.put(('ok', gate.status()['stale']))
+    except admission.HostQuarantined:
+        result.put(('backoff', gate.status()['stale']))
+    except admission.CooldownActive:
+        result.put(('cooldown', gate.status()['stale']))
+
+
 def cooldown_reader(root, workspace, result, started=None):
     os.chdir(workspace)
     if started is not None:
@@ -99,17 +121,21 @@ class AdmissionTests(unittest.TestCase):
         with self.assertRaises(admission.BudgetExhausted):
             self.gate.request(lambda: self.fail('retry must be admitted'))
 
-    def test_unknown_quarantines_indefinitely_and_clock_rollback_fails_closed(self):
+    def test_unknown_recovers_with_stale_budget_and_clock_rollback_fails_closed(self):
         with self.assertRaises(TimeoutError):
             self.gate.request(lambda: (_ for _ in ()).throw(TimeoutError()))
         self.now -= 1
         with self.assertRaises(admission.StateError):
             self.gate.request(lambda: self.fail('clock rolled back'))
-        self.now += 10_000
-        with self.assertRaises(admission.HostQuarantined):
-            self.gate.request(lambda: self.fail('unknown must not expire'))
-        self.gate.clear_quarantine()  # Test attests that the recovery contract is met.
+        self.now += 1
+        with self.assertRaises(admission.HostQuarantined) as exc:
+            self.gate.request(lambda: self.fail('backoff'))
+        self.assertEqual(exc.exception.until, 1060)
+        self.now = 1060
         self.assertEqual(self.gate.request(lambda: ('ok', 1)), 'ok')
+        self.assertTrue(self.gate.status()['stale'])
+        self.gate.clear_quarantine()  # Test attests that the recovery contract is met.
+        self.assertFalse(self.gate.status()['stale'])
 
     def test_bad_cost_fails_closed_and_preserves_reservation(self):
         for value in (None, -1, True, 8):
@@ -124,7 +150,7 @@ class AdmissionTests(unittest.TestCase):
         self.gate.request(lambda: ('ok', 1))
         path = next(Path(self.tmp.name).rglob('*.json'))
         original = path.read_text()
-        for bad in ('', '{', '{"a":1,"a":2}', original.replace('"version":2', '"version":99')):
+        for bad in ('', '{', '{"a":1,"a":2}', original.replace('"version":3', '"version":99')):
             path.write_text(bad)
             with self.assertRaises(admission.StateError):
                 self.gate.request(lambda: self.fail('corrupt state'))
@@ -179,6 +205,8 @@ class AdmissionTests(unittest.TestCase):
         root.write_text('not a directory')
         with self.assertRaises(admission.StateError):
             ledger(root).request(lambda: self.fail('unavailable'))
+        with self.assertRaises(admission.StateError):
+            ledger(root).status()
         with mock.patch.object(admission.os, 'fsync', side_effect=OSError('disk failure')):
             with self.assertRaises(admission.StateError):
                 self.gate.request(lambda: self.fail('not durable'))
@@ -242,20 +270,19 @@ class AdmissionTests(unittest.TestCase):
             reader.start(); reader.join(10)
             self.assertEqual(reader.exitcode, 0)
             self.assertEqual(result.get(timeout=1), 'HostQuarantined')
-            # Even completion does not establish when GitHub might charge the request.
+            # Local completion does not establish when GitHub might charge the request.
             Path(release).touch()
             deadline = time.monotonic() + 5
             while not Path(finished).exists() and time.monotonic() < deadline:
                 time.sleep(.01)
             self.assertTrue(Path(finished).exists())
-            with self.assertRaises(admission.HostQuarantined):
-                ledger(state).request(lambda: self.fail('orphan completion is not remote evidence'))
+            self.assertTrue(ledger(state).status()['stale'])
         finally:
             Path(release).touch()
             if parent.is_alive():
                 parent.terminate(); parent.join()
 
-    def test_real_process_timeout_quarantines_while_child_remains_alive(self):
+    def test_real_process_timeout_recovers_without_claiming_child_finished(self):
         process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
@@ -263,8 +290,9 @@ class AdmissionTests(unittest.TestCase):
                 self.gate.request(lambda: (process.communicate(timeout=.1), 1))
             self.assertIsNone(process.poll())
             self.now += 10_000
-            with self.assertRaises(admission.HostQuarantined):
-                self.gate.request(lambda: self.fail('timed-out child still alive'))
+            self.assertEqual(self.gate.request(lambda: ('ok', 1)), 'ok')
+            self.assertIsNone(process.poll())
+            self.assertTrue(self.gate.status()['stale'])
         finally:
             process.kill()
             process.communicate(timeout=5)
@@ -304,9 +332,43 @@ class AdmissionTests(unittest.TestCase):
             if writer.is_alive():
                 writer.terminate(); writer.join()
 
+    def test_unknown_graphql_limit_recovery_across_processes(self):
+        root = Path(self.tmp.name).resolve()
+        one, two = root / 'one', root / 'two'
+        one.mkdir(); two.mkdir()
+        state = root / 'shared'
+        result = multiprocessing.Queue()
+        writer = multiprocessing.Process(target=unknown_limit_writer, args=(state, one, 1000, result))
+        writer.start(); writer.join(5)
+        self.assertEqual(writer.exitcode, 0)
+        self.assertEqual(result.get(timeout=1), 'unavailable')
+        for now, expected in ((1000, 'backoff'), (1060, 'cooldown'), (1120, 'ok')):
+            reader = multiprocessing.Process(target=recovery_reader, args=(state, two, now, result))
+            reader.start(); reader.join(5)
+            self.assertEqual(reader.exitcode, 0)
+            self.assertEqual(result.get(timeout=1), (expected, True))
+
+    def test_version_two_quarantine_migrates_with_bounded_recovery(self):
+        self.gate.request(lambda: ('ok', 1))
+        path = next(Path(self.tmp.name).rglob('*.json'))
+        state = json.loads(path.read_text())
+        state['version'] = 2
+        state['quarantined'] = True
+        for key in ('stale', 'recovery_until', 'unknown_count'):
+            del state[key]
+        path.write_text(json.dumps(state))
+        with self.assertRaises(admission.HostQuarantined):
+            self.gate.request(lambda: self.fail('legacy quarantine'))
+        self.now += 60
+        self.assertEqual(self.gate.request(lambda: ('ok', 1)), 'ok')
+        self.assertTrue(self.gate.status()['stale'])
+
     def test_rate_limit_headers_and_cooldown_expiry(self):
         cases = [
             (429, {}, False, 1060),
+            (200, {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1300'}, False, 1300),
+            (200, {'X-RateLimit-Remaining': '0'}, False, 1060),
+            (200, {'Retry-After': '120'}, True, 1120),
             (403, {'Retry-After': '120'}, False, 1120),
             (403, {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1300'}, False, 1300),
             (403, {}, True, 1060),
@@ -341,6 +403,53 @@ class AdmissionTests(unittest.TestCase):
         with self.assertRaises(admission.HostQuarantined):
             self.gate.request(lambda: self.fail('unsupported cooldown must fail closed'))
 
+    def test_graphql_200_secondary_error_sets_cooldown(self):
+        result = {'errors': [{'message': 'You have exceeded a secondary rate limit'}]}
+        self.assertEqual(self.gate.request(lambda: admission.Response(result, 1, 200, {'Retry-After': '120'})), result)
+        with self.assertRaises(admission.CooldownActive) as exc:
+            self.gate.request(lambda: self.fail('secondary limit'))
+        self.assertEqual(exc.exception.until, 1120)
+
+    def test_unknown_backoff_escalates_and_survives_restart(self):
+        for expected in (1060, 1180, 1420, 1900, 2380):
+            with self.assertRaises(ConnectionError):
+                self.gate.request(lambda: (_ for _ in ()).throw(ConnectionError()))
+            restarted = ledger(self.tmp.name, lambda: self.now)
+            self.assertTrue(restarted.status()['stale'])
+            with self.assertRaises(admission.HostQuarantined) as exc:
+                restarted.request(lambda: self.fail('backoff survives restart'))
+            self.assertEqual(exc.exception.until, expected)
+            self.now = expected
+        self.assertEqual(self.gate.request(lambda: ('ok', 1)), 'ok')
+        self.assertTrue(self.gate.status()['stale'])
+
+    def test_429_without_cost_retains_backoff_and_retry_after(self):
+        with self.assertRaises(admission.StateError):
+            self.gate.request(lambda: admission.Response('limited', None, 429, {'Retry-After': '120'}))
+        status = ledger(self.tmp.name, lambda: self.now).status()
+        self.assertEqual((status['stale'], status['recovery_until'], status['cooldown_until']), (True, 1060, 1120))
+        self.now = 1060
+        with self.assertRaises(admission.CooldownActive):
+            self.gate.request(lambda: self.fail('retry-after still active'))
+        self.now = 1120
+        self.assertEqual(self.gate.request(lambda: ('ok', 1)), 'ok')
+        self.assertTrue(self.gate.status()['stale'])
+
+    def test_crash_recovery_is_bounded_from_first_observation(self):
+        p = multiprocessing.Process(target=crash, args=(self.tmp.name,))
+        p.start(); p.join(5)
+        self.assertEqual(p.exitcode, 7)
+        state_file = next(Path(self.tmp.name).rglob('*.json'))
+        stamp = json.loads(state_file.read_text())['last']
+        self.now = stamp + 1000
+        gate = ledger(self.tmp.name, lambda: self.now)
+        with self.assertRaises(admission.HostQuarantined) as exc:
+            gate.request(lambda: self.fail('crash recovery'))
+        self.assertEqual(exc.exception.until, self.now + 60)
+        self.now += 60
+        self.assertEqual(ledger(self.tmp.name, lambda: self.now).request(lambda: ('ok', 1)), 'ok')
+        self.assertTrue(gate.status()['stale'])
+
     def test_replaced_ledger_symlink_and_hardlink_fail_closed(self):
         self.gate.request(lambda: ('ok', 1))
         path = next(Path(self.tmp.name).rglob('*.json'))
@@ -359,7 +468,8 @@ class AdmissionTests(unittest.TestCase):
         path = next(Path(self.tmp.name).rglob('*.json'))
         state = json.loads(path.read_text())
         state['version'] = 1
-        del state['cooldown_until'], state['quarantined']
+        for key in ('cooldown_until', 'stale', 'recovery_until', 'unknown_count'):
+            del state[key]
         path.write_text(json.dumps(state))
         with self.assertRaises(admission.HostQuarantined):
             self.gate.request(lambda: self.fail('legacy state is ambiguous'))

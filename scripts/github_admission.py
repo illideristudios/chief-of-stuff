@@ -9,13 +9,17 @@ holding the host lock. Set secondary_limit when the response identifies a second
 limit. Retry-After and X-RateLimit-Reset use wall-clock time. A 429 or identified
 secondary limit without a usable deadline receives a 60-second minimum cooldown.
 
-Exceptions, invalid or missing costs, and recovered in-flight reservations quarantine
-the entire host indefinitely. Neither a transport timeout nor process death proves
-that GitHub has stopped processing a request. An operator may clear quarantine only
-after establishing that all unknown requests have finished and that a full policy
-window has passed since the last possible remote charge. There is no automatic safe
-recovery without such an external guarantee. Clearing quarantine is an explicit
-administrative action; it does not clear a cooldown or known charges.
+Exceptions, missing costs, and recovered reservations cause a durable automatic
+backoff of at least one policy window, doubling on consecutive unknown outcomes
+up to eight windows (and at least 60 seconds). A recovered reservation is charged
+at the caller's declared maximum at observation time. The ledger remains marked
+stale after recovery: status() exposes that uncertainty, even after later success.
+This is best-effort accounting, not a hard budget guarantee: a remote request may
+finish or be charged after any finite backoff, at an unknown cost. Callers should
+surface stale or unavailable state rather than present the budget as authoritative.
+A callback that uses gh should bound its runtime and clean up its own subprocess
+and, where supported, its process group; local termination does not prove remote
+completion. The callback must still represent exactly one network attempt.
 
 There is no authoritative upper bound on unknown request costs. max_request_cost is
 only a caller-declared query-shape bound, not a guarantee about GitHub. Known costs
@@ -50,7 +54,11 @@ class BudgetExhausted(RuntimeError):
 
 
 class HostQuarantined(StateError):
-    """An unknown request outcome requires explicit administrative recovery."""
+    """An unknown outcome is in automatic backoff; the budget is stale."""
+
+    def __init__(self, until):
+        self.until = until
+        super().__init__(f'GitHub outcome unknown; budget stale, retry after {until}')
 
 
 class CooldownActive(BudgetExhausted):
@@ -134,17 +142,24 @@ class GitHubAdmission:
             raise StateError('ledger exceeds size bound')
         try:
             state = json.loads(raw, object_pairs_hook=_unique)
-            if not isinstance(state, dict) or type(state.get('version')) is not int or state['version'] not in (1, 2):
+            if not isinstance(state, dict) or type(state.get('version')) is not int or state['version'] not in (1, 2, 3):
                 raise ValueError('ledger schema mismatch')
             expected = {'version', 'policy', 'last', 'events'}
             if state['version'] == 2:
                 expected |= {'quarantined', 'cooldown_until'}
+            if state['version'] == 3:
+                expected |= {'stale', 'recovery_until', 'unknown_count', 'cooldown_until'}
             if set(state) != expected or state['policy'] != dataclasses.asdict(self.policy) or not isinstance(state['policy'], dict) or any(type(v) is not int for v in state['policy'].values()):
                 raise ValueError('ledger schema or policy mismatch')
             if state['version'] == 2:
                 cooldown = state['cooldown_until']
                 if type(state['quarantined']) is not bool or isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or not math.isfinite(cooldown) or cooldown < 0:
                     raise ValueError('invalid quarantine or cooldown')
+            if state['version'] == 3:
+                recovery, count, cooldown = state['recovery_until'], state['unknown_count'], state['cooldown_until']
+                if (type(state['stale']) is not bool or type(count) is not int or not 0 <= count <= 4
+                        or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0 for v in (recovery, cooldown))):
+                    raise ValueError('invalid recovery state')
             last, events = state['last'], state['events']
             if isinstance(last, bool) or not isinstance(last, (int, float)) or not math.isfinite(last) or last < 0 or not isinstance(events, list) or len(events) > self.policy.max_requests:
                 raise ValueError('invalid ledger')
@@ -158,9 +173,6 @@ class GitHubAdmission:
                 previous = stamp
             if sum(e[2] for e in events) > 1 or any(e[2] for e in events[:-1]):
                 raise ValueError('invalid reservations')
-            if state['version'] == 1:
-                # Version 1 may have discarded unknown outcomes even if its events are empty.
-                state.update(version=2, quarantined=True, cooldown_until=0)
             return state
         except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
             raise StateError('corrupt or incompatible GitHub admission ledger') from exc
@@ -229,8 +241,9 @@ class GitHubAdmission:
     def _load(self, fd, created):
         now = self._now()
         if created:
-            state = {'version': 2, 'policy': dataclasses.asdict(self.policy), 'last': now,
-                     'events': [], 'quarantined': False, 'cooldown_until': 0}
+            state = {'version': 3, 'policy': dataclasses.asdict(self.policy), 'last': now,
+                     'events': [], 'stale': False, 'recovery_until': 0,
+                     'unknown_count': 0, 'cooldown_until': 0}
             self._write(fd, state)
             directory = os.open(self.path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
             try:
@@ -243,9 +256,14 @@ class GitHubAdmission:
             raise StateError('clock moved backwards')
         state['last'] = now
         events = state['events']
-        if events and events[-1][2]:
-            # Keep the reservation as evidence, but do not infer completion or cost.
-            state['quarantined'] = True
+        legacy_unknown = state['version'] == 1 or (state['version'] == 2 and state['quarantined'])
+        if state['version'] != 3:
+            cooldown = state.get('cooldown_until', 0)
+            state.pop('quarantined', None)
+            state.update(version=3, stale=False, recovery_until=0, unknown_count=0,
+                         cooldown_until=cooldown)
+        if legacy_unknown or (events and events[-1][2]):
+            self._mark_unknown(state, now)
         self._write(fd, state)
         return state, now
 
@@ -255,8 +273,8 @@ class GitHubAdmission:
         try:
             with self._locked() as (fd, created):
                 state, now = self._load(fd, created)
-                if state['quarantined']:
-                    raise HostQuarantined('unknown GitHub request outcome; host quarantined')
+                if now < state['recovery_until']:
+                    raise HostQuarantined(state['recovery_until'])
                 if now < state['cooldown_until']:
                     raise CooldownActive(state['cooldown_until'])
                 state['events'] = events = [e for e in state['events'] if now - e[0] < self.policy.window_seconds]
@@ -284,22 +302,52 @@ class GitHubAdmission:
                 raise
             raise StateError('GitHub admission state unavailable') from exc
 
-    def clear_quarantine(self):
-        """Administrative recovery after externally verifying the module contract.
+    def status(self):
+        """Return durable uncertainty and retry deadlines, or raise StateError if unavailable.
 
-        The operator must establish remote completion and wait a full window since
-        the last possible charge. This method cannot verify that evidence.
+        A stale budget remains best effort after the automatic backoff expires.
         """
         try:
             with self._locked() as (fd, created):
                 state, now = self._load(fd, created)
-                if state['quarantined']:
-                    state['events'] = [e for e in state['events'] if not e[2]]
-                    state['quarantined'] = False
-                    self._write(fd, state)
-
+                return {'stale': state['stale'], 'recovery_until': state['recovery_until'],
+                        'cooldown_until': state['cooldown_until'], 'as_of': now}
         except OSError as exc:
             raise StateError('GitHub admission state unavailable') from exc
+
+    def clear_quarantine(self):
+        """Clear uncertainty only after externally establishing remote completion and
+        waiting a full window since the last possible charge. This is an operator
+        attestation, not evidence supplied by this module. Cooldowns are retained.
+        """
+        try:
+            with self._locked() as (fd, created):
+                state, now = self._load(fd, created)
+                state.update(stale=False, recovery_until=0, unknown_count=0)
+                self._write(fd, state)
+        except OSError as exc:
+            raise StateError('GitHub admission state unavailable') from exc
+
+    def _mark_unknown(self, state, now):
+        state['stale'] = True
+        state['unknown_count'] = min(state['unknown_count'] + 1, 4)
+        delay = max(60, self.policy.window_seconds * 2 ** (state['unknown_count'] - 1))
+        state['recovery_until'] = max(state['recovery_until'], now + delay)
+        if state['events'] and state['events'][-1][2]:
+            state['events'][-1] = [now, self.policy.max_request_cost, False, False]
+
+    @staticmethod
+    def _graphql_limited(result):
+        if not isinstance(result, dict) or not isinstance(result.get('errors'), list):
+            return False
+        for error in result['errors']:
+            if not isinstance(error, dict):
+                continue
+            kind = str(error.get('type', '')).upper()
+            message = str(error.get('message', '')).lower()
+            if kind in ('RATE_LIMITED', 'RATE_LIMIT') or 'secondary rate limit' in message or 'abuse detection' in message:
+                return True
+        return False
 
     @staticmethod
     def _cooldown(response, now):
@@ -313,11 +361,12 @@ class GitHubAdmission:
             if key in headers:
                 raise StateError('duplicate HTTP response header')
             headers[key] = value.strip()
-        limited = response.status == 429 or (response.status == 403 and
-                   (response.secondary_limit or 'retry-after' in headers or headers.get('x-ratelimit-remaining') == '0'))
+        secondary = response.secondary_limit or GitHubAdmission._graphql_limited(response.result)
+        limited = (response.status == 429 or secondary or headers.get('x-ratelimit-remaining') == '0'
+                   or (response.status == 403 and 'retry-after' in headers))
         if not limited:
             return 0
-        deadlines = [now + 60] if response.status == 429 or response.secondary_limit else []
+        deadlines = [now + 60] if response.status == 429 or secondary else []
         retry = headers.get('retry-after')
         if retry:
             if re.fullmatch(r'[0-9]+', retry):
@@ -351,9 +400,12 @@ class GitHubAdmission:
         state['last'] = now
         state['cooldown_until'] = max(state['cooldown_until'], cooldown)
         if unknown or not valid:
-            state['quarantined'] = True
+            self._mark_unknown(state, now)
         else:
+            state['unknown_count'] = 0
             state['events'][-1] = [now, min(cost, 1_000_000_000), False, violation]
         self._write(fd, state)
-        if not unknown and (not valid or violation):
-            raise StateError('missing, invalid, or above-bound GraphQL cost')
+        if not unknown and not valid:
+            raise StateError(f'missing or invalid GraphQL cost; budget stale, retry after {state["recovery_until"]}')
+        if not unknown and violation:
+            raise StateError('above-bound GraphQL cost')
