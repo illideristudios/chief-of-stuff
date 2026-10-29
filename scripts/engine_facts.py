@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -178,7 +178,8 @@ def _implementation_requests(forge: Any, store: Any, observed: dict[str, bool | 
 
 
 def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
-           require_green: bool = False, hold_observations: tuple[tuple[str, bool | None], ...] = ()) -> Facts:
+           require_green: bool = False, hold_observations: tuple[tuple[str, bool | None], ...] = (),
+           stall_after: timedelta = timedelta(minutes=45)) -> Facts:
     """Read recorded worker trees directly; discovery is not evidence that a recorded tree is unreadable."""
     if now.utcoffset() is None:
         raise ValueError("timestamps must include a timezone")
@@ -280,7 +281,7 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
                  landing_heads=tuple(landing_heads.items()), landed_trees=tuple(landed_trees),
                  trees=tuple(tree_rows), tree_names=tuple(names),
                  tree_claims=tuple(tree_claims), progress=tuple(progress), landing_errors=tuple(landing_errors.items()),
-                 suites=tuple(suites), require_green=require_green,
+                 suites=tuple(suites), require_green=require_green, stall_after=stall_after,
                  hold_observations=hold_observations,
                  implementation_requests=_implementation_requests(forge, store, dict(hold_observations)),
                  suite_holds=tuple(item.issue_key for item in store.items()

@@ -211,7 +211,8 @@ class ReloadSnippetTest(unittest.TestCase):
         # R13: the source page's Unified/Split radios sit outside any form; picking Split is not input a reload loses.
         # #388: form.elements (not a descendant query) so a control tied by the form attribute still counts.
         _, flat = self.code()
-        selectors = re.findall(r"some\('([^']*)'", flat)
+        typing = flat.split("functiontyping()", 1)[1].split("functionnotice()", 1)[0]
+        selectors = re.findall(r"some\('([^']*)'", typing)
         self.assertTrue(selectors, "found no `some('selector', ...)` dirty check")
         scoped = all("form" in part for sel in selectors for part in sel.split(","))
         self.assertTrue(scoped or "closest('form')" in flat, f"dirty checks reach controls outside a form: {selectors}")
@@ -307,6 +308,55 @@ class ReloadSnippetTest(unittest.TestCase):
             for method in ("GET", "HEAD"):
                 with self.subTest(path=path, method=method):
                     self.assertEqual(get(self.port, path, method=method).status, 404)
+
+    def test_trailing_slash_tab_routes_match_the_bare_routes(self):
+        # #988: a pasted or typed `/workers/` or `/decisions/` must not be a dead end; the query string stays ignored.
+        for bare, needle in (("/workers", b"<p>workers.html</p>"), ("/decisions", b"<p>decisions.html</p>")):
+            for suffix in ("", "/", "?x=1", "/?x=1"):
+                path = bare + suffix
+                for method in ("GET", "HEAD"):
+                    with self.subTest(path=path, method=method):
+                        resp = get(self.port, path, method=method)
+                        self.assertEqual(resp.status, 200)
+                        if method == "GET":
+                            self.assertIn(needle, resp.body)
+                        else:
+                            self.assertEqual(resp.body, b"")
+                            bare_get = get(self.port, bare)
+                            self.assertEqual(resp.getheader("Content-Length"), str(len(bare_get.body)))
+
+    def test_unsafe_paths_beside_tab_routes_still_404(self):
+        # #988 must not weaken #340: only the exact tab routes gain a trailing slash, not lookalikes or escapes.
+        (self.dir / "sub").mkdir()
+        for path in ("/workers//", "/decisions//", "/workers/../workers", "/decisions/../decisions",
+                     "/workers/extra", "/decisions/extra/", "/Workers/", "/Decisions/",
+                     "/workers%2F%2F", "/sub/", "/%00", "/favicon.ico/"):
+            for method in ("GET", "HEAD"):
+                with self.subTest(path=path, method=method):
+                    self.assertEqual(get(self.port, path, method=method).status, 404)
+
+    def test_a_missing_favicon_is_204_and_a_present_one_is_served(self):
+        # #988: browsers ask for /favicon.ico; a 404 console noise is worse than an empty 204.
+        for method in ("GET", "HEAD"):
+            with self.subTest(missing=True, method=method):
+                resp = get(self.port, "/favicon.ico", method=method)
+                self.assertEqual(resp.status, 204)
+                self.assertEqual(resp.body, b"")
+                self.assertEqual(resp.getheader("Content-Length"), "0")
+            with self.subTest(missing=True, method=method, query=True):
+                self.assertEqual(get(self.port, "/favicon.ico?v=1", method=method).status, 204)
+        icon = b"\x00\x00\x01\x00fake-ico"
+        (self.dir / "favicon.ico").write_bytes(icon)
+        for method in ("GET", "HEAD"):
+            with self.subTest(missing=False, method=method):
+                resp = get(self.port, "/favicon.ico", method=method)
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.getheader("Content-Length"), str(len(icon)))
+                if method == "GET":
+                    self.assertEqual(resp.body, icon)
+                else:
+                    self.assertEqual(resp.body, b"")
+        self.assertEqual(get(self.port, "/favicon.ico", host="evil.test").status, 403)
 
     def test_a_case_folded_rendered_name_is_not_served_by_file_name(self):
         # #335: workerſ.html (U+017F) case-folds to workers.html; the route-only rule must use casefold, not lower.
@@ -690,7 +740,7 @@ class RenderOnRequestTest(unittest.TestCase):
         page = get(self.port, "/decisions/cache-ttl")
         self.assertEqual(page.status, 200)
         self.assertIn(b"Cache TTL", page.body)
-        self.assertIn(b'href="/decisions"', page.body)
+        self.assertIn(b'href="/decisions#pending-decisions"', page.body)
         self.assertIn(b'href="/decisions/cache-ttl"', get(self.port, "/decisions").body)
         # The user, 2026-09-26: "get rid of the .html versions entirely".
         for missing in ("/decisions/nope", "/decisions/../decisions", "/decisions/cache-ttl.json", "/decisions.html",
@@ -1255,6 +1305,30 @@ class AnswerTest(unittest.TestCase):
     def test_an_unreadable_decision_takes_no_answer(self):
         self.json.write_text("{")
         self.assertEqual(post(self.port, "/decisions/cache-ttl", b"key=B", origin=self.origin).status, 409)
+
+    def test_refused_authored_answer_keeps_words_and_hides_parse_details(self):
+        resp = post(self.port, "/decisions/cache-ttl", b"key=Z&words=%3Cdraft%3E", origin=self.origin)
+        body = resp.body.decode()
+        self.assertEqual(resp.status, 400)
+        self.assertIn('class="tabs"', body)
+        self.assertIn('href="/"', body)
+        self.assertIn('&lt;draft&gt;', body)
+        self.assertIn('name="words"', body)
+        self.assertIn("Cache TTL", body)
+        self.assertIn('name="key"', body)
+        self.assertIn("no-store", resp.getheader("Cache-Control"))
+        self.assertIsNone(self.answer())
+        broken = json.loads(self.json.read_text())
+        broken["recommended"] = "sensitive-value"
+        self.json.write_text(json.dumps(broken))
+        resp = post(self.port, "/decisions/cache-ttl", b"words=my+draft", origin=self.origin)
+        self.assertEqual(resp.status, 409)
+        self.assertNotIn("sensitive-value", resp.body.decode())
+        self.assertIn("my draft", resp.body.decode())
+        missing = post(self.port, "/decisions/missing", b"words=keep+me", origin=self.origin)
+        self.assertEqual(missing.status, 404)
+        self.assertIn("keep me", missing.body.decode())
+        self.assertIn("no-store", missing.getheader("Cache-Control"))
 
 
 WAIT = 5.0   # the longest a test waits for something that must happen

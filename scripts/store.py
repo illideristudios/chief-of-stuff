@@ -10,6 +10,7 @@ it changes, and a test holds these models to what the migrations build.
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from contextlib import closing, contextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Any, Callable, Iterator
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint, create_engine, delete, event, select, update
+from sqlalchemy import JSON, Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint, create_engine, delete, event, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -194,6 +195,19 @@ class Ask(WorkerRecord, Base):
     options: Mapped[list[str]] = mapped_column(JSON)
     context: Mapped[str] = mapped_column(String)
     answer: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class WorkerMessage(WorkerRecord, Base):
+    """An operator message addressed to exactly one worker session, never implicitly retargeted."""
+    __tablename__ = "worker_message"
+    __table_args__ = (CheckConstraint("status IN ('queued', 'sending', 'delivered', 'failed')", name="worker_message_status"),)
+    request_id: Mapped[str] = mapped_column(String, unique=True)
+    body: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String)
+    evidence: Mapped[str] = mapped_column(String)
+    delivery_id: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)
+    claimed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    resolved_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 def _run_result(data: dict, stage: str, attempt: int, outcome: str, ended_at: str) -> None:
@@ -574,6 +588,100 @@ class Store:
         if issue_key is not None:
             stmt = stmt.where(Ask.issue_key == issue_key)
         return self._all(stmt)
+
+    def queue_worker_message(self, issue_key: str, stage: str, attempt: int, session_id: str, body: str,
+                             *, request_id: str) -> WorkerMessage:
+        """Persist an operator message to a currently open, identified worker attempt.
+
+        A request id gives clients safe retries. It binds the entire request, so a different body or destination
+        cannot reuse it. A queued record by itself is not a delivery claim; no transport is invoked here.
+        """
+        if not all(isinstance(value, str) and value.strip() for value in (issue_key, stage, session_id, body, request_id)):
+            raise ValueError("message identity, text and request_id must be nonempty strings")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+            raise ValueError("attempt must be a positive integer")
+        with self.session() as s:
+            prior = s.scalar(select(WorkerMessage).where(WorkerMessage.request_id == request_id))
+            if prior is not None:
+                if (prior.issue_key, prior.stage, prior.attempt, prior.session_id, prior.body) != (
+                        issue_key, stage, attempt, session_id, body):
+                    raise ValueError("request_id already belongs to a different message")
+                s.expunge(prior)
+                return prior
+            segment = s.scalar(select(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
+                                                     Segment.attempt == attempt))
+            resume = s.get(Resume, issue_key)
+            data = resume.data if resume is not None else None
+            runs = data.get("runs") if isinstance(data, dict) else None
+            run = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
+            if segment is None or segment.ended_at is not None or not isinstance(run, dict) or run.get("session_id") != session_id:
+                raise ValueError("worker attempt is not open with the requested session")
+            row = WorkerMessage(issue_key=issue_key, stage=stage, attempt=attempt, session_id=session_id,
+                                request_id=request_id, body=body, status="queued", evidence="", created_at=self._stamp())
+            s.add(row)
+            s.flush()
+            s.expunge(row)
+            return row
+
+    def worker_messages(self, issue_key: str, *, stage: str | None = None, attempt: int | None = None,
+                        session_id: str | None = None) -> list[WorkerMessage]:
+        stmt = select(WorkerMessage).where(WorkerMessage.issue_key == issue_key)
+        for key, value in (("stage", stage), ("attempt", attempt), ("session_id", session_id)):
+            if value is not None:
+                stmt = stmt.where(getattr(WorkerMessage, key) == value)
+        return self._all(stmt.order_by(WorkerMessage.id))
+
+    def begin_worker_message_delivery(self, message_id: int, issue_key: str, stage: str, attempt: int,
+                                      session_id: str) -> WorkerMessage:
+        """Claim before writing to a transport. A claim surviving a crash is unconfirmed, never auto-retried."""
+        with self.session() as s:
+            row = s.get(WorkerMessage, message_id)
+            if row is None or (row.issue_key, row.stage, row.attempt, row.session_id) != (issue_key, stage, attempt, session_id):
+                raise ValueError("message does not belong to this worker session")
+            if row.status != "queued":
+                raise ValueError("message delivery was already claimed or resolved")
+            segment = s.scalar(select(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
+                                                     Segment.attempt == attempt))
+            resume = s.get(Resume, issue_key)
+            data = resume.data if resume is not None else None
+            runs = data.get("runs") if isinstance(data, dict) else None
+            run = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
+            if segment is None or segment.ended_at is not None or not isinstance(run, dict) or run.get("session_id") != session_id:
+                raise ValueError("worker attempt is not open with the requested session")
+            row.status = "sending"
+            row.delivery_id = str(uuid.uuid4())
+            row.claimed_at = self._stamp()
+            s.flush()
+            s.expunge(row)
+            return row
+
+    def _resolve_worker_message(self, message_id: int, issue_key: str, stage: str, attempt: int, session_id: str,
+                                status: str, evidence: str, delivery_id: str | None = None) -> None:
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ValueError("message resolution requires evidence")
+        with self.session() as s:
+            row = s.get(WorkerMessage, message_id)
+            if row is None or (row.issue_key, row.stage, row.attempt, row.session_id) != (issue_key, stage, attempt, session_id):
+                raise ValueError("message does not belong to this worker session")
+            if status == "delivered" and (not delivery_id or delivery_id != row.delivery_id):
+                raise ValueError("acknowledgment does not match the delivery claim")
+            if row.status == status and row.evidence == evidence:
+                return
+            if row.status not in ("queued", "sending") or (status == "delivered" and row.status != "sending"):
+                raise ValueError("message already resolved")
+            row.status = status
+            row.evidence = evidence
+            row.resolved_at = self._stamp()
+
+    def ack_worker_message(self, message_id: int, issue_key: str, stage: str, attempt: int, session_id: str,
+                           *, delivery_id: str, evidence: str) -> None:
+        """Record an adapter's affirmative acknowledgment, never a send attempt or a successful enqueue."""
+        self._resolve_worker_message(message_id, issue_key, stage, attempt, session_id, "delivered", evidence, delivery_id)
+
+    def fail_worker_message(self, message_id: int, issue_key: str, stage: str, attempt: int, session_id: str,
+                            *, reason: str) -> None:
+        """Record a confirmed delivery failure; an ambiguous write remains sending and unconfirmed."""
+        self._resolve_worker_message(message_id, issue_key, stage, attempt, session_id, "failed", reason)
 
     def answer_ask(self, issue_key: str, ask_id: int, answer: str) -> None:
         """An operator's or the trio's adopted answer, bound to the named issue; worker tools never expose this write.

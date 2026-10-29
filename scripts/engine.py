@@ -650,6 +650,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
+    if workers.stall.action != "wait":
+        raise ValueError("automatic stall restart is not supported until activity and safe recovery are implemented")
     _record_limits(workers)
 
     snapshots = list(forge.snapshots())
@@ -672,6 +674,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     facts = worker.collect(store, root, clock, trees,
                    gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
                                   now=clock(), require_green=require_green,
+                                  stall_after=timedelta(minutes=workers.stall.after_minutes),
                                   hold_observations=tuple((row["issue_key"], row.get("human_review")) for row in snapshots)),
                    finish=partial(_finish_worker, forge, store, policies=policies),
                    require_green=require_green, teardown_command=teardown_command)
@@ -866,6 +869,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     raise
                 _clear_waived_gates(store, key)
                 _clear_interrupt(store, key, "limit", scope={"stage": stage})
+                # A successful relaunch after a raised limit must not keep the exhausted interrupt (#963).
+                _clear_interrupt(store, key, "exhausted", scope={})
                 if planned is not None:
                     # The intent's worker launched: a re-route is done, and a reversal's done phase is its restart.
                     _settle(store, key, decision_actions.advance, planned.intent_id, stage, action.attempt)
@@ -1102,6 +1107,12 @@ def main(argv: list[str] | None = None) -> int:
                         if (python := _prepare_handoff(installed)) is not None:
                             newer = installed, python
                             break
+                    if page_thread is not None and not page_thread.is_alive():
+                        # A temporary supervisor-lock conflict or unexpected thread exit must not
+                        # disable board recovery for the remainder of this engine process.
+                        print("engine: page supervisor exited; restarting it", file=sys.stderr, flush=True)
+                        page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
+                        page_thread.start()
             finally:
                 stop_pages.set()
                 if page_thread is not None and page_thread.ident is not None:

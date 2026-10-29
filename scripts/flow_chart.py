@@ -21,6 +21,7 @@ from decision_actions import current_rows, state_of
 import gantt
 from clock import done_clock, parse_stamp as _parse_store_dt
 from fragment import esc, issue_href
+from task_forge import EXHAUSTED_CHIP, retry_exhaustion
 from tracker import WORKFLOW, change_keys, issue_key, launch_row, launcher
 # The Log line grammar and the moves read with it live in tracker_log.py, which draws nothing. `moves` is imported
 # here as well, so `flow_chart.moves` still names it.
@@ -295,10 +296,16 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
         short_ref = f"#{key.rpartition('#')[2]}" if "#" in key else key
         stage = item.stage or (raw_segs[-1].stage if raw_segs else "implement")
         has_open_dec = bool(open_decs_by_key.get(key))
-        is_held = bool(item.human_review or has_open_dec
+        exhausted = retry_exhaustion(resume, raw_segs, db.log(key) if hasattr(db, "log") else ())
+        is_held = bool(item.human_review or has_open_dec or exhausted
                        or (raw_segs and raw_segs[-1].outcome == "human_review"))
         if item.forge_state == "closed":
             status, note = "merged", "closed"
+        elif exhausted:
+            # #963: the engine gave up; never draw this as running or a plain open retry.
+            status, note = "needs input", f"needs input · {EXHAUSTED_CHIP}"
+            if include_hold_bars:
+                g_segs.append(gantt.Segment(now, now + WINDOWS[-1][2], stage, "hold", ""))
         elif is_held:
             cause = "decision" if has_open_dec else stage
             status, note = "needs input", f"needs input · {cause}"
@@ -395,4 +402,4 @@ def css() -> str:
     return gantt.css(COLOURS) + (".gantt-legend .gantt-forecast:not([data-cat]){--c:var(--stage-implement)}\n"
                                  ".gantt-legend{border-top:1px solid var(--gantt-edge);padding-top:5px}\n"
                                  "@media (max-width:520px){.gantt,.gantt-legend{--gantt-label:96px;--gantt-note:0px}"
-                                 ".gantt-note,.gantt-ref{display:none}.gantt-axis{font-size:8.5px}}\n")
+                                 ".gantt-note,.gantt-ref:not(a){display:none}.gantt-axis{font-size:8.5px}}\n")

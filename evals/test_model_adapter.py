@@ -509,6 +509,20 @@ class CallTest(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
+    def test_timeout_cleanup_tolerates_permission_error_after_leader_exits(self):
+        process = mock.Mock(pid=123)
+        process.poll.return_value = 0
+        process.communicate.return_value = ("partial", "")
+        with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError):
+            self.assertEqual(claude_adapter._kill_and_drain(process), ("partial", ""))
+
+    def test_timeout_cleanup_does_not_hide_permission_error_for_live_leader(self):
+        process = mock.Mock(pid=123)
+        process.poll.return_value = None
+        with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                claude_adapter._kill_and_drain(process)
+
     def test_truncated_utf8_output_is_saved_and_classified(self):
         self.cli.write_text(f"#!{sys.executable}\nimport os,time\nos.write(1,b'partial: \\xe2')\ntime.sleep(30)\n")
         artifacts = self.dir / "truncated-output"

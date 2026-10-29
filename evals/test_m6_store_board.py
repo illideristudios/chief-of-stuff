@@ -350,8 +350,8 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
     def test_needs_input_and_the_decisions_tab_link_to_the_decisions_page(self) -> None:
         """#1122: the NEEDS INPUT tile and the Decisions tab both open /decisions."""
         html = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
-        self.assertRegex(html, r'<a class="panels-tile" data-kind="blocked" href="/decisions"><span class="panels-label">NEEDS INPUT')
-        self.assertRegex(html, r'<a href="/decisions"[^>]*>Decisions')
+        self.assertRegex(html, r'<a class="panels-tile" data-kind="blocked" href="/decisions#pending-decisions"><span class="panels-label">NEEDS INPUT')
+        self.assertRegex(html, r'<a href="/decisions#pending-decisions"[^>]*>Decisions')
 
     def test_needs_input_and_the_decisions_badge_count_open_and_blocked_decisions(self) -> None:
         """#1124: a blocked row is a failed intent a person's newer answer clears, so it still needs input."""
@@ -594,6 +594,93 @@ class StorePagesAndRoutesTest(unittest.TestCase):
         )
         self.db.add_decision(KEY2, "design", "Approve cache eviction policy?")
 
+    def test_live_workers_and_pending_decision_are_visible_on_every_surface(self):
+        self.db.add_decision(KEY, "design", "Choose a parser")
+        self.db.record_segment(KEY, "plan", 1, (NOW - timedelta(minutes=5)).isoformat(),
+                               runner="plan-a1", runtime="cursor", model="composer")
+        # A cache entry for the first worker must not count that same worker twice.
+        sources = replace(bs.EMPTY, workers=(
+            bs.Worker("impl-a1", "one-shot", "claude", "opus", "Upload size limit", "impl-a1", NOW, None),
+            bs.Worker("idle", "session", "claude", "", "", "", NOW, None),
+        ))
+        data = task_forge.page_data(self.db)
+        cfg = parse_coordinator((self.root / "CLAUDE.md").read_text(), NOW.date())
+        settings = st.load(self.root, cfg.settings_path)
+        board = rb.render("", cfg, NOW, settings.lanes, kanban=settings.kanban, sources=sources, db=data)
+        workers = workers_page.render("", sources, NOW, self.root / "trees", 4, db=data)
+        self.assertIn('<span class="panels-label">RUNNING</span><b class="panels-count">2</b>', board)
+        self.assertIn('<h2>Running · 2</h2>', workers)
+        card = re.search(r'<div class="columns-card columns-flagged"[^>]*>.*?NEEDS INPUT</div></div>', board, re.S)[0]
+        self.assertIn('data-cat="running">running', card)
+        header = re.search(r'<header\b.*?</header>', issue_page.render(KEY, [], sources, NOW, db=data), re.S)[0]
+        self.assertIn('class="chip needs-input">NEEDS INPUT', header)
+        self.assertIn('class="chip running">RUNNING', header)
+        self.assertEqual(header.count('>RUNNING</span>'), 1)
+        # The count comes from store segments even when the worker cache is empty.
+        no_cache = rb.render("", cfg, NOW, settings.lanes, kanban=settings.kanban, db=data)
+        self.assertIn('<span class="panels-label">RUNNING</span><b class="panels-count">2</b>', no_cache)
+
+    def test_counts_include_distinct_cached_and_store_workers_only_once(self):
+        self.db.record_segment(KEY, "plan", 1, NOW.isoformat(), runner="plan-a1", outcome="mystery")
+        sources = replace(bs.EMPTY, workers=(
+            bs.Worker("impl-a1", "one-shot", "claude", "opus", "Upload size limit", "impl-a1", NOW, None),
+            bs.Worker("impl-a1", "one-shot", "claude", "opus", "Upload size limit", "impl-a1", NOW, None),
+            bs.Worker("extra", "session", "claude", "", "Cache warmup", "", NOW, None),
+            bs.Worker("idle", "session", "claude", "", "", "", NOW, None),
+        ))
+        data = task_forge.page_data(self.db)
+        cfg = parse_coordinator((self.root / "CLAUDE.md").read_text(), NOW.date())
+        settings = st.load(self.root, cfg.settings_path)
+        board = rb.render("", cfg, NOW, settings.lanes, kanban=settings.kanban, sources=sources, db=data)
+        workers = workers_page.render("", sources, NOW, self.root / "trees", 4, db=data)
+        self.assertIn('<span class="panels-label">RUNNING</span><b class="panels-count">3</b>', board)
+        self.assertIn('<h2>Running · 3</h2>', workers)
+        self.assertIn('<b>2 of 4</b><span class="cap">SLOTS FREE', workers)
+        body = issue_page.render(KEY, [], sources, NOW, db=data)
+        self.assertIn('>running · 0m</span>', body)
+
+    def test_ended_and_unknown_outcomes_do_not_imply_a_live_worker(self):
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "mystery")
+        self.db.record_segment(KEY, "plan", 1, (NOW - timedelta(minutes=2)).isoformat(), NOW.isoformat(),
+                               runner="plan-ended")
+        self.db.add_decision(KEY, "design", "Choose a parser")
+        data = task_forge.page_data(self.db)
+        body = issue_page.render(KEY, [], bs.EMPTY, NOW, db=data)
+        header = re.search(r'<header\b.*?</header>', body, re.S)[0]
+        self.assertIn('class="chip needs-input">NEEDS INPUT', header)
+        self.assertNotIn('class="chip running"', header)
+        self.assertIn('>ended · 2m</span>', body)
+        workers = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data)
+        self.assertIn('<h2>Running · 0</h2>', workers)
+        cfg = parse_coordinator((self.root / "CLAUDE.md").read_text(), NOW.date())
+        board = rb.render("", cfg, NOW, st.load(self.root, cfg.settings_path).lanes, db=data)
+        self.assertIn('<span class="panels-label">RUNNING</span><b class="panels-count">0</b>', board)
+
+    def test_unnamed_live_runs_with_the_same_stage_and_attempt_are_distinct(self):
+        self.db.record_segment(KEY, "plan", 1, NOW.isoformat())
+        self.db.record_segment(KEY2, "plan", 1, NOW.isoformat())
+        sources = replace(bs.EMPTY, workers=(
+            bs.Worker("plan-1", "session", "claude", "", "Other task", "", NOW, None),
+        ))
+        data = task_forge.page_data(self.db)
+        cfg = parse_coordinator((self.root / "CLAUDE.md").read_text(), NOW.date())
+        board = rb.render("", cfg, NOW, st.load(self.root, cfg.settings_path).lanes, sources=sources, db=data)
+        workers = workers_page.render("", sources, NOW, self.root / "trees", 4, db=data)
+        self.assertIn('<span class="panels-label">RUNNING</span><b class="panels-count">4</b>', board)
+        self.assertIn('<h2>Running · 4</h2>', workers)
+
+    def test_unknown_decision_state_does_not_hide_a_live_run_or_invent_a_hold(self):
+        self.db.add_decision(KEY, "design", "Choose a parser", record={"status": "unrecognized"})
+        data = task_forge.page_data(self.db)
+        cfg = parse_coordinator((self.root / "CLAUDE.md").read_text(), NOW.date())
+        board = rb.render("", cfg, NOW, st.load(self.root, cfg.settings_path).lanes, db=data)
+        card = re.search(r'<div class="columns-card">.*?Upload size limit.*?</div></div>', board, re.S)[0]
+        self.assertIn('data-cat="running">running', card)
+        self.assertNotIn("NEEDS INPUT", card)
+        header = re.search(r'<header\b.*?</header>', issue_page.render(KEY, [], bs.EMPTY, NOW, db=data), re.S)[0]
+        self.assertIn('class="chip running">RUNNING', header)
+        self.assertNotIn("NEEDS INPUT", header)
+
     def test_server_routes_full_issue_key_and_workers_from_store(self) -> None:
         # Reopen before the HTTP route reads failed-start evidence: it must survive a restart.
         for attempt, end, outcome in ((1, NOW, "failed"), (2, NOW + timedelta(seconds=20), "failed"),
@@ -786,6 +873,145 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         self.assertIn("Approve cache eviction policy?", done)
         self.assertNotIn("Approve cache eviction policy?", pending)
         self.assertNotIn("<form", done)
+
+
+def _seed_exhausted(db: store.Store, key: str, *, title: str, failure: str,
+                    live: bool = False, clear_interrupt: bool = False) -> None:
+    """An issue whose retries burned out: failed segments, exhausted interrupt, optional live recovery."""
+    fail_at = NOW - timedelta(minutes=10)
+    db.upsert_item(key, workflow="build", stage="plan", forge_state="open", title=title)
+    db.record_segment(key, "plan", 1, fail_at.isoformat(), fail_at.isoformat(), "failed",
+                      runtime="claude", model="opus", agent_type="plan", runner="plan-1")
+    db.record_segment(key, "plan", 2, (fail_at + timedelta(minutes=1)).isoformat(),
+                      (fail_at + timedelta(minutes=1)).isoformat(), "failed",
+                      runtime="claude", model="opus", agent_type="plan", runner="plan-2")
+    db.add_log(key, failure, (fail_at + timedelta(minutes=1)).isoformat())
+    db.add_log(key, "exhausted: retry limit reached for plan",
+               (fail_at + timedelta(minutes=2)).isoformat())
+    resume = {"interrupt": {"kind": "exhausted", "reason": "retry limit reached for plan", "stage": "plan"}}
+    if clear_interrupt:
+        resume = {}
+    if live:
+        db.record_segment(key, "plan", 3, (NOW - timedelta(minutes=2)).isoformat(), None, None,
+                          runtime="claude", model="opus", agent_type="plan", runner="plan-3")
+        if clear_interrupt:
+            resume = {}
+    db.set_resume(key, resume)
+
+
+class RetryExhaustionDisplayTest(unittest.TestCase):
+    """#963: exhausted retries read as needs-input with evidence; live or recovered runs are not mislabelled."""
+
+    def test_latest_exhaustion_uses_the_latest_failure(self):
+        import readiness
+        evidence = readiness.retry_exhaustion(
+            {"interrupt": {"kind": "exhausted", "reason": "retry limit reached"}}, (),
+            ["dispatch failed: first", "exhausted: retry limit reached",
+             "dispatch failed: second", "exhausted: retry limit reached"])
+        self.assertEqual(evidence.failure, "dispatch failed: second")
+
+    def setUp(self) -> None:
+        self.root, self.db = make_store_workspace()
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW.astimezone(tz)
+        frozen = mock.patch.object(workers_page, "datetime", FrozenDatetime)
+        frozen.start()
+        self.addCleanup(frozen.stop)
+        self.addCleanup(self.db.engine.dispose)
+
+    def test_exhausted_issue_flags_board_flow_task_and_workers(self) -> None:
+        failure = "dispatch failed: existing worktree is missing or no longer on the work branch"
+        _seed_exhausted(self.db, KEY_A, title="Classification metrics", failure=failure)
+        data = task_forge.page_data(self.db)
+        evidence = data.exhaustion(KEY_A)
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence.failure, failure)
+        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+                           if r.href.endswith(urllib.parse.quote(KEY_A, safe="")))
+        self.assertEqual(status, "needs input")
+        self.assertIn(task_forge.EXHAUSTED_CHIP, row.note)
+        self.assertIn("hold", [g.kind for g in row.segments])
+        counts = decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+        self.assertEqual(counts["dispatch"], 0)
+        self.assertGreaterEqual(counts["workers"], 1)
+        board = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
+        self.assertIn(task_forge.EXHAUSTED_CHIP, board)
+        self.assertIn("NEEDS INPUT", board)
+        self.assertRegex(board, r'data-cat="hold"[^>]*>NEEDS INPUT')
+        body = issue_page.render(KEY_A, [], bs.EMPTY, NOW, root=self.root, db=data)
+        self.assertIn(f'class="chip retries-exhausted">{task_forge.EXHAUSTED_CHIP.upper()}', body)
+        self.assertIn(failure, body)
+        self.assertIn(task_forge.EXHAUSTED_UNBLOCK, body)
+        self.assertNotIn('class="chip running"', body)
+        workers = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data)
+        self.assertIn(task_forge.EXHAUSTED_CHIP, workers)
+        self.assertNotIn("re-dispatch", workers)
+        self.assertIn(failure, workers)
+
+    def test_a_live_segment_wins_over_a_stale_exhausted_interrupt(self) -> None:
+        _seed_exhausted(self.db, KEY_B, title="Live after exhaustion",
+                        failure="dispatch failed: worktree missing", live=True)
+        data = task_forge.page_data(self.db)
+        self.assertIsNone(data.exhaustion(KEY_B))
+        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+                           if r.href.endswith(urllib.parse.quote(KEY_B, safe="")))
+        self.assertEqual(status, "running")
+        self.assertNotIn(task_forge.EXHAUSTED_CHIP, row.note)
+        body = issue_page.render(KEY_B, [], bs.EMPTY, NOW, root=self.root, db=data)
+        self.assertNotIn(task_forge.EXHAUSTED_CHIP, body)
+        workers = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data)
+        self.assertIn("plan-3", workers)
+        self.assertNotIn("re-dispatch", workers)  # no inert or unverified retry action
+        self.assertIn("/issues/", workers)
+
+    def test_closing_an_exhausted_issue_clears_current_needs_input(self) -> None:
+        _seed_exhausted(self.db, KEY_A, title="Closed after exhaustion", failure="dispatch failed")
+        self.db.record_segment(KEY_A, "review", 1, (NOW - timedelta(minutes=20)).isoformat(),
+                               (NOW - timedelta(minutes=19)).isoformat(), "human_review", runner="old-review")
+        data = task_forge.page_data(self.db)
+        _, _, need, _ = workers_page._store_rows(data, set(), NOW, self.root / "trees", "")
+        self.assertEqual(need, 1)
+        self.db.upsert_item(KEY_A, forge_state="closed")
+        data = task_forge.page_data(self.db)
+        self.assertIsNone(data.exhaustion(KEY_A))
+        _, _, need, _ = workers_page._store_rows(data, set(), NOW, self.root / "trees", "")
+        self.assertEqual(need, 0)
+        tracker = "# Tracker\n\n## Log\n\n- 00:30 one-shot old-review: HUMAN REVIEW NEEDED — stuck. Changes: none.\n"
+        navigation = decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+        workers = workers_page.render(tracker, bs.EMPTY, NOW, self.root / "trees", 4, db=data, navigation=navigation)
+        self.assertRegex(workers, r'<b>0</b><span class="cap">NEEDS INPUT')
+        self.assertNotIn('title="1 need input"', workers)
+        body = issue_page.render(KEY_A, [], bs.EMPTY, NOW, root=self.root, db=data)
+        self.assertNotIn('class="chip retries-exhausted"', body)
+        self.assertIn("Nothing happens next: the issue is closed", body)
+
+    def test_exhaustion_guidance_does_not_claim_resetting_the_worktree_retries(self) -> None:
+        self.assertNotIn("Reset the worktree", task_forge.EXHAUSTED_UNBLOCK)
+        self.assertIn("retry limit", task_forge.EXHAUSTED_UNBLOCK)
+        self.assertIn("hold", task_forge.EXHAUSTED_UNBLOCK)
+
+    def test_a_recovered_issue_is_not_labelled_from_stale_exhausted_log_lines(self) -> None:
+        _seed_exhausted(self.db, KEY_C, title="Recovered after raise",
+                        failure="dispatch failed: worktree missing", clear_interrupt=True)
+        # A fresh attempt after the interrupt was cleared: queued/open, not exhausted.
+        self.db.record_segment(KEY_C, "plan", 3, (NOW - timedelta(minutes=3)).isoformat(),
+                               (NOW - timedelta(minutes=1)).isoformat(), "done",
+                               runtime="claude", model="opus", runner="plan-3")
+        data = task_forge.page_data(self.db)
+        self.assertIsNone(data.exhaustion(KEY_C))
+        self.assertTrue(any(e.message.startswith("exhausted:") for e in data.log(KEY_C)))
+        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+                           if r.href.endswith(urllib.parse.quote(KEY_C, safe="")))
+        self.assertEqual(status, "open")
+        self.assertNotIn(task_forge.EXHAUSTED_CHIP, row.note)
+        body = issue_page.render(KEY_C, [], bs.EMPTY, NOW, root=self.root, db=data)
+        self.assertNotIn('class="chip retries-exhausted"', body)
+        self.assertNotIn(task_forge.EXHAUSTED_UNBLOCK, body)
+        workers = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data)
+        # The previous exhaustion no longer applies, and ended rows offer task links.
+        self.assertNotIn(task_forge.EXHAUSTED_CHIP, workers)
 
 
 if __name__ == "__main__":

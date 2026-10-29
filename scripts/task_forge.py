@@ -15,6 +15,7 @@ import board_sources
 import decision_actions
 from estimate import estimates, history, task_end
 import kanban as kanban_tool
+from readiness import EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, RetryExhaustion, retry_exhaustion
 from md import section
 from settings import Kanban
 import tracker
@@ -55,6 +56,40 @@ def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers:
 
 def worker_names(sources: board_sources.Sources) -> set[str]:
     return {w.name for w in sources.workers}
+
+
+def source_workers(sources: board_sources.Sources) -> list[board_sources.Worker]:
+    """The distinct live workers shown on the Workers page, excluding idle sessions."""
+    found = {}
+    for worker in sources.workers:
+        if worker.kind == "session" and not worker.task.strip():
+            continue
+        found.setdefault(worker.name, worker)
+    return list(found.values())
+
+
+def segment_worker_key(seg):
+    """Match named workers across sources; unnamed runs retain their store identity."""
+    return getattr(seg, "runner", "") or (seg.issue_key, seg.stage, seg.attempt)
+
+
+def source_worker_tasks(sources: board_sources.Sources, tasks: list[Task]) -> set[Task]:
+    """Match each cached worker to the same task its Workers-page row would use."""
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    row_of = launcher(tasks)
+    found = set()
+    for worker in source_workers(sources):
+        task = by_name.get(worker.task.strip().casefold()) or row_of(worker.task)[0]
+        if task is not None:
+            found.add(task)
+    return found
+
+
+def live_worker_keys(sources: board_sources.Sources, segments) -> set[str | tuple[str, str, int]]:
+    """Combine cached workers and open store segments using the Workers page's runner identity."""
+    names: set[str | tuple[str, str, int]] = {worker.name for worker in source_workers(sources)}
+    names.update(segment_worker_key(seg) for seg in segments if seg.ended_at is None)
+    return names
 
 
 def task_changes(task: Task, sources: board_sources.Sources) -> tuple[board_sources.Change, ...]:
@@ -315,6 +350,14 @@ class PageData:
 
     def resume(self, key):
         return self.resumes.get(key)
+
+    def exhaustion(self, key) -> RetryExhaustion | None:
+        """Current retry exhaustion, unless the issue is closed or a live run supersedes it."""
+        item = self.item(key)
+        if item is None or item.forge_state == "closed":
+            return None
+        segs = [s for s in self.stage_segments if s.issue_key == key]
+        return retry_exhaustion(self.resumes.get(key), segs, [e for e in self.issue_logs if e.issue_key == key])
 
 
 def page_data(store) -> PageData:

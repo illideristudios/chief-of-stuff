@@ -4,7 +4,9 @@
 The pages are routes: `/` the board, `/workers` the running workers and today's ends, `/decisions` the list,
 `/decisions/<slug>` an authored decision page, `/decisions/<id>` (digits only) a store decision's page rendered
 from the store (#945), `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
-and diff. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
+and diff. `/workers/` and `/decisions/` are the same pages as the bare routes (#988); other directory URLs stay 404
+(#340). A missing `/favicon.ico` answers 204 so the browser console stays clean; a real icon in the pages dir is
+served. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
 `issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the file's own name is a 404.
 A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the settings TOML, the decision JSON,
 `.sources.json`) is newer than its last render, or differs in bytes from what that render read, and `/workers` on every GET (it reads the session logs too), and a thread refreshes `.sources.json` from the forge every minute. An open tab
@@ -51,6 +53,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import forge
 import page_reload
 import supervisor
+from backlog_ref import GitHubBacklog
 from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
 
 SERVER = "chief-of-stuff-pages"
@@ -63,6 +66,7 @@ RETRY_MAX = 60
 RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
 ISSUE = re.compile(r"/issues/([a-z0-9_.-]+:[A-Za-z0-9_./-]+#\d+|\d+)(/source)?")
+WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
@@ -132,6 +136,18 @@ def today_board(root: Path) -> str | None:
     return f"{day}-board.html" if (root / cfg.tracker_path(day)).is_file() or (root / "store.db").is_file() else None
 
 
+def workspace_label(root: Path) -> str:
+    """The name a served page carries: the Backlog repository or project the workspace's config names, else the root
+    folder's name marked as such (no Backlog line, or a config that does not read) so it is not taken for a project."""
+    try:
+        backlog = read_config(root).backlog
+    except (ConfigError, OSError):
+        backlog = None
+    if backlog is None:
+        return f"{root.name} (folder)"
+    return (backlog.repo if isinstance(backlog, GitHubBacklog) else backlog.project).rpartition("/")[2]
+
+
 def _page_data(root: Path):
     """The driver opens under the migrate lock; use cases hand detached rows to presenters."""
     import store_access
@@ -156,12 +172,50 @@ def _navigation(root: Path, pages_dir: Path, data):
     import decision_actions
     if data is None:
         return {}
-    return decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+    return decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
 
 
 def _issue_identity(name: str, source: bool = False):
     token = name[len("issue-"):-len("-source.html") if source else -5]
     return bytes.fromhex(token[1:]).decode() if token.startswith("k") else int(token)
+
+
+def _worker_config_dir(root: Path, data, segment_id: int) -> Path | None:
+    """Recover the Claude config directory from this exact attempt's recorded launch command."""
+    seg = next((s for s in data.segments() if getattr(s, "id", None) == segment_id), None)
+    if seg is None:
+        return None
+    number = seg.issue_key.rpartition("#")[2]
+    if (not number.isdecimal() or not re.fullmatch(r"[A-Za-z0-9_-]+", seg.stage)
+            or type(seg.attempt) is not int or seg.attempt < 1):
+        return None
+    data_for_issue = data.resume(seg.issue_key)
+    runs = data_for_issue.get("runs") if isinstance(data_for_issue, dict) else None
+    run = runs.get(f"{seg.stage}-{seg.attempt}") if isinstance(runs, dict) else None
+    if not isinstance(run, dict) or not all(isinstance(run.get(k), str) and run[k] for k in ("tree", "session_id", "run_dir")):
+        return None
+    expected = supervisor.state_dir(root) / "runs" / f"{int(number)}-{seg.stage}-{seg.attempt}"
+    try:
+        if Path(run["run_dir"]).resolve() != expected.resolve():
+            return None
+        path = expected / "command.json"
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as stream:
+            stat = os.fstat(stream.fileno())
+            if not S_ISREG(stat.st_mode) or stat.st_size > MAX_PAGE:
+                return None
+            command = json.load(stream)
+        if not isinstance(command, dict):
+            return None
+        env = command.get("env")
+        home = env.get("CLAUDE_CONFIG_DIR") if isinstance(env, dict) else None
+        if (command.get("session_id") != run["session_id"] or not isinstance(command.get("cwd"), str)
+                or Path(command["cwd"]).resolve() != Path(run["tree"]).resolve()
+                or not isinstance(home, str) or not Path(home).is_absolute()):
+            return None
+        return Path(home)
+    except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError):
+        return None
 
 
 def inside(pages_dir: Path | str, name: str) -> Path | None:
@@ -274,6 +328,48 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     server_version = f"{SERVER}/{VERSION}"
     banner = ""
 
+    def _refusal(self, status, message, *, answer=None, state=None, retry=None, words_name="answer", link=None):
+        """A transient recovery page; never write a submitted draft or raw exception to a page file."""
+        import decision_page
+        details = ""
+        if state is not None:
+            details = (f'<div class="card"><h2>{escape(state.prompt)}</h2>'
+                       f'<p>Current status: <b>{escape(state.status)}</b></p>'
+                       f'<p><a href="/decisions/{state.id}">View the current decision</a></p></div>')
+        if link:
+            details += f'<p><a href="{escape(link)}">Reload the decision</a></p>'
+        if answer is not None:
+            field = f'<label>Your draft <textarea name="{words_name}" rows="4">{escape(answer)}</textarea></label>'
+            if retry:
+                action, hidden, extra = retry
+                fields = ''.join(f'<input type="hidden" name="{escape(k)}" value="{escape(str(v))}">' for k, v in hidden.items())
+                details += f'<form method="post" action="{escape(action)}">{fields}{field}{extra}<button type="submit">Try again</button></form>'
+            else:
+                details += f'<div class="card">{field}<p>Copy your draft before opening another page.</p></div>'
+        page = (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+                f'<title>Unable to continue</title>{decision_page.HEAD_OPEN}{fragment.theme()}{decision_page.PAGE_CSS}'
+                '<style>.refusal{max-width:860px;margin:24px auto;padding:0 20px}.refusal textarea{display:block;'
+                'width:100%;box-sizing:border-box;margin:8px 0;font:inherit;background:var(--bg);color:var(--fg);'
+                'border:1px solid var(--line)}.refusal .notice{border-left:4px solid var(--brass);padding:12px}</style>'
+                '</head><body><main class="refusal">'
+                f'{fragment.tab_bar("Decisions", 0, True)}<header class="top"><div><h1>Unable to continue</h1></div></header>'
+                f'<div class="card notice" role="alert">{escape(message)}</div>{details}'
+                '<p><a href="/">Board</a> · <a href="/workers">Workers</a> · <a href="/decisions">Decisions</a></p>'
+                '</main></body></html>').encode("utf-8")
+        self._send_transient(status, page)
+
+    def _send_transient(self, status, page):
+        """Send an in-memory page, never cached or injected with the auto-reloader."""
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(page)
+
     def _allowed(self) -> bool:
         """Refuse a foreign Host or a dotfile; map `/` to today's (else the newest) board, `/all` to the listing and
         `/workers`, `/decisions[/<slug>]` and `/issues/<n>` to its file; refuse a rendered page's file name; re-render a page its sources outdate."""
@@ -284,6 +380,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return False
         path = re.split(r"[?#]", self.path, maxsplit=1)[0]
         decoded = unquote(path)
+        # #988: browsers and pasted links often keep the trailing slash on the tab routes; serve them as the bare path.
+        # Other directory URLs, including lookalikes (`/workers//`, `/Workers/`), stay refused (#340).
+        if decoded in ("/workers/", "/decisions/"):
+            path = decoded = decoded[:-1]
         if "\0" in decoded or (decoded != "/" and decoded.endswith("/")):  # #340: null or a directory URL, `%2F` too
             self.send_error(404)
             return False
@@ -312,6 +412,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.path = "/" + (name or boards[-1].name)
         elif path == "/all":
             self.path = "/"
+        elif path == "/favicon.ico":
+            # #988: a missing icon is 204 (no console 404); a real file in the pages dir is served. Host and path
+            # checks above still apply — this does not open a way around them.
+            icon = self._page("favicon.ico")
+            if icon is not None and icon.is_file():
+                try:
+                    if S_ISREG(icon.stat().st_mode):
+                        self.path = "/favicon.ico"
+                        return True
+                except OSError:
+                    pass
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
         elif path in ("/workers", "/decisions"):
             self.path = f"{path}.html"
         elif path.startswith("/decisions/"):
@@ -319,13 +434,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # A path of digits is a store decision, rendered below or a 404; any other is an authored page's JSON.
             source = self._page(f"decision-{m[1]}.json") if m and not m[1].isdigit() else None
             if not (m and m[1].isdigit()) and (source is None or not source.is_file()):
-                self.send_error(404, "no such decision")
+                self._refusal(404, "No such decision. Return to the decisions list or board.")
                 return False
             self.path = f"/decision-{m[1]}.html"
         elif decoded.startswith("/issues/"):
             m = ISSUE.fullmatch(decoded)
             if not m:
-                self.send_error(404, "no such issue")
+                self._refusal(404, "No such issue. Check the address or return to the board.")
                 return False
             self.path = "/" + fragment.issue_page_name(m[1], bool(m[2]))
         elif RENDERED.fullmatch(Path(self.translate_path(path)).name.casefold()):
@@ -347,10 +462,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     with contextlib.suppress(OSError):
                         unrecord_look(pages, prior)
         if name.startswith("issue-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
-            self.send_error(404, "no task names this issue")  # issue_page.write removes the page then
+            self._refusal(404, "No task names this issue. Return to the board or Workers.")
             return False
         if name.startswith("decision-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
-            self.send_error(404, "no such decision")  # decision_page.write_store removes the page then
+            self._refusal(404, "No such decision. Return to the decisions list or board.")
             return False
         return True
 
@@ -373,8 +488,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _send_html(self, body: bool):
         """An HTML page with the shared reload check; with the banner set, the last good page plus one line saying the
         render failed (never a blank 500). HEAD's length is GET's, and Last-Modified stays the file's own.
-        A page over MAX_PAGE is refused without reading; HEAD without a banner never reads (#333)."""
+        A page over MAX_PAGE is refused without reading; HEAD without a banner never reads (#333), except a rendered
+        page of a rooted server, which carries the workspace's name (#967) and so needs its bytes to count."""
         path = Path(self.translate_path(self.path))
+        root = getattr(self.server, "root", None)
+        label = workspace_label(root) if root is not None and RENDERED.fullmatch(path.name) else None
         try:
             stat = path.stat()
             if not S_ISREG(stat.st_mode):
@@ -382,7 +500,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if stat.st_size > MAX_PAGE:
                 return self.send_error(413, f"a page is at most {MAX_PAGE} bytes")
             stamp = stat.st_mtime
-            if not body and not self.banner:
+            if not body and not self.banner and label is None:  # a labelled page's length needs its bytes
                 with path.open("rb"):  # GET would read it: an unreadable page is GET's 404, not a 200
                     pass
                 # The injected HTTP date is fixed length; count the snippet without reading the file.
@@ -403,6 +521,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     f'font:14px/1.4 system-ui,sans-serif">not re-rendered: {escape(self.banner)}</p>').encode()
             page = re.sub(rb"<body[^>]*>", lambda m: m[0] + note, page, count=1) if b"<body" in page else note + page
         last_modified = self.date_time_string(stamp)
+        if label is not None:
+            from page_common import identify  # not at the top: it loads the markdown parser, which `--ensure` does not need
+            page = identify(page, label)
         page = page_reload.inject(page, last_modified)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -417,7 +538,49 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self._allowed():
-            self._send_html(True) if self._is_html() else super().do_GET()
+            match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
+            if match:
+                self._send_worker_session(int(match[1]), True)
+            else:
+                self._send_html(True) if self._is_html() else super().do_GET()
+
+    def _send_worker_session(self, segment_id: int, body: bool):
+        """Render a recorded engine attempt in memory; never publish transcript HTML into the pages directory."""
+        import session_logs
+        import workers_page
+        from workspace import worktrees_dir
+
+        root = getattr(self.server, "root", None)
+        if root is None:
+            return self.send_error(404, "no such worker session")
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        values = query.get("cursor", [])
+        cursor = None
+        if values:
+            if len(values) != 1 or not re.fullmatch(r"[0-9]{1,20},[0-9]{1,20},[0-9]{1,20},[a-f0-9]{64}", values[0]):
+                return self.send_error(400, "invalid transcript cursor")
+            device, inode, offset, digest = values[0].split(",")
+            cursor = session_logs.Cursor(int(device), int(inode), int(offset), digest)
+        try:
+            data = _page_data(root)
+            if data is None:
+                return self.send_error(404, "no such worker session")
+            trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
+            home = _worker_config_dir(root, data, segment_id)
+            page = workers_page.render_session(data, segment_id, trees, config_dir=home, cursor=cursor)
+        except Exception:
+            return self.send_error(500, "could not read worker session")
+        if page is None:
+            return self.send_error(404, "no such worker session")
+        from page_common import identify
+        payload = identify(page.encode("utf-8", errors="replace"), workspace_label(root))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if body:
+            self.wfile.write(payload)
 
     def _post_store_decision(self, form: dict[str, list[str]]):
         """Record a person's answer, reversal or re-route. A reversal or re-route is an intent on its own row, and
@@ -435,10 +598,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         root = getattr(self.server, "root", None)
         dec_id = form.get("decision_id", [""])[0].strip()
+        draft = form.get("answer", [""])[0]
         if root is None or not dec_id.isdigit():
-            return self.send_error(404, "no such decision")
+            return self._refusal(404, "No such decision. Your answer was not saved.", answer=draft)
         action = form.get("action", ["answer"])[0].strip()
-        text = form.get("answer", [""])[0].strip()
+        text = draft.strip()
         target_stage = form.get("target_stage", [""])[0].strip()
         now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
         try:  # #827: the workspace's own policy, overlay included, as the engine runs it
@@ -448,16 +612,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_error(503, f"workspace policy unreadable: {exc}")
 
         db = None
+        current = None
         try:
             db = store_access.migrated_store(root)
 
             def record():
                 """Append the person's row, with any comment for the engine to post, in one short write transaction."""
+                nonlocal current
                 dec = db.decision(int(dec_id))
                 if dec is None:
                     return (404, "no such decision")
                 # Rows are append-only: the form names the row it was rendered from, and a newer one refuses it.
-                if decision_escalation.latest(db.decisions(dec.issue_key)).get(decision_escalation.identity(dec)).id != dec.id:
+                latest = decision_escalation.latest(db.decisions(dec.issue_key)).get(decision_escalation.identity(dec))
+                current = decision_actions.state_of(latest)
+                if latest.id != dec.id:
                     return (409, "the decision changed since this page was rendered")
                 item = db.item(dec.issue_key)
                 data = db.resume(dec.issue_key) or {}
@@ -475,11 +643,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 with db.transaction():
                     error = record()
             except decision_actions.BadRequest as exc:
-                return self.send_error(400, str(exc))
+                known = {"an answer must contain text", "unknown decision action", "a reversal must contain text",
+                         "unknown target stage"}
+                message = str(exc) if str(exc) in known else "The selected stage cannot run a worker."
+                retry = None
+                if action in {"answer", "reverse", "reroute", "re-route"}:
+                    extra = (f'<label>Target stage <input type="text" name="target_stage" value="{escape(target_stage)}"></label>'
+                             if action in {"reroute", "re-route"} else "")
+                    hidden = {"decision_id": int(dec_id), "action": action}
+                    back = re.fullmatch(r"/decisions/(\d+)", form.get("back", [""])[0])
+                    if back:
+                        hidden["back"] = f"/decisions/{int(back[1])}"
+                    retry = ("/", hidden, extra)
+                return self._refusal(400, f"Your response was not saved: {message}.", answer=draft, state=current, retry=retry)
             except ValueError as exc:
-                return self.send_error(409, str(exc))
+                known = {"decision is already closed", "only an answered decision can be reversed",
+                         "a target stage is required", "a reversal must contain text", "an answer must contain text"}
+                message = str(exc) if str(exc) in known else "the decision cannot accept this action"
+                return self._refusal(409, f"Your response was not saved: {message}.", answer=draft, state=current)
             if error is not None:
-                return self.send_error(*error)
+                status, message = error
+                return self._refusal(status, f"Your response was not saved: {message}.", answer=draft, state=current)
         except (ServiceError, sqlite3.OperationalError, OperationalError) as exc:
             return self.send_error(503, f"store unavailable: {exc}")
         finally:
@@ -513,12 +697,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if size > MAX_BODY:
                 self.close_connection = True
                 return self.send_error(413, f"an answer is at most {MAX_BODY} bytes")
-            form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"))
+            form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"), keep_blank_values=True)
             return self._post_store_decision(form)
         m = ROUTE.fullmatch(route_path)
         source = self._page(f"decision-{m[1]}.json") if m else None
-        if source is None or not source.is_file():
-            return self.send_error(404, "no such decision")
         try:
             size = int(self.headers["Content-Length"])
         except (TypeError, ValueError):
@@ -526,16 +708,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if size > MAX_BODY:
             self.close_connection = True
             return self.send_error(413, f"an answer is at most {MAX_BODY} bytes")
-        form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"))
-        key, words = form.get("key", [""])[0], form.get("words", [""])[0].strip()
+        form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"), keep_blank_values=True)
+        draft = form.get("words", [""])[0]
+        key, words = form.get("key", [""])[0], draft.strip()
+        if source is None or not source.is_file():
+            return self._refusal(404, "No such decision. Your answer was not saved.", answer=draft, words_name="words")
         import decision_page
         with page_lock(Path(self.directory) / f"decision-{m[1]}.html"):
             try:
                 d = decision_page.parse(json.loads(source.read_text()))
-            except decision_page.BAD as e:
-                return self.send_error(409, f"the decision does not read: {e}")
+            except decision_page.BAD:
+                return self._refusal(409, "The decision cannot be read. Your answer was not saved; try reloading it later.",
+                                     answer=draft, words_name="words", link=f"/decisions/{m[1]}")
             if (key and key not in [o["key"] for o in d["options"]]) or not (key or words):
-                return self.send_error(400, "an answer is one of the options' keys, or words")
+                page = decision_page.render(d, datetime.now().astimezone().date().isoformat(), slug=m[1],
+                                            refusal="Your answer was not saved. Choose one of the options or write an answer.",
+                                            draft=draft, selected=key if key in [o["key"] for o in d["options"]] else "",
+                                            back="/decisions" if form.get("back") == ["/decisions"] else "")
+                return self._send_transient(400, page.encode("utf-8"))
             d["answer"] = {"key": key or None, "words": words, "at": datetime.now().astimezone().isoformat(timespec="seconds")}
             stat = source.stat()
             tmp = source.with_name(f".{source.name}.tmp")
@@ -558,7 +748,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_HEAD(self):
         if self._allowed():
-            self._send_html(False) if self._is_html() else super().do_HEAD()
+            match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
+            if match:
+                self._send_worker_session(int(match[1]), False)
+            else:
+                self._send_html(False) if self._is_html() else super().do_HEAD()
 
     def list_directory(self, path):
         # The stdlib listing, without dotfiles (the pid file is the server's) or rendered pages (routes, not files).
@@ -576,7 +770,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return f"{kind}; charset=utf-8" if kind.startswith("text/") else kind
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store" if WORKER_SESSION.fullmatch(urlsplit(self.path).path) else "no-cache")
         if page_reload.RELOAD_COOKIE in ((getattr(self, "headers", None) or {}).get("Cookie") or ""):
             # Consumed by the request that carries it, so it cannot mark another tab's navigation (Codex on #579).
             self.send_header("Set-Cookie", f"{page_reload.RELOAD_COOKIE.split('=')[0]}=; Max-Age=0; Path=/")

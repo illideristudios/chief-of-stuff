@@ -825,6 +825,23 @@ class ReconcileTest(unittest.TestCase):
         history.append(Segment("review", attempt=4, outcome="failed"))
         self.assertEqual(self.plan(item, history), [reconcile.Escalate(KEY, "retry limit reached for review")])
 
+    def test_blocked_reviews_spend_the_same_retry_budget_as_failed_reviews(self):
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
+        item = replace(Item(), stage="review")
+        first = Segment("review", attempt=1, outcome="blocked")
+        self.assertEqual(self.plan(item, [first]), [reconcile.Review(KEY, 2)])
+        for outcome in ("blocked", "failed"):
+            with self.subTest(outcome=outcome):
+                history = [first, Segment("review", attempt=2, outcome=outcome)]
+                self.assertEqual(self.plan(item, history), [reconcile.Escalate(KEY, "retry limit reached for review")])
+
+    def test_completed_review_resets_blocked_review_budget(self):
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
+        item = replace(Item(), stage="review")
+        history = [Segment("review", attempt=1, outcome="blocked"), Segment("review", attempt=2),
+                   Segment("review", attempt=3, outcome="blocked")]
+        self.assertEqual(self.plan(item, history), [reconcile.Review(KEY, 4)])
+
     def test_extra_holds_remain_for_completion_human_outcomes_and_other_stages(self):
         item = replace(Item(), human_review=True)
         for history in ([Segment("implement", outcome=outcome)]

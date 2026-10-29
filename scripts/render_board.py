@@ -23,8 +23,9 @@ from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history
                       nearest_deadline, queue_durations, task_end as _end)
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
-from task_forge import (current_tasks, drifts, effective_stage, epic_risk, forge_ends, held_names,  # noqa: E402
-                        hold_began, hold_causes, looping, tab_counts, task_changes, went_held, worker_names)
+from task_forge import (EXHAUSTED_CHIP, current_tasks, drifts, effective_stage, epic_risk, forge_ends,  # noqa: E402
+                        held_names, hold_began, hold_causes, looping, retry_exhaustion, tab_counts,
+                        task_changes, went_held, worker_names)
 from backlog_ref import store_label  # noqa: E402
 from tracker import TRAILING_NUMBER, Task, change_keys, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
@@ -34,10 +35,10 @@ import columns  # noqa: E402
 import decision_page  # noqa: E402
 from page_common import markdown_inline  # noqa: E402
 from decision_page import write_if_changed  # noqa: E402
-from fragment import FONTS, TAB_CSS, tab_bar, theme, issue_href  # noqa: E402
+from fragment import DECISIONS_ROUTE, FONTS, TAB_CSS, tab_bar, theme, issue_href  # noqa: E402
 import flow_chart  # noqa: E402
 import panels  # noqa: E402
-from task_forge import PageData, source_key  # noqa: E402
+from task_forge import PageData, live_worker_keys, source_key, source_workers, source_worker_tasks  # noqa: E402
 import tracker_log  # noqa: E402
 
 LONG_ITEM = 80
@@ -166,7 +167,8 @@ def merged_today(sources: board_sources.Sources, now: datetime) -> list[board_so
 
 def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None = None,
                   sources: board_sources.Sources = board_sources.EMPTY, now: datetime | None = None,
-                  held: dict[Task, str] | None = None, loops: set[Task] | frozenset[Task] = frozenset()) -> list[columns.Column]:
+                  held: dict[Task, str] | None = None, loops: set[Task] | frozenset[Task] = frozenset(),
+                  live_keys: frozenset[str] = frozenset(), live_tasks: set[Task] | frozenset[Task] = frozenset()) -> list[columns.Column]:
     """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
     a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
@@ -213,8 +215,18 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                  + ((columns.Mark("looping", "looping"),) if task in loops and not finished else ())
                  + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ()))
         owner = task.shown_owner
-        return columns.Card(task.label, task.kind, refs, owner,
-                            "needs input" if task.kind == "waiting" and task in held else task.state, marks,
+        live = task.issue in live_keys or task in live_tasks
+        if live and task.kind == "done":
+            marks += (columns.Mark("running", "running"),)
+        if live and task.kind != "done":
+            chip, kind = "running", "running"
+        elif held.get(task) == EXHAUSTED_CHIP:
+            chip, kind = EXHAUSTED_CHIP, "waiting"
+        elif task.kind == "waiting" and task in held:
+            chip, kind = "needs input", task.kind
+        else:
+            chip, kind = task.state, task.kind
+        return columns.Card(task.label, kind, refs, owner, chip, marks,
                             flag=columns.Mark("NEEDS INPUT", "hold") if task in held else None,
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
@@ -261,12 +273,15 @@ CARD_COLOURS = {**columns.PALETTE, "merged today": columns.PALETTE["done"],
                 "looping": ("var(--surface)", "var(--stage-fix)", "1px solid var(--stage-fix)")}
 
 
-def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: int, drift: int, orphaned: int) -> list[panels.Tile]:
+def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: int, drift: int, orphaned: int,
+               *, actual_running: int | None = None) -> list[panels.Tile]:
     """Six counts in the artboard's order and words, each linking to where its items are listed. ALL counts every
     task; NEEDS INPUT the held cards; RUNNING workers, or running tasks when no worker source is read."""
     approved = sum(c.state == "open" and c.approved for c in sources.changes.values())
-    return [panels.Tile("ALL", total, "flow", "all"), panels.Tile("NEEDS INPUT", held, "flow", "blocked", "/decisions"),
-            panels.Tile("RUNNING", len(sources.workers) or running, "flow", "running"),
+    if actual_running is None:
+        actual_running = len(source_workers(sources)) if sources.workers or "workers" in sources.fetched else running
+    return [panels.Tile("ALL", total, "flow", "all"), panels.Tile("NEEDS INPUT", held, "flow", "blocked", DECISIONS_ROUTE),
+            panels.Tile("RUNNING", actual_running, "flow", "running"),
             panels.Tile("APPROVED", approved, "flow", "approved"),
             panels.Tile("ORPHANED", orphaned, "flow", "orphaned"), panels.Tile("DRIFT", drift, "flow", "drift")]
 
@@ -288,16 +303,28 @@ def _tasks_from_store(db: PageData, cfg: Config, lanes: dict | None, kanban: Kan
         lane_obj = (lanes or {}).get(lane_name)
         stage_name = item.stage or (lane_obj.stages[0] if lane_obj and lane_obj.stages else "implement")
         item_segs = segs_by_key.get(item.issue_key, [])
-        open_seg = next((s for s in reversed(item_segs) if not s.ended_at), None)
+        open_seg = next((s for s in reversed(item_segs) if s.ended_at is None), None)
         open_decs = [d for d in store_decisions if d.issue_key == item.issue_key and state_of(d).status in ("open", "blocked")]
-        is_held = bool(item.human_review or open_decs or (kanban and kanban.holds(stage_name)))
-        state = "done" if item.forge_state == "closed" else ("waiting" if is_held else ("running 00:00" if open_seg else "open"))
+        exhausted = retry_exhaustion(db.resume(item.issue_key), item_segs, db.log(item.issue_key))
+        is_held = bool(item.human_review or open_decs or exhausted or (kanban and kanban.holds(stage_name)))
+        if item.forge_state == "closed":
+            state = "done"
+        elif exhausted:
+            state = f"waiting · {EXHAUSTED_CHIP}"
+        elif is_held:
+            state = "waiting"
+        elif open_seg:
+            state = "running 00:00"
+        else:
+            state = "open"
         owner = (getattr(open_seg, "runner", "") if open_seg else "") or (cfg.user if is_held else "unassigned")
         t = Task(item=item.title or item.issue_key, owner=owner, state=state, since=today.isoformat(),
                  due="", checklist="", name=item.title or item.issue_key, lane=lane_name,
                  stage=stage_name, issue=item.issue_key)
         tasks.append(t)
-        if open_decs and t.kind != "done":
+        if exhausted and t.kind != "done":
+            held[t] = EXHAUSTED_CHIP
+        elif open_decs and t.kind != "done":
             held[t] = "decision"
         elif is_held and t.kind != "done":
             held[t] = stage_name or cfg.user
@@ -358,7 +385,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     flow_moves = [m for day, _ in flow_log for m in moves[day]]
     earlier = list(rows.items())
     loops = looping(tasks, [m for ms in moves.values() for m in ms], lanes or {}, sources.home, earlier) | store_loops
-    build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops)
+    live_keys = frozenset(s.issue_key for s in db.segments() if s.ended_at is None) if db is not None else frozenset()
+    build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops, live_keys, source_worker_tasks(sources, tasks))
     inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols, inline=inline, linked_inline=lambda text: markdown_inline(text, links=False))}'
@@ -367,7 +395,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
     if db is not None:
-        navigation = store_tab_counts(db.items(), db.decisions(), db.segments())
+        navigation = store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
     else:
         navigation = tab_counts(tracker_text, cfg, now, lanes or {}, kanban, sources, pending_refs, looked,
                                 [*(look_log or []), *(stage_log or [])], slots, held=held, ends=ends, tracker_day=tracker_day)
@@ -408,7 +436,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
                          tuple(f"{k}: {why}" for k, why in sources.errors.items()))
     # NEEDS INPUT counts the held tasks, as the BUILD cards are flagged; ALL counts every task (#349).
     tiles = flow_tiles(len(tasks), len(held),
-                       sources, len(running), sum(drifts(t, kanban, sources, stages[t]) for t in tasks), len(unowned))
+                       sources, len(running), sum(drifts(t, kanban, sources, stages[t]) for t in tasks), len(unowned),
+                       actual_running=len(live_worker_keys(sources, db.segments())) if db is not None else None)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -492,7 +521,8 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
     except SettingsError as e:
         raise ConfigError(str(e)) from None
     ctx = decision_page.decision_context(root, tracker_day, now)
-    navigation = store_tab_counts(db.items(), db.decisions(), db.segments()) if db is not None else None
+    navigation = (store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
+                  if db is not None else None)
     pending = decision_page.write_all(out.parent, ctx, day, root, db=db, navigation=navigation)
     reach = (now - flow_chart.WINDOWS[-1][1]).date()
     looked = looked_before(out.parent)

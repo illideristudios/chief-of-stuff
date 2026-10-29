@@ -49,7 +49,7 @@ import board_sources
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
 from clock import leading
 from decision_actions import DecisionState, OPEN_STATES, addresses, state_of, states, tab_counts as store_tab_counts
-from fragment import FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
+from fragment import DECISIONS_ANCHOR, FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
 from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
 from module_graph import section as _graph
@@ -339,7 +339,8 @@ def _answer_form(slug: str, cls: str, opts: str, back: str = "") -> str:
 
 
 def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root: Path | None = None,
-           ctx: Context | None = None, slug: str = "", mtime: float | None = None, pending: int = 0) -> str:
+           ctx: Context | None = None, slug: str = "", mtime: float | None = None, pending: int = 0,
+           refusal: str = "", draft: str = "", selected: str = "", back: str = "") -> str:
     """The page. With a context, what the JSON leaves out is read from it: when it was asked, the answer and the
     chip, and each reference's status."""
     link = Linker(forge, root)
@@ -365,18 +366,19 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     opts = []
     for o in d["options"]:
         tag = '<span class="tag">recommended</span>' if o["key"] == d["recommended"] else ""
-        on = " checked" if page and page.get("key") == o["key"] else ""
+        on = " checked" if (selected == o["key"] if refusal else page and page.get("key") == o["key"]) else ""
         opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value="{escape(o["key"])}"{on}> {escape(o["key"])}</span>'
                     f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </label>')
     # The write-in is the next option: same look, key "" (a words-only save), the next letter after the real ones.
     wi_key = chr(ord("A") + len(d["options"]))
-    on = " checked" if page and page.get("key") == "" else ""
+    on = " checked" if (not selected if refusal else page and page.get("key") == "") else ""
+    draft_value = f' value="{escape(draft)}"' if refusal else ""
     opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value=""{on}> {wi_key}</span>'
-                f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer">'
+                f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer"{draft_value}>'
                 f'<button type="submit">save</button></span>\n      </label>')
     fmt = (lambda t: ctx.when(t)) if ctx else (lambda t: f"{t:%H:%M}")
     done = f'    <div class="card answered">{_saved_html(d, fmt)}</div>\n' if page else ""
-    right.append(_section("Options", done + "    " + _answer_form(slug, "options", "\n" + "\n".join(opts)) + "\n    </form>"))
+    right.append(_section("Options", done + "    " + _answer_form(slug, "options", "\n" + "\n".join(opts), back) + "\n    </form>"))
     right.append(_section("Recommendation", f'    <div class="card prose">{markdown_blocks(d["why"], link.resolve)}</div>'))
     right.append(_section("If you don't answer", f'    <div class="card default prose">{markdown_blocks(d["default"], link.resolve)}</div>'))
     if d.get("references"):
@@ -411,9 +413,10 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     change = next((c for r in d.get("references") or [] for ref in refs_in(str(r.get("value", "")))
                    if ctx and (c := ctx.change(ref))), None)
     where += _graph(change, ctx and ctx.graph, ctx and ctx.pages, root)
+    alert = f'<div class="card ask" role="alert">{escape(refusal)}</div>' if refusal else ""
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True)}"
+            f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True)}{alert}"
             f'  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(d['headline'])}</h1>\n    </div>\n"
             f'    <span class="chip{" answered" if answered else ""}">{chip}</span>\n  </header>\n\n'
@@ -936,13 +939,14 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
     meta.append('<a href="/">board</a>')
     words = f"{escape(ctx.user)}'s words" if ctx.user else "words"
     none = '      <div class="row"><span class="none">none</span></div>'
-    body = (f'  <section>\n    <h2 class="pend">PENDING · {total_pending}</h2>\n    <div class="list">\n'
+    body = (f'  <section aria-labelledby="{DECISIONS_ANCHOR}">\n    <h2 id="{DECISIONS_ANCHOR}" class="pend">PENDING · {total_pending}</h2>\n    <div class="list">\n'
             '      <div class="row pend head cap"><span>asked</span><span>decision</span><span>options</span><span>holding</span><span>if unanswered</span></div>\n'
             + ("\n".join(rows) or none) + "\n    </div>\n  </section>\n"
             f'  <section>\n    <h2>COMPLETED · {len(done)}</h2>\n    <div class="list fin">\n'
             f'      <div class="row done head cap"><span>answered</span><span>decision</span><span>answer</span><span>{words}</span><span>since</span></div>\n'
             + ("\n".join(done) or none) + "\n    </div>\n  </section>\n")
-    nav = navigation if navigation is not None else (store_tab_counts(db.items(), db.decisions(), db.segments()) if db is not None else {})
+    nav = navigation if navigation is not None else (
+        store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes) if db is not None else {})
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             f"<title>Decisions · {escape(_day(day))}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decisions\">\n{tab_bar('Decisions', total_pending, **nav)}"
