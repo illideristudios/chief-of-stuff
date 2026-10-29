@@ -1,5 +1,7 @@
 # Worker guard and engine channel
 
+These are worker safeguards for architecture section 13, with no owner approval stage. Merges, protected pushes and stage writes stay with the engine's automated gate. The coordinator's former action list and stage yes-gates are retired.
+
 The engine can load this directory with `--plugin-dir`. `scripts.guard_binding` exposes `Binding` / `Binding.from_env`, plus `guard_plugin_dir` and `guard_env` that `worker.launch` uses when this directory is present in the release.
 
 The launch environment is the only record identity. Hook input and MCP arguments cannot select a different issue, stage, attempt or session. This binding is a guard rail within the worker process, not an isolation boundary against a process that changes its own environment or database files. The engine remains the authority and independently checks state before merging.

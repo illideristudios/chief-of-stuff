@@ -1,47 +1,32 @@
 ---
 name: review-pipeline
-description: Use before moving a task's stage, sending its pull request to the reviewer, handling a Reviewer pass report or an over budget line, running the kanban command, checking review state, or merging.
+description: Use before advancing a task, reviewing findings, checking readiness or merging.
 ---
 
 ### Pipeline
 
-A task with a `lane` moves through that lane's stages (see Tracker). In one-shot mode, represent review and follow-up fix work as scoped Tasks rows and launch fresh one-shot workers; do not send assignments to persistent reviewer or implementer sessions. Include the PR, findings and recorded dispositions in each task; an automatic fix's task names its Log line instead of a disposition. Review findings still go to the user for disposition, except an automatic fix under Triage; configured lane gates and human-review holds still apply. `[workflow] delivery` selects `pull-request` (the backward-compatible default) or `branch`; `[workflow] merge_owner` selects `user` (default), `worker` or `approval` for pull requests. When `[workflow] reviewer_session` names a session, send pull requests to it for review and bring its findings to the user for triage. With no configured reviewer, ask the user how to review a pull request before advancing its review stage. A branch delivery reports its branch and head sha; do not apply pull-request review steps to it.
-
-### Kanban
-
-When the Settings TOML has `[kanban]`, its stage map projects the tracker's precise stage onto the visible board label configured in `stages`. The configured `human_review_label` is an additional hold on that stage, never a replacement for it. The configured hold stages wait for the user's decision; a worker's report alone cannot clear the hold. After recording a permitted stage transition in the tracker, sync its one issue with `chief-of-stuff kanban --root <workspace> --date <today> --issue <issue> --from-stage "<previous stage>" --commit`. For a newly filed issue with no board stage, preview first and use `--initialize` in place of `--from-stage`. The updater works with GitLab labels, GitHub issue labels, or a configured GitHub Project Status field and issue hold label. It preserves unrelated labels. If it reports a manual board move, missing label or API error, leave the tracker stage as recorded, report the drift and reconcile it with the user; do not force the update. An audit reports drift but never moves cards. Note a `workflow` row has no issue and takes no sync.
-
-### Advancing
-
-- Advancing on a covering yes: move `stage` with `chief-of-stuff log --stage` (see Tracker) and write a Decisions row citing the yes, except for a Triage pass that leaves nothing for the user, whose Log line is the record. Never advance into a human-only action, a file another live session owns, an orphaned task, or a stage the yes did not reach; stop and ask instead.
-
-### Review
-
-- At `pr`, only for pull-request delivery: the owning session reports the pull request's URL and head sha. Write the URL in the item and set `stage` to `review`. If `[workflow] reviewer_session` names a session, send it `review PR <url>` with a second line, `Report by: chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to coordinator --from <reviewer session> --type review --task "<task>"`, with `<workspace root>` written out as an absolute path, so its fallback report lands in the workspace mailbox and not in the repo it reviews (SendMessage; when it is not listed, use `chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to <reviewer session> --type review --task <task>`). Its report comes back headed `Reviewer pass:`. Without a configured reviewer, ask the user how to review it.
-
-### Verify
-
-- At `verify`: once every fix has reported, send the configured reviewer the R-numbers the user marked `fix`, quote the Decisions row that marked them, add the R-numbers of the automatic fixes with their Log line quoted, and add the same `Report by:` line. The user's `fix` marks cover this and the automatic fixes need no yes; do not ask again. The reviewer runs one full pass and one verify pass; a third needs the user's word.
-
-### Review threads
-
-- The user's review comments on a pull request are work. Whenever you check review state, run `chief-of-stuff review-threads --root .`. It lists the unresolved threads `[workflow] approver` wrote in: `needs work` while the user has the last word, `awaiting you` once somebody answered. Each `needs work` thread is the user's own disposition, so it needs no triage ask: append its link to that pull request's task item as a fix, set `stage` to `fix`, and send it to the owning worker; then `verify`. Leave an `awaiting you` thread to the user. Never resolve or answer a thread yourself; the worker answers with its commit, and resolving is the user's.
-
-### Merge
-
-- With no `fix` items left and no ask open, the task sits at `merge`. With `worker`, the owning worker merges a `ready` request; `chief-of-stuff merge-approved --root .` lists them with their merge-ready lines. Tell the owning worker to merge it, quoting the line. After a merge, run the main-branch suite before the task is done. A human-only line that lists merging outranks the setting.
-
-### Budgets
-
-- Budgets: `audit_tasks.py` prints `over budget: <task> running <time> (<size> <budget>)` from the settings file's `[budgets]`. Poll that task's session and tell the user; never stop or kill it. To poll it, Read ../coordinator-sessions/SKILL.md next to this file first.
+Advance stages when their work and automated checks finish. No lane gate, plan approval, interactive launch yes or owner merge approval is required. Keep Tasks and the Log current using `chief-of-stuff log --stage`. Record an automatic action as the coordinator's action, never as invented owner words.
 
 ### Triage
 
-On a `Reviewer pass:` report, set `stage` to `triage` and ask the user once: list each finding left for the user by its R-number, each with its axis, severity, what it is, and the reviewer's suggestion, and ask for every disposition in one reply: `fix`, `file`, `keep` or `discard`. The reviewer's findings comment on the pull request is the page (see Asks), so write no second one. A finding is an automatic fix only when the reviewer suggests `fix`, its evidence names one concrete change (a defect or a test gap, with no design choice to make), its severity is Important or Minor, it is not on the security axis and does not concern security in substance (a path check, authentication, input handling, secrets, permissions), whatever axis the reviewer gave it, and it is not about behaviour the user specified in a Decisions row, in chat, in a spec or in an acceptance item. Ask about every other finding, including one that fits neither group: when in doubt, ask. A Critical finding, a security-axis finding, a design or architecture call, a change to a spec or an acceptance item, a finding about behaviour the user specified, and a finding the reviewer suggests `keep`, `file` or `discard` are always asked. A finding whose axis label names security among several (for example correctness/security) is always asked. Before you send an automatic fix, read the task row, the Decisions and the Log for anything about the finding's subject; a finding that touches anything found there is asked, not sent. Send each automatic fix at once, without asking, to the owning session with `Plan: enter plan mode (EnterPlanMode) for this task before anything else; write nothing until the user approves the plan.`, as every assignment is, and leave it out of the ask. In one-shot mode an automatic fix is a scoped Tasks row launched as a one-shot worker (see Dispatch) with no `Plan:` line; the Plan line applies only to a session handed the task. Record an automatic fix in the Log, never in Decisions: one Log line naming its R-numbers and saying it was an automatic fix, not the user's word, and list those R-numbers in one line in your next status. Keep `stage` at `triage` while any ask is open, and move it to `fix` when nothing remains for the user. When no finding remains for the user, make no ask. A Triage pass that leaves nothing for the user passes the `triage` gate by this rule, and its Log line is the record. The ask is the reply's last line and carries that link, or the pull request's when the pass names no comment: `Fix, file, keep or discard for R1–R3 (https://github.com/o/app/pull/7)?` One verify pass covers the automatic fixes and the user's `fix` items together, once every fix has reported. An automatic fix a verify pass reports unresolved is put to the user, and a verify pass's own new findings are never automatic. The task does not reach `merge` while an ask is open. A verify pass puts only what is still open to the user: a `fix` finding it reports resolved needs no disposition. A verify pass with nothing open moves the task to `merge`.
+Use the policy review panel. A configured reviewer session receives the request URL and head sha; otherwise launch reviewers under the policy without asking the owner how to review. Reviewers report findings and never fix. Read `review-report.md` for the report shape. In one-shot mode use scoped review and fix Tasks rows and fresh workers; include the request, findings and dispositions.
 
-### Dispositions
+Burn findings down to none. Send concrete fixes to the owning worker immediately, including critical and security defects; no owner triage yes is needed. The architect disposes of findings when policy requires it. Architectural decisions go to the owner and the architect; when unsure whether a choice is architectural, ask the architect. Answer scheduling, priority and dispatch as coordinator; other non-architectural choices go to the engine's independent read-only decision trio. A split trio or exhausted trio retry waits on the owner. Use a sensible cheap-to-undo default on separable work and log the assumption.
 
-- Record the reply as a Decisions row quoting it.
-- `fix` (the user's disposition): send those findings to the owning session with `Plan: enter plan mode (EnterPlanMode) for this task before anything else; write nothing until the user approves the plan.`; the task goes to `fix`, then `verify` (see Pipeline).
-- `file`: file the issue (see Tracker). When the Settings TOML names `[workflow] architecture_reviewer`, send an architecture-axis finding to that session too. If it names none, the filed issue remains in the backlog for ordinary assignment.
-- `keep` and `discard`: the Decisions row is the record.
+After every fix round review the new head. Three fix rounds ending with findings still open park the issue, carrying the findings, research, options and a recommendation. Two worker failures across the issue also park it; the first retry goes to the next agent in the rotation. A relaunch after a stall counts as a failure.
+
+### Kanban
+
+Sync stage changes through `chief-of-stuff kanban --root <workspace> --date <today> --issue <issue> --from-stage "<previous stage>" --commit`. For a new issue, preview and use `--initialize`. Configured legacy hold stages do not create owner waits. An explicit problem hold still preserves its evidence; resolve the problem using Autonomy and continue independent work. Reconcile manual board changes without overwriting them. An audit reports drift and never moves cards.
+
+### Merge
+
+The engine owns merges, protected pushes and stage writes. Workers never bypass that guard. Run `chief-of-stuff merge-ready --root .` for head pipeline and unresolved-thread evidence; only its `ready` verdict permits readiness language, quoting its pipeline id and sha. `merge-approved` is a compatibility listing of the same evidence, with no owner approval requirement. Run the engine to execute its merge gate: it merges when review matches the current head, CI is green, and the architect approved that head where policy requires it. Legacy `merge_owner = "user"` and `"approval"` never restore owner waits. Verify main and its suite before marking code work done.
+
+### Review threads
+
+Run `chief-of-stuff review-threads --root .` when checking review state. Treat unresolved concrete findings as fix work, send them to the worker, and verify the new head. Replies and resolution follow the forge's rules; a coordinator-imposed owner yes is never added between fixes and merge.
+
+### Budgets
+
+Poll an over-budget task to learn its state and preserve its work. Poll that task's session and tell the owner; never stop or kill it just for exceeding a time budget. Recover a stall through the next worker and count the failure; park only under Autonomy. Report progress and problems while continuing other work. To poll it, Read ../coordinator-sessions/SKILL.md next to this file first.

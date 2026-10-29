@@ -61,11 +61,10 @@ class ArgvTest(unittest.TestCase):
         self.assertIn("--agent", argv)
         self.assertIn("implementer", argv)
 
-    def test_a_dispatched_session_starts_in_plan_mode(self):
+    def test_a_dispatched_session_starts_without_a_plan_gate(self):
         """The plan gate is enforced at launch, not asked for in the assignment text."""
         argv = ss.argv(ss.DEFAULT_LAUNCHER, agent_type="implementer", cwd="/tmp/wt", title="t")
-        self.assertIn("--permission-mode", argv)
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertNotIn("--permission-mode", argv)
 
     def test_substitution_is_per_token_so_a_space_cannot_add_an_argument(self):
         argv = ss.argv(["run", "--title={title}", "--", "claude"], agent_type="x", cwd="/tmp/a b", title="two words")
@@ -281,7 +280,7 @@ class BootstrapTest(unittest.TestCase):
         self.assertNotIn("--agent", argv)
         self.assertNotIn("", argv)
         self.assertIn("claude", argv)
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertNotIn("--permission-mode", argv)
 
     def test_an_agent_type_is_passed_when_the_block_names_one(self):
         argv = ss.argv(ss.DEFAULT_LAUNCHER, agent_type="fixer", cwd="/tmp/wt", title="t")
@@ -676,9 +675,9 @@ class AgyTest(unittest.TestCase):
         return ss.ghostty_script(cwd="/tmp/wt", agent_type="implementer", claude=self.AGY, title="implementer-GFlash38H-01",
                                  runtime="agy", model="gemini-3.8-flash-high", workspace="/tmp/ws", **kw)
 
-    def test_the_tab_runs_agy_in_plan_mode_on_the_named_model(self):
+    def test_the_tab_runs_agy_with_write_access_on_the_named_model(self):
         self.assertRegex(self.script(), r"session_exec.py --registry .* --runtime agy .* -- /opt/homebrew/bin/agy "
-                                        r"--model gemini-3.8-flash-high --mode plan -i ")
+                                        r"--model gemini-3.8-flash-high --mode accept-edits -i ")
 
     def test_it_carries_no_claude_flags(self):
         s = self.script()
@@ -737,7 +736,7 @@ class ClaudeModelTest(unittest.TestCase):
     def test_model_and_effort_reach_the_claude_command(self):
         self.assertRegex(self.script(model="opus", effort="medium"),
                          r"/opt/homebrew/bin/claude --plugin-dir \S+ --agent implementer --name implementer-COpusM-01 "
-                         r"--model opus --effort medium --permission-mode plan ")
+                         r"--model opus --effort medium ")
 
     def test_without_them_the_command_is_unchanged(self):
         s = self.script()
