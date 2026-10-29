@@ -20,7 +20,7 @@ import backlog
 import board_sources
 import decision_page
 import module_graph
-from task_forge import PageData, lookup_keys
+from task_forge import PageData, change_issue_keys, lookup_keys, tracker_issue_tasks
 from fragment import external_url, href, issue_href, issue_page_name, tab_bar
 from decision_page import HEAD
 from page_common import drop_html_comments, markdown_blocks
@@ -215,7 +215,7 @@ def _change_for(keys: tuple[str, ...], sources: board_sources.Sources) -> board_
     """The change naming the issue: an open one first, then a merged one."""
     order = {"open": 0, "merged": 1}
     wanted = set(keys)
-    return min((c for c in sources.changes.values() if wanted & set(c.issues)),
+    return min((c for c in sources.changes.values() if wanted & change_issue_keys(c)),
                key=lambda c: order.get(c.state, 2), default=None)
 
 
@@ -277,9 +277,10 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     full_key = identity if "#" in identity else None
     numeric = int(identity.rpartition("#")[2]) if full_key else int(identity)
     ref = f"#{numeric}"
-    mine = [t for _, text in trackers for t in parse_tracker(text).tasks
-            if (t.issue == full_key if full_key else
-                (m := TRAILING_NUMBER.search(t.issue)) and int(m[1]) == numeric)]
+    mine = tracker_issue_tasks(trackers, numeric, sources.home, full_key)
+    if mine is None and db is None:
+        return None
+    mine = mine or []
     store_item = None
     if db is not None:
         matches = [i for i in db.items() if (i.issue_key == full_key if full_key else
@@ -368,12 +369,16 @@ def write(root: Path, pages_dir: Path, number: int | str, *, db: PageData | None
     numeric = int(identity.rpartition("#")[2]) if full_key else int(identity)
     if full_key:
         raw_refs: tuple[str, ...] = (full_key,)
-    elif db is not None and len(matches := [i for i in db.items() if (m := TRAILING_NUMBER.search(i.issue_key)) and int(m[1]) == numeric]) == 1:
-        raw_refs = (matches[0].issue_key,)
     else:
-        mine = [t.issue for _, text in trackers for t in parse_tracker(text).tasks
-                if (m := TRAILING_NUMBER.search(t.issue)) and int(m[1]) == numeric and t.issue.strip()]
-        raw_refs = tuple(mine) or (f"#{numeric}",)
+        matches = ([i for i in db.items() if (m := TRAILING_NUMBER.search(i.issue_key)) and int(m[1]) == numeric]
+                   if db is not None else [])
+        if len(matches) == 1:
+            raw_refs = (matches[0].issue_key,)
+        elif matches:
+            raw_refs = ()
+        else:
+            mine = tracker_issue_tasks(trackers, numeric, sources.home)
+            raw_refs = tuple(t.issue for t in mine) if mine else ()
     change = _change_for(lookup_keys(raw_refs, sources.home), sources)
     # ponytail: one small forge query per render (about once a minute while the page is open); cache by head if it bites.
     found, error = notes(change, cfg.backlog) if change and cfg.backlog else ([], "")

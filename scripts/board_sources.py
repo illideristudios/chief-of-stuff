@@ -368,7 +368,7 @@ def _gl_change(m: dict, approver: str, home: backlog.Backlog | None = None) -> C
         issues = tuple(dict.fromkeys(
             backlog.IssueRef(path, int(number), host).label(home)
             if path and "://" not in path and number.isdecimal() else ref
-            for ref in issues for path, _, number in (ref.rpartition("#"),)
+            for ref in issues if "://" not in ref for path, _, number in (ref.rpartition("#"),)
         ))
     branch = m.get("sourceBranch") or ""
     src_project = m.get("sourceProject") if isinstance(m.get("sourceProject"), dict) else None

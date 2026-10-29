@@ -31,13 +31,15 @@ def source_key(key: str, home) -> str:
         if namespace.startswith("github:"):
             return issue_key(f"https://github.com/{namespace[len('github:'):]}/issues/{number}", home)
         if namespace.startswith("gitlab:"):
-            host, _, project = namespace[len("gitlab:"):].partition("/")
-            return issue_key(f"https://{host}/{project}/-/issues/{number}", home)
-        if namespace and ":" not in namespace and namespace.count("/") >= 2:
-            if home is not None and hasattr(home, "host") and hasattr(home, "project"):
-                host = home.host.split("://", 1)[-1].split("/", 1)[0]
-                return f"#{number}" if namespace == home.project else f"{host}/{namespace}#{number}"
-            return key.strip()
+            return board_sources.store_label(key, home)
+        if namespace and ":" not in namespace and "/" in namespace and isinstance(home, board_sources.backlog.Backlog):
+            host = board_sources.backlog.home_of(home)[0]
+            # A host-qualified cache key already contains its host; a project shorthand does not.
+            if namespace.startswith(host + "/"):
+                return board_sources.backlog.IssueRef(namespace[len(host) + 1:], int(number), host).label(home)
+            return board_sources.backlog.IssueRef(namespace, int(number), host).label(home)
+    if "://" in key and board_sources.backlog.issue_ref(key, home, any_host=True) is None:
+        return key.strip()
     return issue_key(key, home)
 
 
@@ -48,10 +50,27 @@ def lookup_keys(refs: Iterable[str], home) -> tuple[str, ...]:
         text = raw.strip()
         if not text or text == tracker.WORKFLOW:
             continue
-        for candidate in (text, source_key(text, home)):
+        # URLs are converted to cache keys; a raw foreign URL in an old change cache must not match.
+        candidates = (source_key(text, home),) if "://" in text else (text, source_key(text, home))
+        for candidate in candidates:
             if candidate and candidate not in out:
                 out.append(candidate)
     return tuple(out)
+
+
+def tracker_issue_tasks(trackers, number: int, home, full_key: str | None = None):
+    """Resolve a numeric route using the latest snapshot naming it; reject multiple identities there."""
+    snapshots = [[t for t in tracker.parse_tracker(text).tasks if tracker.issue_number(t.issue) == number]
+                 for _, text in trackers]
+    if full_key:
+        selected = source_key(full_key, home)
+    else:
+        latest = next((rows for rows in reversed(snapshots) if rows), [])
+        identities = {source_key(t.issue, home) for t in latest}
+        if len(identities) > 1:
+            return None
+        selected = next(iter(identities), None)
+    return [t for rows in snapshots for t in rows if source_key(t.issue, home) == selected] if selected else []
 
 
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
@@ -110,10 +129,15 @@ def live_worker_keys(sources: board_sources.Sources, segments) -> set[str | tupl
     return names
 
 
+def change_issue_keys(change: board_sources.Change) -> set[str]:
+    """Only normalized closing references identify issues in a local change cache."""
+    return {ref for ref in change.issues if "://" not in ref}
+
+
 def task_changes(task: Task, sources: board_sources.Sources) -> tuple[board_sources.Change, ...]:
     """The changes naming the task's issue: the open ones, or else the merged ones."""
     keys = set(lookup_keys((task.issue,), sources.home))
-    named = [c for c in sources.changes.values() if keys and (keys & set(c.issues)) and c.state != "closed"]
+    named = [c for c in sources.changes.values() if keys and (keys & change_issue_keys(c)) and c.state != "closed"]
     return tuple(c for c in named if c.state == "open") or tuple(named)
 
 
