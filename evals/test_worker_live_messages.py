@@ -356,6 +356,38 @@ class LiveMessagesTest(unittest.TestCase):
         self.assertIsNone(process_status.identity(child, str(self.root)))
         self.assertIsNone(unrelated.poll())
 
+    def test_cancel_after_leader_exit_while_intake_lock_is_held_stops_its_group(self):
+        self.host.write_text('''
+import os, subprocess, sys, time
+from pathlib import Path
+root = Path(__file__).parent
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", str(root)])
+(root / "child.pid").write_text(str(child.pid))
+sys.stdin.readline()
+while not (root / "exit").exists():
+    time.sleep(0.01)
+os._exit(23)
+''')
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        self.addCleanup(lambda: unrelated.wait(timeout=5))
+        self.addCleanup(lambda: unrelated.kill() if unrelated.poll() is None else None)
+        runner = self.start()
+        child = int(wait_for(lambda: (self.root / "child.pid").read_text() if (self.root / "child.pid").exists() else ""))
+        self.addCleanup(self.kill_pid, child)
+        with claude_adapter.mailbox_lock(self.run_dir):
+            (self.root / "exit").touch()
+            def leader_exited():
+                result = subprocess.run(["ps", "-o", "stat=", "-p", str(self.host_pid)],
+                                        capture_output=True, text=True)
+                return not result.stdout.strip() or result.stdout.strip().startswith("Z")
+            wait_for(leader_exited)
+            time.sleep(0.3)  # let the runner observe exit and block closing intake
+            self.assertIsNone(runner.poll())
+            claude_adapter.cancel(runner)
+            self.assertIsNone(process_status.identity(child, str(self.root)), "host child survived cancellation")
+            self.assertIsNone(unrelated.poll())
+            self.assertFalse((self.run_dir / "exit.json").exists())
+
     def test_failed_write_stops_host_before_waiting_for_mailbox_lock(self):
         self.host.write_text(STALL_HOST)
         runner = self.start()

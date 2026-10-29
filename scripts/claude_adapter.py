@@ -249,18 +249,24 @@ def _send(process: subprocess.Popen, content: str, session_id: str, uuid_: str |
 
 def _stop_after_write_failure(process: subprocess.Popen) -> None:
     """Kill the host's owned group before reaping its leader, keeping its group id reserved."""
+    # A cancellation handler must not interrupt waitpid between reaping the leader
+    # and Popen recording returncode, then signal a group ID that can be reused.
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     try:
-        process.stdin.close()
-    except OSError:
-        pass
-    if process.returncode is None:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+            process.stdin.close()
+        except OSError:
             pass
-        # Do not publish exit evidence if signalling or reaping fails. In particular, do not
-        # mistake macOS EPERM for proof that a group with descendants has stopped.
-        process.wait(timeout=1)
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Do not publish exit evidence if signalling or reaping fails. In particular, do not
+            # mistake macOS EPERM for proof that a group with descendants has stopped.
+            process.wait(timeout=1)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 class _RunnerCancelled(BaseException):
@@ -284,7 +290,9 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
         raise InputWriteError("assignment stdin write failed") from exc
     (box / "open").touch()
     while True:
-        exited = process.poll() is not None
+        # Observe exit without reaping: until intake is closed, cancellation must still
+        # be able to signal this group without risking a recycled process-group ID.
+        exited = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
         with stream.open("rb") as handle:
             handle.seek(offset)
             chunk = handle.read()
@@ -376,6 +384,9 @@ def _messaging_worker(run_dir: Path, prepared: dict) -> None:
                                                  "session_id": prepared["session_id"]})
                 try:
                     final = _serve(run_dir, process, prepared["session_id"], prepared["stdin_prompt"])
+                    # Intake is closed and serving has completed. From here normal
+                    # completion wins over cancellation, before the leader is reaped.
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
                     code = process.wait()
                 except InputWriteError:
                     code = 1  # never report success for a failed or partially written input line

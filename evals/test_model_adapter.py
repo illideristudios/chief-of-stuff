@@ -160,6 +160,21 @@ class StartTest(unittest.TestCase):
 
 
 class CancelTest(unittest.TestCase):
+    def test_cancellation_waits_until_killed_leader_is_recorded_as_reaped(self):
+        process = mock.Mock(pid=4242, returncode=None)
+        seen = []
+        previous = signal.signal(signal.SIGTERM, lambda *_: seen.append(process.returncode))
+        def reap(*, timeout):
+            os.kill(os.getpid(), signal.SIGTERM)
+            process.returncode = -signal.SIGKILL
+        process.wait.side_effect = reap
+        try:
+            with mock.patch.object(claude_adapter.os, "killpg"):
+                claude_adapter._stop_after_write_failure(process)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(seen, [-signal.SIGKILL])
+
     def test_write_failure_does_not_claim_cleanup_if_group_signal_is_denied(self):
         process = mock.Mock(pid=4242, returncode=None)
         with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError):
