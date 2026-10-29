@@ -89,32 +89,34 @@ The engine runs the review panel.
 
 A review is bound to the head it reviewed: the segment records the reviewed commit, and a merge happens only when that commit is the change's current head.
 
-The default is motion (owner, 2026-10-29, T3 design §5). The review panel, the fix loop and the merge gate stay, because they are automated checks and not stops. The merge gate merges with no wait on the owner once the review matches the change's current head and main's CI is green, and, where the policy requires the architect's approval, once the architect has given it for that head. The engine executes the merge (`engine_merge.py`); this is the T3 design's "the coordinator merges". A change surfaces for human review only on a contradiction (two current decisions, or a decision and the code) or after three fix rounds with findings still open. Human review stays possible at any time.
+The default is motion (owner, 2026-10-29, T3 design §5). The review panel, the fix loop and the merge gate stay, because they are automated checks and not stops. The merge gate merges with no wait on the owner once the review matches the change's current head and main's CI is green, and, where the policy requires the architect's approval, once the architect has given it for that head. The engine executes the merge (`engine_merge.py`); this is the T3 design's "the coordinator merges". A change surfaces for human review only on a contradiction (two current decisions, or a decision and the code), on a person's change request on the forge, or after three fix rounds with findings still open. Human review stays possible at any time.
 
 ```
 M := the merge gate merges the change      Rv := the review matches the change's current head      Ci := main's CI is green
 Rq := the policy requires the architect's approval      Ap := the architect approved the current head
-X := a contradiction exists      Fx := three fix rounds ended with findings still open
+X := a contradiction exists      Fx := three fix rounds ended with findings still open      Fc := a person requested changes on the forge
 Hr := the change surfaces for human review      Pk := the issue is parked (section 15)      Wo := the merge waits on the owner
 
-1.  Rv ∧ Ci ∧ (Rq → Ap) ∧ ¬X ∧ ¬Fx → M      [owner, 2026-10-29: "the default should be to try to make motion"]
-2.  X ∨ Fx → Hr                              [owner, 2026-10-29]
+1.  Rv ∧ Ci ∧ (Rq → Ap) ∧ ¬X ∧ ¬Fx ∧ ¬Fc → M      [owner, 2026-10-29: "the default should be to try to make motion"]
+2.  X ∨ Fx ∨ Fc → Hr                              [owner, 2026-10-29: "Human review surfaces when there are contradictions or issues or problems"]
 3.  Fx → Pk                                  [call, T3 design §5: the three-round ping becomes a park]
 4.  ¬Wo                                      [owner, 2026-10-29: merges waiting on the owner are removed]
 ∴   a merge waits on the architect only where the policy requires it, never on the owner, and the owner sees a change only when something is wrong
 ```
 
-The gate is the same for every workflow. "The review" in the rule above is the engine's review panel, so a workflow with no review stage still has its change reviewed before it merges, and a forge approval or change request from a person is human review, which stays possible but neither stands in for the panel nor holds the merge (rule 4). The fix-round limit is policy data like the other retry limits. Where the code disagrees, the rows are in `compliance.md`: a workflow with no review stage merges on the configured forge approver's approval alone (C37), a change request from that approver holds the merge (C38), code left from the removed hard stops is still threaded through the planner and the settings (C39), and the three fix rounds are a constant in the planner, not the policy's `retry_limit` (C40).
+The gate is the same for every workflow. "The review" in the rule above is the engine's review panel, so a workflow with no review stage still has its change reviewed before it merges. A person's forge approval is human review and does not stand in for the panel. A person's forge change request is an issue raised on the change, so it holds the merge and the change surfaces for human review (owner, 2026-10-29: "Human review surfaces when there are contradictions or issues or problems"). That hold fires only on a problem and never by default, so it is not one of the waits section 15 removes. The fix-round limit is policy data like the other retry limits. Where the code disagrees, the rows are in `compliance.md`: a workflow with no review stage merges on the configured forge approver's approval alone (C37), code left from the removed hard stops is still threaded through the planner and the settings (C39), and the three fix rounds are a constant in the planner, not the policy's `retry_limit` (C40). The hold on a forge change request (`scripts/reconcile.py:296`) is this rule as built; C38 is withdrawn.
 
 ```
 Rv := the engine's review panel reviewed the change's current head      Fa := a person approved on the forge      Fc := a person requested changes on the forge
-M := the merge gate merges      Wo := the merge waits on the owner      Hr := human review is possible
+M := the merge gate merges      Wo := the merge waits on the owner by default      Hr := the change surfaces for human review
+Pb := a contradiction, an issue or a problem was raised
 1.  M → Rv                      [rule 1 above: Rv is the review]
-2.  ¬Wo                         [owner, 2026-10-29: merges waiting on the owner are removed]
-3.  Hr                          [owner, 2026-10-29: human review stays possible at any time]
-4.  Fa ∧ ¬Rv → ¬M               [from 1]
-5.  Fc → ¬Wo                    [architect's reading of 2 against 3, from the review that found C38: a person's change request is not a wait the gate imposes]
-∴   a forge approval never replaces the panel (4), a forge change request never holds the merge (5), and human review stays available (3)
+2.  ¬Wo                         [owner, 2026-10-29: the default is motion; merges waiting on the owner are removed]
+3.  Pb → Hr ∧ ¬M                [owner, 2026-10-29: "Human review surfaces when there are contradictions or issues or problems"; T3 design §5]
+4.  Fc → Pb                     [coordinator, relaying the owner's rule: a person's change request is such a problem]
+5.  Fa ∧ ¬Rv → ¬M               [from 1]
+6.  Fc → Hr ∧ ¬M                [from 3, 4]
+∴   a forge approval never replaces the panel (5), and a forge change request holds the merge and surfaces for human review (6), which is a hold on a problem and not the default wait that 2 removes
 ```
 
 The reviewer personas are the 22 personas of the `extras` plugin's code-review skill (1.2.0, `skills/code-review/personas/`). Each ships whole, as its own file under `assets/personas/`, copied with its source noted. A persona's rules are its full lens and numbered checks, never a one-line summary. Making the set pluggable is later work (owner, 2026-10-16).
