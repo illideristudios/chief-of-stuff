@@ -38,6 +38,8 @@ claude --agent chief-of-stuff
 
 A running engine from an older release may not understand the upgrade request. `supervisor status` reports `upgrade_pending: true` while the registered loaded release differs from the selected release; ensure reports `engine: upgrade pending` and does not interrupt the running pass. For a marker-unaware engine, arrange a maintenance window, stop new work and verify the current pass has completed and no new pass can start before running `chief-of-stuff supervisor --root /path/to/workspace install` from the desired release. That explicit command restarts the agent and can interrupt work if it is not actually idle. Missing or stale status alone does not establish idleness.
 
+The authoritative install/uninstall recovery record is stored in a private engine data directory outside the workspace. The data directory must not be inside the workspace. Older workspace-only pending install records are not trusted or replayed; if one was interrupted before this upgrade, arrange a confirmed idle maintenance window and run an explicit install again.
+
 For a store-backed workspace, the plugin session startup hook starts an engine ensure in the background. The versioned launcher does the same for every runtime. First-time dependency preparation may take up to 900 seconds; errors are recorded in `.chief-of-stuff/engine-ensure.log`. An explicitly stopped engine remains disabled until installed again.
 
 The launcher starts even when the selected CLI does not expose the configured `Calendar tool:`. The coordinator reports the missing tool, leaves calendar facts unverified, and continues work that does not depend on the calendar. To enable calendar reads, configure an equivalent calendar tool in that CLI.
