@@ -94,8 +94,8 @@ class Workflow:
 
 @dataclass(frozen=True)
 class Stall:
-    """Stall detection policy. Automatic restart is not yet supported."""
-    after_minutes: int = 20
+    """Silence threshold and opt-in, bounded local-process recovery."""
+    after_minutes: int = 3
     action: str = "wait"
     max_restarts: int = 2
 
@@ -115,6 +115,7 @@ class Workers:
     teardown: str = ""  # engine-only cleanup command; one-shot launchers do not run it
     teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
     stall: Stall = field(default_factory=Stall)
+    failure_limit: int = 2
 
 
 @dataclass(frozen=True)
@@ -332,23 +333,24 @@ def _stall(table) -> Stall:
     extra = set(table) - {"after_minutes", "action", "max_restarts"}
     if extra:
         raise SettingsError(f"[workers.stall] unknown keys: {', '.join(sorted(extra))}")
-    minutes = table.get("after_minutes", 20)
+    minutes = table.get("after_minutes", Stall.after_minutes)
     if type(minutes) is not int or not 1 <= minutes <= 999999999:
         raise SettingsError("[workers.stall] after_minutes must be a positive whole number no greater than 999999999")
     count = table.get("max_restarts", 2)
     if type(count) is not int or count < 0:
         raise SettingsError("[workers.stall] max_restarts must be a non-negative whole number")
     action = table.get("action", "wait")
-    if action == "restart":
-        raise SettingsError("[workers.stall] automatic stall restart is not supported until activity and safe recovery are implemented")
-    if action != "wait":
-        raise SettingsError('[workers.stall] action must be "wait"')
+    if action not in ("wait", "restart"):
+        raise SettingsError('[workers.stall] action must be "wait" or "restart"')
     return Stall(minutes, action, count)
 
 
 def _workers(table) -> Workers:
     if not isinstance(table, dict):
         raise SettingsError("[workers] must be a table")
+    failure_limit = table.get("failure_limit", Workers.failure_limit)
+    if type(failure_limit) is not int or failure_limit < 1:
+        raise SettingsError("[workers] failure_limit must be a positive whole number")
     launcher = table.get("launcher", "ghostty")
     if launcher not in ("ghostty", "tmux", "herdr"):
         raise SettingsError("[workers] launcher must be `ghostty`, `tmux` or `herdr`")
@@ -394,7 +396,7 @@ def _workers(table) -> Workers:
         commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
                    claude_as_profile=profile, worker_launcher=worker_launcher, require_green_tests=green, rules=tuple(rules),
-                   stall=_stall(table.get("stall", {})), **commands)
+                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit, **commands)
 
 
 def _repos(table) -> dict[str, str]:

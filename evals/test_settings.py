@@ -162,7 +162,7 @@ class SettingsTest(unittest.TestCase):
 
     def test_stall_policy_defaults_and_configured_wait(self):
         default = st.load(self.root, None).workers.stall
-        self.assertEqual((default.after_minutes, default.action, default.max_restarts), (20, "wait", 2))
+        self.assertEqual((default.after_minutes, default.action, default.max_restarts), (3, "wait", 2))
         policy = st.load(self.root, self.write('[workers.stall]\nafter_minutes = 30\naction = "wait"\nmax_restarts = 1\n')).workers.stall
         self.assertEqual((policy.after_minutes, policy.action, policy.max_restarts), (30, "wait", 1))
 
@@ -175,9 +175,13 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaisesRegex(st.SettingsError, r'\[workers.stall\]'):
             st.load(self.root, self.write('[workers]\nstall = "wait"\n'))
 
-    def test_automatic_stall_restart_is_explicitly_refused_until_safe(self):
-        with self.assertRaisesRegex(st.SettingsError, 'automatic stall restart is not supported'):
-            st.load(self.root, self.write('[workers.stall]\naction = "restart"\n'))
+    def test_stall_restart_is_opt_in_and_failure_limit_is_configurable(self):
+        self.assertEqual(st.load(self.root, None).workers.failure_limit, 2)
+        got = st.load(self.root, self.write('[workers]\nfailure_limit = 4\n[workers.stall]\naction = "restart"\n'))
+        self.assertEqual((got.workers.failure_limit, got.workers.stall.action), (4, "restart"))
+        for bad in ('0', '-1', 'true', '1.5', '"2"'):
+            with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
+                st.load(self.root, self.write('[workers]\nfailure_limit = ' + bad))
 
     def test_the_worker_launcher_is_the_local_cli_or_t3(self):
         self.assertEqual(st.load(self.root, None).workers.worker_launcher, "cli")
