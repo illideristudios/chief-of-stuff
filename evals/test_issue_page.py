@@ -150,6 +150,22 @@ class RenderTest(unittest.TestCase):
         self.assertIn("Upload size limit", text(re.search(r"<h1\b.*?</h1>", header[0], re.S)[0]))
         self.assertRegex(text(header[0]), r"(?i)\bneeds input\b")
 
+    def test_a_historical_running_row_does_not_add_a_running_header_chip(self):
+        header = re.search(r"<header\b.*?</header>", page(today=TODAY_START), re.S)[0]
+        self.assertIn('class="chip needs-input">NEEDS INPUT', header)
+        self.assertNotIn('class="chip running"', header)
+
+    def test_a_live_cached_worker_remains_visible_when_the_task_waits(self):
+        src = replace(sources(), workers=(bs.Worker("impl-a", "one-shot", "codex", "", "Upload size limit", "impl-a", NOW, None),))
+        header = re.search(r"<header\b.*?</header>", page(src=src, today=TODAY_START), re.S)[0]
+        self.assertIn('class="chip needs-input">NEEDS INPUT', header)
+        self.assertIn('class="chip running">RUNNING', header)
+        cfg = parse_coordinator("# W\n\n## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n"
+                                "- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n", TODAY)
+        board = rb.render(TODAY_START, cfg, NOW, LANES, tracker_day=TODAY, sources=src)
+        card = re.search(r'<div class="columns-card columns-flagged"[^>]*>.*?Upload size limit.*?NEEDS INPUT</div></div>', board, re.S)[0]
+        self.assertIn('data-cat="running">running', card)
+
     def test_flow_is_one_row_of_every_task_on_the_issue(self):
         # FLOW: one row, the issue's tasks merged by flow_chart.build; no other issue's row.
         html = page()

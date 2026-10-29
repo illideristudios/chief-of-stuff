@@ -57,6 +57,40 @@ def worker_names(sources: board_sources.Sources) -> set[str]:
     return {w.name for w in sources.workers}
 
 
+def source_workers(sources: board_sources.Sources) -> list[board_sources.Worker]:
+    """The distinct live workers shown on the Workers page, excluding idle sessions."""
+    found = {}
+    for worker in sources.workers:
+        if worker.kind == "session" and not worker.task.strip():
+            continue
+        found.setdefault(worker.name, worker)
+    return list(found.values())
+
+
+def segment_worker_key(seg):
+    """Match named workers across sources; unnamed runs retain their store identity."""
+    return getattr(seg, "runner", "") or (seg.issue_key, seg.stage, seg.attempt)
+
+
+def source_worker_tasks(sources: board_sources.Sources, tasks: list[Task]) -> set[Task]:
+    """Match each cached worker to the same task its Workers-page row would use."""
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    row_of = launcher(tasks)
+    found = set()
+    for worker in source_workers(sources):
+        task = by_name.get(worker.task.strip().casefold()) or row_of(worker.task)[0]
+        if task is not None:
+            found.add(task)
+    return found
+
+
+def live_worker_keys(sources: board_sources.Sources, segments) -> set[str | tuple[str, str, int]]:
+    """Combine cached workers and open store segments using the Workers page's runner identity."""
+    names: set[str | tuple[str, str, int]] = {worker.name for worker in source_workers(sources)}
+    names.update(segment_worker_key(seg) for seg in segments if seg.ended_at is None)
+    return names
+
+
 def task_changes(task: Task, sources: board_sources.Sources) -> tuple[board_sources.Change, ...]:
     """The changes naming the task's issue: the open ones, or else the merged ones."""
     key = source_key(task.issue, sources.home) if task.issue.strip() else None

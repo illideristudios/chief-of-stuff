@@ -18,7 +18,7 @@ from pathlib import Path
 import board_sources
 import flow_chart
 from clock import parse_stamp
-from task_forge import PageData, source_key
+from task_forge import PageData, source_key, source_worker_tasks
 import tracker_log
 from decision_actions import addresses, state_of
 from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, store_decision_badge, write_if_changed
@@ -263,6 +263,12 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     issue = next((sources.issues[k] for k in issue_keys if k in sources.issues), None)
     latest = {k: t for t in known for k in names(t)}  # later trackers win
     status = "needs input" if any(t in holds for t in mine) else (rows[0][0] if rows else mine[-1].kind)
+    latest_mine = list({(t.name.strip() or t.item.strip()).casefold(): t for t in mine}.values())
+    header_live = (any(s.issue_key == item.issue_key and s.ended_at is None for s in db.segments())
+                   if item is not None and db is not None else any(t.kind == "running" for t in latest_mine))
+    current_tasks = (latest_mine if item is not None else
+                     list({(t.name.strip() or t.item.strip()).casefold(): t for t in known}.values()))
+    header_live = header_live or bool(source_worker_tasks(sources, current_tasks).intersection(latest_mine))
     name = rows[0][1].name if rows else (issue.title if issue else mine[0].label)
 
     order = {"open": 0, "merged": 1}
@@ -322,11 +328,12 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             steps_list.append((start, f'{escape(seg.stage)} started · {escape(who)}'))
             if seg.ended_at:
                 steps_list.append((stop, f'{escape(seg.stage)} {escape(seg.outcome or "ended")} · {escape(who)}'))
-            status = ("failed to start" if seg.outcome == "failed" and seg.started_at
-                      and seg.started_at == seg.ended_at else seg.outcome or "running")
+            run_status = ("running" if seg.ended_at is None else
+                          "failed to start" if seg.outcome == "failed" and seg.started_at == seg.ended_at else
+                          seg.outcome or "ended")
             lines.append((took, f'<div class="wk"><b>{escape(who)}</b><span>{escape(seg.runtime)} '
                                f'{escape(seg.model)} · {escape(seg.stage)} · attempt {seg.attempt}</span>'
-                               f'<span>{escape(status)} · {_dur(took)}</span></div>'))
+                               f'<span>{escape(run_status)} · {_dur(took)}</span></div>'))
         steps_list.extend((parse_stamp(entry.at, now), escape(entry.message))
                           for entry in db.log(item.issue_key))
         steps = "\n".join(f'<div class="step"><span class="when">{_step_when(at, now)}</span>'
@@ -361,7 +368,8 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             f"<title>{ref} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
             f'<body>\n<main class="issue">\n{tab_bar("Board", pending, True, **(navigation or {}))}  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(name)}</h1>\n    </div>\n"
-            f'    <span class="chip {escape(status.replace(" ", "-"))}">{escape(status.upper())}</span>\n  </header>\n\n'
+            f'    <div><span class="chip {escape(status.replace(" ", "-"))}">{escape(status.upper())}</span>'
+            + (' <span class="chip running">RUNNING</span>' if header_live and status != "running" else '') + '</div>\n  </header>\n\n'
             + (_section("Issue", f'<div class="card prose">{markdown_blocks(issue.body, linker.resolve)}</div>') if issue and issue.body else "")
             + cards + (f"  <section>\n{flow}{worked_line}  </section>\n" if flow else "") + ahead
             + '  <div class="cols">\n  <div class="col">\n'

@@ -18,7 +18,7 @@ import board_sources
 import panels
 import session_logs
 from clock import parse_stamp
-from task_forge import PageData
+from task_forge import PageData, segment_worker_key, source_workers
 from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar, issue_href
 from md import section as _section
@@ -143,9 +143,7 @@ def _session_rows(sources: board_sources.Sources, row_of, fix_counts: dict[str, 
         session_logs.retain_activity(account, [trees / w.tree for w in sources.workers if w.tree])
     except (ValueError, OSError):
         pass
-    for w in sources.workers:
-        if w.kind == "session" and not w.task.strip():
-            continue
+    for w in source_workers(sources):
         seen_running.add(w.name)
         t = by_name.get(w.task.strip().casefold()) or row_of(w.task)[0]
         key = (t.name.strip() if t and t.name.strip() else w.task.strip()).casefold()
@@ -155,7 +153,7 @@ def _session_rows(sources: board_sources.Sources, row_of, fix_counts: dict[str, 
     return running, seen_running
 
 
-def _store_rows(db: PageData, seen_running: set[str], now: datetime, trees: Path,
+def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now: datetime, trees: Path,
                 account: str) -> tuple[list[list[str]], list[list[str]], int, int]:
     """RUNNING and ENDED TODAY rows from the store's segments, the human-review count and the running one-shot count."""
     running: list[list[str]] = []
@@ -173,9 +171,10 @@ def _store_rows(db: PageData, seen_running: set[str], now: datetime, trees: Path
         num = seg.issue_key.rsplit("#", 1)[1] if "#" in seg.issue_key else seg.issue_key
         task_link = f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a> {escape(title)}'
         if seg.ended_at is None:
-            if runner in seen_running:
+            identity = segment_worker_key(seg)
+            if identity in seen_running:
                 continue
-            seen_running.add(runner)
+            seen_running.add(identity)
             store_shots += 1
             started_dt = parse_stamp(seg.started_at, now)
             w_obj = board_sources.Worker(runner, "one-shot", seg.runtime, seg.model, title, runner, started_dt, None)
@@ -220,7 +219,7 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
         running += store_running
         ended += store_ended
         need += store_need
-    shots = sum(w.kind == "one-shot" for w in sources.workers) + store_shots
+    shots = sum(w.kind == "one-shot" for w in source_workers(sources)) + store_shots
     boxes = [("NEEDS INPUT", str(need), " hot" if need else ""), ("RUNNING", str(len(running)), "")]
     if cap:
         boxes.append(("SLOTS FREE", f"{max(cap - shots, 0)} of {cap}", ""))

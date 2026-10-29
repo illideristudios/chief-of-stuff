@@ -594,6 +594,93 @@ class StorePagesAndRoutesTest(unittest.TestCase):
         )
         self.db.add_decision(KEY2, "design", "Approve cache eviction policy?")
 
+    def test_live_workers_and_pending_decision_are_visible_on_every_surface(self):
+        self.db.add_decision(KEY, "design", "Choose a parser")
+        self.db.record_segment(KEY, "plan", 1, (NOW - timedelta(minutes=5)).isoformat(),
+                               runner="plan-a1", runtime="cursor", model="composer")
+        # A cache entry for the first worker must not count that same worker twice.
+        sources = replace(bs.EMPTY, workers=(
+            bs.Worker("impl-a1", "one-shot", "claude", "opus", "Upload size limit", "impl-a1", NOW, None),
+            bs.Worker("idle", "session", "claude", "", "", "", NOW, None),
+        ))
+        data = task_forge.page_data(self.db)
+        cfg = parse_coordinator((self.root / "CLAUDE.md").read_text(), NOW.date())
+        settings = st.load(self.root, cfg.settings_path)
+        board = rb.render("", cfg, NOW, settings.lanes, kanban=settings.kanban, sources=sources, db=data)
+        workers = workers_page.render("", sources, NOW, self.root / "trees", 4, db=data)
+        self.assertIn('<span class="panels-label">RUNNING</span><b class="panels-count">2</b>', board)
+        self.assertIn('<h2>Running · 2</h2>', workers)
+        card = re.search(r'<div class="columns-card columns-flagged"[^>]*>.*?NEEDS INPUT</div></div>', board, re.S)[0]
+        self.assertIn('data-cat="running">running', card)
+        header = re.search(r'<header\b.*?</header>', issue_page.render(KEY, [], sources, NOW, db=data), re.S)[0]
+        self.assertIn('class="chip needs-input">NEEDS INPUT', header)
+        self.assertIn('class="chip running">RUNNING', header)
+        self.assertEqual(header.count('>RUNNING</span>'), 1)
+        # The count comes from store segments even when the worker cache is empty.
+        no_cache = rb.render("", cfg, NOW, settings.lanes, kanban=settings.kanban, db=data)
+        self.assertIn('<span class="panels-label">RUNNING</span><b class="panels-count">2</b>', no_cache)
+
+    def test_counts_include_distinct_cached_and_store_workers_only_once(self):
+        self.db.record_segment(KEY, "plan", 1, NOW.isoformat(), runner="plan-a1", outcome="mystery")
+        sources = replace(bs.EMPTY, workers=(
+            bs.Worker("impl-a1", "one-shot", "claude", "opus", "Upload size limit", "impl-a1", NOW, None),
+            bs.Worker("impl-a1", "one-shot", "claude", "opus", "Upload size limit", "impl-a1", NOW, None),
+            bs.Worker("extra", "session", "claude", "", "Cache warmup", "", NOW, None),
+            bs.Worker("idle", "session", "claude", "", "", "", NOW, None),
+        ))
+        data = task_forge.page_data(self.db)
+        cfg = parse_coordinator((self.root / "CLAUDE.md").read_text(), NOW.date())
+        settings = st.load(self.root, cfg.settings_path)
+        board = rb.render("", cfg, NOW, settings.lanes, kanban=settings.kanban, sources=sources, db=data)
+        workers = workers_page.render("", sources, NOW, self.root / "trees", 4, db=data)
+        self.assertIn('<span class="panels-label">RUNNING</span><b class="panels-count">3</b>', board)
+        self.assertIn('<h2>Running · 3</h2>', workers)
+        self.assertIn('<b>2 of 4</b><span class="cap">SLOTS FREE', workers)
+        body = issue_page.render(KEY, [], sources, NOW, db=data)
+        self.assertIn('>running · 0m</span>', body)
+
+    def test_ended_and_unknown_outcomes_do_not_imply_a_live_worker(self):
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "mystery")
+        self.db.record_segment(KEY, "plan", 1, (NOW - timedelta(minutes=2)).isoformat(), NOW.isoformat(),
+                               runner="plan-ended")
+        self.db.add_decision(KEY, "design", "Choose a parser")
+        data = task_forge.page_data(self.db)
+        body = issue_page.render(KEY, [], bs.EMPTY, NOW, db=data)
+        header = re.search(r'<header\b.*?</header>', body, re.S)[0]
+        self.assertIn('class="chip needs-input">NEEDS INPUT', header)
+        self.assertNotIn('class="chip running"', header)
+        self.assertIn('>ended · 2m</span>', body)
+        workers = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data)
+        self.assertIn('<h2>Running · 0</h2>', workers)
+        cfg = parse_coordinator((self.root / "CLAUDE.md").read_text(), NOW.date())
+        board = rb.render("", cfg, NOW, st.load(self.root, cfg.settings_path).lanes, db=data)
+        self.assertIn('<span class="panels-label">RUNNING</span><b class="panels-count">0</b>', board)
+
+    def test_unnamed_live_runs_with_the_same_stage_and_attempt_are_distinct(self):
+        self.db.record_segment(KEY, "plan", 1, NOW.isoformat())
+        self.db.record_segment(KEY2, "plan", 1, NOW.isoformat())
+        sources = replace(bs.EMPTY, workers=(
+            bs.Worker("plan-1", "session", "claude", "", "Other task", "", NOW, None),
+        ))
+        data = task_forge.page_data(self.db)
+        cfg = parse_coordinator((self.root / "CLAUDE.md").read_text(), NOW.date())
+        board = rb.render("", cfg, NOW, st.load(self.root, cfg.settings_path).lanes, sources=sources, db=data)
+        workers = workers_page.render("", sources, NOW, self.root / "trees", 4, db=data)
+        self.assertIn('<span class="panels-label">RUNNING</span><b class="panels-count">4</b>', board)
+        self.assertIn('<h2>Running · 4</h2>', workers)
+
+    def test_unknown_decision_state_does_not_hide_a_live_run_or_invent_a_hold(self):
+        self.db.add_decision(KEY, "design", "Choose a parser", record={"status": "unrecognized"})
+        data = task_forge.page_data(self.db)
+        cfg = parse_coordinator((self.root / "CLAUDE.md").read_text(), NOW.date())
+        board = rb.render("", cfg, NOW, st.load(self.root, cfg.settings_path).lanes, db=data)
+        card = re.search(r'<div class="columns-card">.*?Upload size limit.*?</div></div>', board, re.S)[0]
+        self.assertIn('data-cat="running">running', card)
+        self.assertNotIn("NEEDS INPUT", card)
+        header = re.search(r'<header\b.*?</header>', issue_page.render(KEY, [], bs.EMPTY, NOW, db=data), re.S)[0]
+        self.assertIn('class="chip running">RUNNING', header)
+        self.assertNotIn("NEEDS INPUT", header)
+
     def test_server_routes_full_issue_key_and_workers_from_store(self) -> None:
         # Reopen before the HTTP route reads failed-start evidence: it must survive a restart.
         for attempt, end, outcome in ((1, NOW, "failed"), (2, NOW + timedelta(seconds=20), "failed"),
