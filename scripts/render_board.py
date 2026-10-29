@@ -36,7 +36,7 @@ import columns  # noqa: E402
 import decision_page  # noqa: E402
 from page_common import markdown_inline  # noqa: E402
 from decision_page import write_if_changed  # noqa: E402
-from fragment import DECISIONS_ROUTE, FONTS, TAB_CSS, tab_bar, theme, issue_href  # noqa: E402
+from fragment import DECISIONS_ROUTE, FONTS, TAB_CSS, tab_bar, theme, issue_href, latest_thread_link  # noqa: E402
 import flow_chart  # noqa: E402
 import panels  # noqa: E402
 from task_forge import PageData, live_worker_keys, source_key, source_workers, source_worker_tasks  # noqa: E402
@@ -182,9 +182,8 @@ def _worker_threads(db) -> dict[str, str]:
     found = {}
     for item in db.items():
         runs = (db.resume(item.issue_key) or {}).get("runs", {})
-        links = [r["thread_link"] for r in runs.values() if isinstance(r, dict) and r.get("thread_link")]
-        if links:
-            found[item.issue_key] = links[-1]
+        if link := latest_thread_link(runs):
+            found[item.issue_key] = link
     return found
 
 

@@ -1430,6 +1430,27 @@ class StoreIssueBodyAndAcceptanceTest(unittest.TestCase):
         self.home = self.cfg.backlog
         self.db.upsert_item(self.key, workflow="build", stage="implement", forge_state="open", title="Upload size limit")
 
+    def test_issue_and_workers_pages_link_the_t3_attempt_without_reading_claude_logs(self):
+        import workers_page
+        link = "t3code://threads/env-1/mcp:t-1"
+        self.db.record_segment(self.key, "implement", 1, started_at=NOW.isoformat(), runtime="claude", runner="builder")
+        self.db.update_resume(self.key, lambda data: data.update(runs={"implement-1": {"launcher": "t3", "thread_link": link, "runner": "builder",
+                            "started_at": NOW.isoformat(), "tree": str(self.root / "trees/builder"), "session_id": "s"}}))
+        data = task_forge.page_data(self.db)
+        src = bs.Sources({}, {}, {}, (), {}, home=self.home)
+        issue = ip.render(self.key, [], src, NOW, LANES, cfg=self.cfg, root=self.root, db=data)
+        (self.root / "trees/builder").mkdir(parents=True)
+        with mock.patch.object(workers_page, "activity", side_effect=AssertionError("T3 activity is not a transcript")), \
+             mock.patch.object(workers_page.session_logs, "read_claude", side_effect=AssertionError("T3 session is remote")):
+            workers = workers_page.render("", src, NOW, self.root / "trees", 4, db=data)
+            segment = data.segments()[0]
+            session = workers_page.render_session(data, segment.id, self.root / "trees", config_dir=self.root)
+            source_worker = bs.Worker("builder", "one-shot", "claude", "sonnet", "Upload size limit", "builder", NOW, None)
+            from_sources = workers_page.render("", replace(src, workers=(source_worker,)), NOW, self.root / "trees", 4, db=data)
+        for html in (issue, workers, session, from_sources):
+            self.assertIn(f'href="{link}"', html)
+            self.assertIn("T3 thread", html)
+
     def test_store_task_renders_issue_body_and_acceptance_on_full_and_numeric_routes(self) -> None:
         issue = bs.Issue(
             "#12", "https://github.com/example/repo/issues/12", "Upload size limit", "open",

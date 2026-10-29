@@ -25,7 +25,7 @@ from task_forge import (EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, PageData, change_issu
 import tracker_log
 from decision_actions import addresses, state_of
 from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, store_decision_badge, write_if_changed
-from fragment import external_url, href, tab_bar, issue_href, issue_page_name
+from fragment import external_url, href, tab_bar, issue_href, issue_page_name, latest_thread_link
 from page_common import drop_html_comments, markdown_blocks, markdown_inline
 from module_graph import section as _graph
 from clock import dur as _dur
@@ -557,6 +557,10 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     issue_label = f"{ref_html} {escape(issue.title if issue else name)}"
     refs = [("issue", f"<a {href(issue_url)}>{issue_label}</a>" if issue_url else issue_label,
              issue.state if issue else "")]
+    if item is not None and db is not None:
+        resume = db.resume(item.issue_key)
+        if link := latest_thread_link(resume.get("runs", {}) if isinstance(resume, dict) else {}):
+            refs.append(("worker", f'<a {href(link)}>T3 thread</a>', ""))
     for c in changes:
         c_url = external_url(c.url)
         c_label = f"{escape(c.ref)} {escape(c.title)}"
