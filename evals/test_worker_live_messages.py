@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import claude_adapter
+import engine
 import process_status
 import shell_setup
 import store
@@ -147,6 +148,20 @@ class LiveMessagesTest(unittest.TestCase):
         """Every uuid the host echoed, i.e. every message the runner wrote that the CLI read."""
         events = [json.loads(line) for line in (self.run_dir / "stream.jsonl").read_text().splitlines() if line]
         return [e["uuid"] for e in events if e.get("type") == "user"]
+
+    def test_prompt_sweep_hands_off_and_settles_without_a_forge_pass(self):
+        self.start()
+        message = self.queue()
+        stop = threading.Event()
+        thread = threading.Thread(target=engine._message_loop, args=(self.root, stop), kwargs={"every": 0.05})
+        thread.start()
+        try:
+            delivered = wait_for(lambda: self.status(message) if self.status(message).status == "delivered" else None)
+            self.assertEqual(self.written().count(delivered.delivery_id), 1)
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
 
     def test_a_mid_turn_message_is_delivered_across_an_engine_restart_and_the_result_still_collects(self):
         runner = self.start()

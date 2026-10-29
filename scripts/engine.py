@@ -1029,6 +1029,29 @@ def _handoff(release: Path, python: Path, root: Path, interval: float, once: boo
                               "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []))
 
 
+def _message_loop(root: Path, stop: threading.Event, *, every: float = 1.0) -> None:
+    """Settle and hand off messages promptly, independently of slow forge passes.
+
+    Its store is private to this thread. Mailbox locks and store claims serialize it with a normal pass.
+    """
+    db = None
+    try:
+        while not stop.is_set():
+            try:
+                if db is None:
+                    db = store_access.migrated_store(root)
+                worker.deliver_messages(db, root)
+            except Exception as exc:
+                print(f"engine: message delivery sweep failed: {exc}", file=sys.stderr, flush=True)
+                if db is not None:
+                    db.engine.dispose()
+                    db = None
+            stop.wait(every)
+    finally:
+        if db is not None:
+            db.engine.dispose()
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run passes until stopped, or one with --once; `install`, `uninstall` and `status` manage the LaunchAgent.
 
@@ -1087,11 +1110,14 @@ def main(argv: list[str] | None = None) -> int:
                                     launchable=_judges)
             stop_pages = threading.Event()
             page_thread = None
+            message_thread = None
             try:
                 if not args.once:
                     import pages  # deferred: --once never serves the board
                     page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
                     page_thread.start()
+                    message_thread = threading.Thread(target=_message_loop, args=(root, stop_pages), daemon=True)
+                    message_thread.start()
                 while True:
                     failed = False
                     try:
@@ -1116,6 +1142,8 @@ def main(argv: list[str] | None = None) -> int:
                         page_thread.start()
             finally:
                 stop_pages.set()
+                if message_thread is not None and message_thread.ident is not None:
+                    message_thread.join()
                 if page_thread is not None and page_thread.ident is not None:
                     page_thread.join()  # supervise's I/O is bounded; cancellation reaps unrecorded children before exec
                 db.engine.dispose()
