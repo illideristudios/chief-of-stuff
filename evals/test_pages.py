@@ -1592,6 +1592,18 @@ class RenderStampTest(_PagesFixture, unittest.TestCase):
                         f"workers.html was not replaced from a temp file beside it: {replaced}")
         self.assertEqual(set(os.listdir(self.pages)), before, "a temp file was left behind")
 
+    def test_the_report_route_renders_the_last_heartbeat(self):
+        import heartbeat
+        import heartbeat_store
+        from datetime import timedelta, timezone
+        now = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        heartbeat_store.FileSink(self.root).deliver(heartbeat.status(
+            [heartbeat.Facts("github:example/project#1", "Shipped it", done=True)], now, now, {}, timedelta(minutes=45)))
+        resp = get(self.port, "/report")
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"Shipped it", resp.body)
+        self.assertIn(b"Done on assumptions", resp.body)
+
 
 class UnfrozenBoardTest(_PagesFixture, unittest.TestCase):
     """The renderers' real clocks. A board page that is polled must not change its bytes, or its Last-Modified, with the

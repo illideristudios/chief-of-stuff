@@ -31,6 +31,7 @@ import engine_facts
 import engine_merge
 import forge
 import guard_commands
+import heartbeat_store
 import host_adapter
 import issue_gate
 import limits_history
@@ -1069,6 +1070,19 @@ def _persist_launchd_handoff(root: Path, release: Path) -> bool:
     return True
 
 
+def _beat(db: Any, forge: Any, root: Path, trees: Path, workers: settings.Workers, tick: datetime) -> None:
+    """Deliver the heartbeat after a pass (#1179). A failure is logged to the engine log and never stops the engine."""
+    try:
+        now = datetime.now(timezone.utc)
+        limit = timedelta(minutes=workers.stall.after_minutes)
+        facts = engine_facts.gather(forge=forge, store=db, root=root, trees=trees, now=now, stall_after=limit)
+        failures = heartbeat_store.beat(db, now, tick, dict(facts.progress), limit, sinks=heartbeat_store.sinks(root))
+    except Exception as exc:
+        failures = [f"heartbeat: {exc}"]
+    for failure in failures:
+        db.add_engine_log(failure, "heartbeat")
+
+
 def _message_loop(root: Path, stop: threading.Event, *, every: float = 1.0) -> None:
     """Settle and hand off messages promptly, independently of slow forge passes.
 
@@ -1244,6 +1258,7 @@ def main(argv: list[str] | None = None) -> int:
                         error_kind = None
                     if args.once:
                         return 1 if failed else 0
+                    _beat(db, source, root, trees, config.workers, datetime.now(timezone.utc))
                     with contextlib.suppress(OSError):
                         write_engine_status(
                             root,

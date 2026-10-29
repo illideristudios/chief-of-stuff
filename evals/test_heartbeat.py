@@ -6,8 +6,11 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import engine
 import heartbeat
 import heartbeat_page
 import heartbeat_store
@@ -181,6 +184,40 @@ class SinkTest(unittest.TestCase):
         self.assertEqual(failures, ["title: the T3 title could not be set"])
         saved = json.loads((self.root / ".chief-of-stuff" / "heartbeat.json").read_text())
         self.assertEqual([e["state"] for e in saved["entries"]], ["done"])
+
+
+class EngineBeatTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        store.migrate(self.root / "store.db")
+        self.db = store.Store(self.root / "store.db", clock=lambda: NOW)
+        self.addCleanup(self.db.engine.dispose)
+        self.db.upsert_item(A, forge_state="closed", merge_state="merged")
+        self.workers = SimpleNamespace(stall=SimpleNamespace(after_minutes=45))
+
+    def beat(self, sinks):
+        with mock.patch.object(engine.engine_facts, "gather", return_value=SimpleNamespace(progress=())), \
+                mock.patch.object(heartbeat_store, "sinks", return_value=sinks):
+            engine._beat(self.db, None, self.root, self.root, self.workers, TICK)
+
+    def test_a_pass_delivers_the_heartbeat_to_the_sinks(self):
+        sink = Recorder("board")
+        self.beat((sink,))
+        self.assertEqual(len(sink.seen), 1)
+
+    def test_a_failing_sink_is_logged_and_the_engine_goes_on(self):
+        good = Recorder("board")
+        self.beat((Recorder("title", fail=True), good))
+        self.assertEqual(len(good.seen), 1)
+        self.assertEqual([(e.kind, e.message) for e in self.db.engine_log()],
+                         [("heartbeat", "title: the T3 title could not be set")])
+
+    def test_a_failure_to_gather_is_logged_not_raised(self):
+        with mock.patch.object(engine.engine_facts, "gather", side_effect=OSError("no git")):
+            engine._beat(self.db, None, self.root, self.root, self.workers, TICK)
+        self.assertEqual([e.message for e in self.db.engine_log()], ["heartbeat: no git"])
 
 
 class PageTest(unittest.TestCase):
