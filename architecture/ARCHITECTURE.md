@@ -298,12 +298,28 @@ Segment times are full timestamps, so a run that ends after midnight keeps its e
 
 | Boundary | Signature | Circle |
 |---|---|---|
-| `store.Segment` | `issue_key: str, stage: str, attempt: int, started_at: str, ended_at: str \| None, outcome: str \| None, runtime: str, model: str, effort: str, agent_type: str` | Interface Adapters, gateways |
-| `performance.Row` | `period: date, runtime: str, model: str, effort: str, agent_type: str, runs: int, completed: int, human_review: int, relaunched: int, median_minutes: int \| None` | Use Cases |
+| `store.Segment` | `issue_key: str, stage: str, attempt: int, started_at: str, ended_at: str \| None, outcome: str \| None, runtime: str, model: str, effort: str, agent_type: str, workflow: str` | Interface Adapters, gateways |
+| `store.Store.rotation_choice` | `(issue_key: str, stage: str, attempt: int, task_class: str, eligible: tuple[str, ...], choose: Callable[[str], str], workflow: str = "") -> str` | Interface Adapters, gateways |
+| `runtimes.following` | `(rotation: Sequence[T], after: str = "") -> tuple[T, ...]` | Entities |
+| `performance.Row` | `period: date, runtime: str, model: str, effort: str, agent_type: str, runs: int, completed: int, human_review: int, relaunched: int, median_minutes: int \| None, workflow: str = ""` | Use Cases |
+| `performance.Record` | `issue_key: str, stage: str, attempt: int, runtime: str, model: str, effort: str, agent_type: str, workflow: str, started_at: str, ended_at: str \| None, outcome: str \| None, completed: bool, human_review: bool, relaunched: bool, minutes: int \| None` | Use Cases |
+| `performance.records` | `(segments: Iterable[Segment]) -> list[Record]` | Use Cases |
 | `performance.table` | `(segments: Iterable[Segment], since: date, until: date, by: str, zone: ZoneInfo) -> list[Row]`, where `by` is `day` or `week` | Use Cases |
 | `performance_report.main` | `(argv: list[str] \| None = None) -> int` | Frameworks and Drivers |
 
-For each day or week and each key of runtime, model, effort and agent type, the report counts the runs started, completed, sent to human review and relaunched, and the median whole minutes from start to end, taking the lower middle value for an even count. A run belongs to the period of its start, in the workspace zone. A week starts on Monday, and `Row.period` is the period's first day: the day itself, or the week's Monday. `--since` and `--until` are dates in the workspace zone and both are inclusive; `--until` defaults to today and `--by` to `day`. A segment with no model, effort or type is keyed by what is there, and an empty key field prints as `-`. `performance.py` reads no file. `performance_report.py` reads the segments through `store_access`, calls `performance.table` and prints one table. It is the `performance` entry of `COMMANDS` in `chief_of_stuff.py`: `chief-of-stuff performance --since DATE [--until DATE] [--by day|week]`.
+Each attempt's workflow is recorded with it (#1182). `Store.rotation_choice` reserves a rotation turn and the attempt's workflow in one transaction: the workspace store keeps one cursor per task class (the `rotation_cursor` table) and the attempt's choice in its resume record, so concurrent launches take separate turns and a recovered launch spends no extra turn. The selection policy stays with the caller, and `runtimes.following` gives one circular pass after the previous entry, so a retry or rework moves to the next entry. `record_segment` takes the workflow from that reservation when it is not passed. An older segment's unknown workflow stays empty and is never inferred from today's issue or policy. `performance.records` turns segments into raw attempt records, with the original outcome, both timestamps and the whole minutes, and computes no rate and no recommendation.
+
+```
+Rc := a turn and its workflow are reserved in one transaction      Cl := two concurrent launches take the same turn
+Rv := a recovered launch reuses its reserved entry      Xt := recovery spends an extra turn
+Wf := the attempt's workflow was recorded      If := a workflow is inferred for an older segment
+1.  Rc → ¬Cl          [#1182: the store reserves each class's cursor and the launch choice atomically]
+2.  Rv → ¬Xt          [#1182: rotation_choice returns a still-eligible prior choice]
+3.  ¬Wf → ¬If         [#1182: an unknown workflow stays empty]
+∴   the round robin is fair under concurrency and recovery, and the records hold only what was observed
+```
+
+For each day or week and each key of runtime, model, effort, agent type and workflow, the report counts the runs started, completed, sent to human review and relaunched, and the median whole minutes from start to end, taking the lower middle value for an even count. A run belongs to the period of its start, in the workspace zone. A week starts on Monday, and `Row.period` is the period's first day: the day itself, or the week's Monday. `--since` and `--until` are dates in the workspace zone and both are inclusive; `--until` defaults to today and `--by` to `day`. A segment with no model, effort or type is keyed by what is there, and an empty key field prints as `-`. `performance.py` reads no file. `performance_report.py` reads the segments through `store_access`, calls `performance.table` and prints one table. With `--raw` it prints the period's `performance.records` as JSON instead, one object per attempt. It is the `performance` entry of `COMMANDS` in `chief_of_stuff.py`: `chief-of-stuff performance --since DATE [--until DATE] [--by day|week] [--raw]`.
 
 A page may show the same measures over time: each runtime, model and effort pair's trend and success rate per kind of task, with its sample size. The scoring is in `performance.py` (Use Cases), over segments passed in. Review rounds are the count of review-stage attempts per issue, the kind of task is the issue's workflow, and the pipeline result is read through the forge adapter, the source of truth. A presenter renders the page from rows handed to it and reads no file. Scoring makes no billed call and never blocks a launch.
 
