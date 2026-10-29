@@ -133,6 +133,13 @@ class AutonomyTest(unittest.TestCase):
         self.assertNotIn("the owner reports the suite result", agent)
         self.assertIn("the coordinator or worker records the suite result", agent)
 
+    def test_no_live_case_grades_a_yes_gate_or_an_allow_ask(self):
+        # These two still graded the retired behaviour: no launch before a yes, and a permission block ending "allow?".
+        import json
+        for name in ("dispatch-names-a-type", "blocked-becomes-one-line"):
+            with self.subTest(case=name):
+                self.assertTrue(json.loads((ROOT / "evals/cases" / name / "case.json").read_text()).get("superseded_by"))
+
     def test_obsolete_owner_stop_cases_are_not_selected_for_live_evals(self):
         from evals import run
         with tempfile.TemporaryDirectory() as temp:
