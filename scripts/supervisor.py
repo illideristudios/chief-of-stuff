@@ -24,6 +24,7 @@ ACTIONS = ("install", "uninstall", "status", "ensure", "ensure-background", "ens
 DISABLED_MARKER = "engine.disabled"
 PLUGIN_RELEASE_MARKER = "engine-plugin-release"
 HANDOFF_MARKER = "engine-handoff.json"
+EXPLICIT_INSTALL_MARKER = "engine-explicit-install.json"
 ENSURE_LOCK_TIMEOUT = 1200.0
 
 # Run after the venv python, with the workspace as working directory (engine --root defaults to ".").
@@ -183,6 +184,9 @@ def _plugin_version(release: Path) -> tuple[int, ...] | None:
 
 def selected_release(root: Path) -> Path:
     """Follow the installed pointer, or a validated newer sibling requested by a plugin session."""
+    pending = _explicit_install(root)
+    if pending is not None:
+        return Path(pending["release"])
     current = current_release()
     current_version = _plugin_version(current)
     if current != RELEASE or current_version is None:
@@ -196,6 +200,43 @@ def selected_release(root: Path) -> Path:
     except (OSError, RuntimeError, ValueError):
         pass
     return current
+
+
+def _explicit_install(root: Path) -> dict | None:
+    """Read an incomplete explicit install; malformed state must not select another release."""
+    path = state_dir(root) / EXPLICIT_INSTALL_MARKER
+    try:
+        pending = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise ServiceError(f"cannot read explicit install record: {exc}") from exc
+    if (not isinstance(pending, dict) or not isinstance(pending.get("release"), str)
+            or not Path(pending["release"]).is_absolute() or not isinstance(pending.get("job"), dict)
+            or pending["job"].get("Label") != label("engine", root)
+            or pending["job"].get("WorkingDirectory") != str(root.resolve())):
+        raise ServiceError("invalid explicit install record")
+    return pending
+
+
+def _finish_explicit_install(root: Path, pending: dict, jobs_dir: Path | None, *, replay: bool) -> str:
+    """Replay uncertain launchd state before retiring the explicit target."""
+    job = pending["job"]
+    if replay:
+        path = job_path(job["Label"], jobs_dir)
+        if path.exists():
+            existing = plistlib.loads(path.read_bytes())
+            if existing.get("Label") != job["Label"] or existing.get("WorkingDirectory") != str(root):
+                raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
+        target = f"gui/{os.getuid()}/{job['Label']}"
+        if launchctl("print", target, missing_ok=True):
+            launchctl("bootout", target)
+    outcome = load_agent(job, jobs_dir)
+    (state_dir(root) / PLUGIN_RELEASE_MARKER).unlink(missing_ok=True)
+    (state_dir(root) / HANDOFF_MARKER).unlink(missing_ok=True)
+    (state_dir(root) / DISABLED_MARKER).unlink(missing_ok=True)
+    (state_dir(root) / EXPLICIT_INSTALL_MARKER).unlink(missing_ok=True)
+    return "engine: " + outcome
 
 
 def _request_plugin_release(root: Path, selected: Path, existing: dict) -> bool:
@@ -355,6 +396,13 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
         if respect_disabled and (state_dir(root) / DISABLED_MARKER).is_file():
             return "engine: disabled"
         if respect_disabled:
+            pending = _explicit_install(root)
+            if pending is not None:
+                from workspace import lock_held
+                target = f"gui/{os.getuid()}/{label('engine', root)}"
+                if lock_held(state_dir(root) / "engine.lock") and launchctl("print", target, missing_ok=True):
+                    return "engine: serving"
+                return _finish_explicit_install(root, pending, jobs_dir, replay=True)
             from workspace import lock_held
             path = job_path(label("engine", root), jobs_dir)
             if automatic_engine:
@@ -395,8 +443,9 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
             existing = plistlib.loads(path.read_bytes())
             _request_plugin_release(root, selected, existing)
         if not respect_disabled:
-            (state_dir(root) / PLUGIN_RELEASE_MARKER).unlink(missing_ok=True)
-            (state_dir(root) / HANDOFF_MARKER).unlink(missing_ok=True)
+            pending = {"release": str(selected), "job": desired}
+            atomic_write(state_dir(root) / EXPLICIT_INSTALL_MARKER, json.dumps(pending).encode())
+            return _finish_explicit_install(root, pending, jobs_dir, replay=False)
         outcome = load_agent(desired, jobs_dir)
         (state_dir(root) / DISABLED_MARKER).unlink(missing_ok=True)
         return "engine: " + outcome
@@ -455,6 +504,9 @@ def commit_handoff(root: Path, selected: Path, jobs_dir: Path | None = None) -> 
         path = job_path(label("engine", root), jobs_dir)
         if (state_dir(root) / DISABLED_MARKER).exists() or not path.exists() or selected_release(root) != selected:
             return "engine: handoff superseded"
+        pending_install = _explicit_install(root)
+        if pending_install is not None:
+            return _finish_explicit_install(root, pending_install, jobs_dir, replay=True)
         job = plistlib.loads(path.read_bytes())
         if job.get("Label") != label("engine", root) or job.get("WorkingDirectory") != str(root):
             raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
@@ -501,6 +553,7 @@ def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
         unload_agent(label("engine", resolved), resolved, jobs_dir)
         atomic_write(state_dir(resolved) / DISABLED_MARKER, b"")
         (state_dir(resolved) / HANDOFF_MARKER).unlink(missing_ok=True)
+        (state_dir(resolved) / EXPLICIT_INSTALL_MARKER).unlink(missing_ok=True)
     return "engine: stopped"
 
 

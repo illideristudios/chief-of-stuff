@@ -1039,7 +1039,8 @@ def _persist_launchd_handoff(root: Path, release: Path) -> bool:
         return False
     job = plistlib.loads(path.read_bytes())
     if (supervisor.current_release_from_job(job) != supervisor.RELEASE
-            and not (supervisor.state_dir(root) / supervisor.HANDOFF_MARKER).exists()):
+            and not (supervisor.state_dir(root) / supervisor.HANDOFF_MARKER).exists()
+            and not (supervisor.state_dir(root) / supervisor.EXPLICIT_INSTALL_MARKER).exists()):
         return False
     target = f"gui/{os.getuid()}/{supervisor.label('engine', root)}"
     if not supervisor.launchctl("print", target, missing_ok=True):
@@ -1079,7 +1080,8 @@ def main(argv: list[str] | None = None) -> int:
         previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
     try:
         installed = supervisor.selected_release(root)
-        if (supervisor.state_dir(root) / supervisor.HANDOFF_MARKER).exists():
+        if ((supervisor.state_dir(root) / supervisor.HANDOFF_MARKER).exists()
+                or (supervisor.state_dir(root) / supervisor.EXPLICIT_INSTALL_MARKER).exists()):
             with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
                 if _persist_launchd_handoff(root, installed):
                     return 0
@@ -1213,7 +1215,9 @@ def main(argv: list[str] | None = None) -> int:
                             release=release,
                         )
                     time.sleep(args.interval)
-                    if (installed := supervisor.selected_release(root)) != supervisor.RELEASE:
+                    installed = supervisor.selected_release(root)
+                    if (installed != supervisor.RELEASE or
+                            (supervisor.state_dir(root) / supervisor.EXPLICIT_INSTALL_MARKER).exists()):
                         if (python := _prepare_handoff(installed)) is not None and supervisor.selected_release(root) == installed:
                             newer = installed, python
                             break

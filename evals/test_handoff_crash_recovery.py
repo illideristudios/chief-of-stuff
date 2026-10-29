@@ -97,6 +97,149 @@ class HandoffCrashRecovery(SupervisorTest):
                 supervisor.install(self.root, jobs_dir=self.jobs)
             self.assertEqual(supervisor.selected_release(self.root), old)
 
+    def test_explicit_downgrade_recovers_at_each_replacement_boundary(self):
+        for stage in ('before_bootout', 'after_bootout', 'after_plist', 'after_bootstrap'):
+            with self.subTest(stage=stage):
+                self.doCleanups()
+                self.setUp()
+                old, new = self.releases()
+                (self.root / 'store.db').touch()
+                with mock.patch.object(supervisor, 'RELEASE', new):
+                    supervisor.ensure(self.root, jobs_dir=self.jobs)
+                marker = supervisor.state_dir(self.root) / supervisor.PLUGIN_RELEASE_MARKER
+                marker.write_text(str(new))
+                control = supervisor.launchctl
+                write = supervisor.atomic_write
+                loaded_job = [self.job()]
+                def track(*args, **kwargs):
+                    result = self.launchctl(*args, **kwargs)
+                    if args[0] == 'bootout':
+                        loaded_job[0] = None
+                    elif args[0] == 'bootstrap':
+                        loaded_job[0] = self.job()
+                    return result
+                self.launchctl_mock.side_effect = track
+                def crash_control(*args, **kwargs):
+                    if stage == 'before_bootout' and args[0] == 'bootout':
+                        raise SystemExit('power loss')
+                    result = control(*args, **kwargs)
+                    if ((stage == 'after_bootout' and args[0] == 'bootout') or
+                            (stage == 'after_bootstrap' and args[0] == 'bootstrap')):
+                        raise SystemExit('power loss')
+                    return result
+                def crash_write(path, data, *args, **kwargs):
+                    result = write(path, data, *args, **kwargs)
+                    if stage == 'after_plist' and path.suffix == '.plist':
+                        raise SystemExit('power loss')
+                    return result
+                with mock.patch.object(supervisor, 'RELEASE', old), \
+                     mock.patch.object(supervisor, 'launchctl', side_effect=crash_control), \
+                     mock.patch.object(supervisor, 'atomic_write', side_effect=crash_write):
+                    with self.assertRaises(SystemExit):
+                        supervisor.install(self.root, jobs_dir=self.jobs)
+                with mock.patch.object(supervisor, 'RELEASE', new):
+                    supervisor.ensure(self.root, jobs_dir=self.jobs)
+                    self.assertEqual(supervisor.current_release_from_job(self.job()), old)
+                    self.assertTrue(self.loaded)
+                    self.assertEqual(supervisor.current_release_from_job(loaded_job[0]), old)
+                with mock.patch.object(supervisor, 'RELEASE', old):
+                    supervisor.ensure(self.root, jobs_dir=self.jobs)
+                    self.assertEqual(supervisor.current_release_from_job(self.job()), old)
+                self.assertFalse(marker.exists())
+
+    def test_recovery_waits_for_pass_boundary_and_uninstall_wins(self):
+        old, new = self.releases()
+        (self.root / 'store.db').touch()
+        with mock.patch.object(supervisor, 'RELEASE', new):
+            supervisor.ensure(self.root, jobs_dir=self.jobs)
+        with mock.patch.object(supervisor, 'RELEASE', old), \
+             mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                supervisor.install(self.root, jobs_dir=self.jobs)
+        with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
+            with mock.patch.object(supervisor, 'RELEASE', new):
+                self.launchctl_mock.reset_mock()
+                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: serving')
+                self.assertNotIn('bootout', self.verbs())
+                self.assertEqual(supervisor.selected_release(self.root), old)
+                supervisor.commit_handoff(self.root, old, self.jobs)
+        self.assertEqual(supervisor.current_release_from_job(self.job()), old)
+        with mock.patch.object(supervisor, 'RELEASE', old), \
+             mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                supervisor.install(self.root, jobs_dir=self.jobs)
+        supervisor.uninstall(self.root, self.jobs)
+        with mock.patch.object(supervisor, 'RELEASE', new):
+            self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: disabled')
+            self.assertEqual(supervisor.commit_handoff(self.root, old, self.jobs), 'engine: handoff superseded')
+        self.assertFalse(self.loaded)
+
+    def test_failed_recovery_is_retried_and_new_explicit_install_supersedes_it(self):
+        old, new = self.releases()
+        (self.root / 'store.db').touch()
+        with mock.patch.object(supervisor, 'RELEASE', new):
+            supervisor.ensure(self.root, jobs_dir=self.jobs)
+        with mock.patch.object(supervisor, 'RELEASE', old), \
+             mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                supervisor.install(self.root, jobs_dir=self.jobs)
+        def fail_bootout(*args, **kwargs):
+            if args[0] == 'bootout':
+                raise supervisor.ServiceError('bootout failed')
+            return self.launchctl(*args, **kwargs)
+        with mock.patch.object(supervisor, 'RELEASE', new), \
+             mock.patch.object(supervisor, 'launchctl', side_effect=fail_bootout):
+            with self.assertRaisesRegex(supervisor.ServiceError, 'bootout failed'):
+                supervisor.ensure(self.root, jobs_dir=self.jobs)
+        self.assertEqual(supervisor.selected_release(self.root), old)
+        with mock.patch.object(supervisor, 'RELEASE', new):
+            supervisor.install(self.root, jobs_dir=self.jobs)
+            self.assertEqual(supervisor.current_release_from_job(self.job()), new)
+            self.assertFalse((supervisor.state_dir(self.root) / supervisor.EXPLICIT_INSTALL_MARKER).exists())
+
+    def test_uninstall_between_ensure_checks_cancels_pending_install(self):
+        import contextlib
+        old, new = self.releases()
+        (self.root / 'store.db').touch()
+        with mock.patch.object(supervisor, 'RELEASE', new):
+            supervisor.ensure(self.root, jobs_dir=self.jobs)
+        with mock.patch.object(supervisor, 'RELEASE', old), \
+             mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                supervisor.install(self.root, jobs_dir=self.jobs)
+        real_lock = supervisor.lock
+        @contextlib.contextmanager
+        def uninstall_before_lock(path, *args, **kwargs):
+            with mock.patch.object(supervisor, 'lock', real_lock):
+                supervisor.uninstall(self.root, self.jobs)
+            with real_lock(path, *args, **kwargs):
+                yield
+        with mock.patch.object(supervisor, 'RELEASE', new), \
+             mock.patch.object(supervisor, 'lock', side_effect=uninstall_before_lock):
+            self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: disabled')
+        self.assertFalse(self.loaded)
+        self.assertFalse((supervisor.state_dir(self.root) / supervisor.EXPLICIT_INSTALL_MARKER).exists())
+
+    def test_unrelated_registration_is_never_booted_out_by_recovery(self):
+        old, new = self.releases()
+        (self.root / 'store.db').touch()
+        with mock.patch.object(supervisor, 'RELEASE', new):
+            supervisor.ensure(self.root, jobs_dir=self.jobs)
+        with mock.patch.object(supervisor, 'RELEASE', old), \
+             mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                supervisor.install(self.root, jobs_dir=self.jobs)
+        import plistlib
+        path = supervisor.job_path(supervisor.label('engine', self.root), self.jobs)
+        job = self.job()
+        job['WorkingDirectory'] = '/unrelated'
+        path.write_bytes(plistlib.dumps(job))
+        self.launchctl_mock.reset_mock()
+        with self.assertRaisesRegex(supervisor.ServiceError, 'unrelated LaunchAgent'):
+            supervisor.ensure(self.root, jobs_dir=self.jobs)
+        self.assertNotIn('bootout', self.verbs())
+        self.assertTrue((supervisor.state_dir(self.root) / supervisor.EXPLICIT_INSTALL_MARKER).exists())
+
     def test_newer_request_supersedes_interrupted_handoff(self):
         old, new = self.releases()
         newest = old.parent / '1.0.2'

@@ -235,6 +235,40 @@ class FollowupRegression(SupervisorTest):
             self.assertEqual(handoff.call_args.args[0], new)
             self.assertFalse(workspace.lock_held(supervisor.state_dir(self.root) / 'engine.lock'))
 
+    def test_explicit_retry_for_same_release_waits_until_pass_finishes(self):
+        import threading
+        import engine
+        import store
+        from test_engine_health import CLAUDE_MD, COS_TOML, _FakeForge
+        (self.root / 'CLAUDE.md').write_text(CLAUDE_MD)
+        (self.root / 'cos.toml').write_text(COS_TOML)
+        store.migrate(self.root / 'store.db')
+        entered, finish = threading.Event(), threading.Event()
+        def run_pass(**kwargs):
+            entered.set()
+            if not finish.wait(10):
+                raise RuntimeError('pass timed out')
+        with mock.patch.object(engine.forge, 'for_workspace', return_value=_FakeForge()), \
+             mock.patch.object(engine, 'run_pass', side_effect=run_pass), \
+             mock.patch('pages.supervise'), mock.patch.object(engine.time, 'sleep'), \
+             mock.patch.object(engine, '_prepare_handoff', return_value=Path(sys.executable)), \
+             mock.patch.object(engine, '_persist_launchd_handoff', return_value=True) as handoff:
+            supervisor.ensure(self.root, jobs_dir=self.jobs)
+            thread = threading.Thread(target=lambda: engine.main(['--root', str(self.root)]))
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                with mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
+                    with self.assertRaises(SystemExit):
+                        supervisor.install(self.root, jobs_dir=self.jobs)
+                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: serving')
+                handoff.assert_not_called()
+            finally:
+                finish.set()
+                thread.join(10)
+            self.assertFalse(thread.is_alive())
+            handoff.assert_called_once_with(self.root, supervisor.RELEASE)
+
     def test_both_workspaces_install_after_lock_contention(self):
         import threading
         other = self.root.parent / 'other'
