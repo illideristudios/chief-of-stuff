@@ -15,10 +15,21 @@ import architect_signals as signals
 
 
 def file_signal(root: Path, gap_id: str, *, against: str, cfg, token=None, fetch=None, create=None) -> str:
-    """Serialize search/create/record; preserve the original key across ambiguous failures.
+    """Search all open and closed issues, file once, and record the coordinator ledger.
 
-    The forge has no idempotency token. After an unconfirmed create, only a positive dedupe
-    hit permits recovery: an empty search must never authorize a second POST.
+    --root must name the shared absolute coordinator root, even when the filing worker
+    has its own worker tree. Its compliance.md is the source; its ledger is
+    .chief-of-stuff/architect-signals.json. Search, create and record run under one lock.
+
+    A durable filing intent retains the original architect-signal:<id>@<sha> key
+    across crashes, even if the compliance commit changes. Dedupe requires that key
+    on its own line. An acted gap is not pending.
+
+    The forge has no idempotency token. Unconfirmed creates are reconciled with the
+    forge and never blindly retried: only a positive dedupe hit permits recovery.
+    An empty search or failed read must never authorize a second POST. Report an
+    unconfirmed create and stop; never bypass it or choose a new key.
+    This command never edits architecture/compliance.md; only the architect may.
     """
     import backlog
     from backlog_ref import home_of, IssueRef
@@ -81,7 +92,8 @@ def main(argv: list[str] | None = None) -> int:
     body_p.add_argument("gap_id")
     body_p.add_argument("--against", required=True)
 
-    file_p = sub.add_parser("file", help="dedupe, file and record under the coordinator's ledger lock")
+    file_p = sub.add_parser("file", help="dedupe, file and record under the coordinator's ledger lock",
+                            description=file_signal.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     file_p.add_argument("gap_id")
     file_p.add_argument("--against", required=True)
 

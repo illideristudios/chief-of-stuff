@@ -8,6 +8,7 @@ the architect writes compliance.md.
 from __future__ import annotations
 
 import json
+import io
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
+from contextlib import redirect_stdout
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "evals"))
@@ -199,6 +201,20 @@ class SignalKeyTest(unittest.TestCase):
         import architect_signals as sig
         with self.assertRaises(ValueError):
             sig.signal_key("C4", "abc\narchitect-signal:C5@def")
+
+
+class CliHelpTest(unittest.TestCase):
+    def test_file_help_explains_shared_ledger_locking_and_ambiguous_create_recovery(self):
+        import architect_signals_cli as cli
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as exited:
+            cli.main(["file", "--help"])
+        self.assertEqual(exited.exception.code, 0)
+        help_text = output.getvalue()
+        for detail in ("coordinator root", "worker tree", ".chief-of-stuff/architect-signals.json", "one lock",
+                       "architect-signal:<id>@<sha>", "across crashes", "positive dedupe hit", "never blindly retried"):
+            with self.subTest(detail=detail):
+                self.assertIn(detail, help_text)
 
 
 class AgentRulesTest(unittest.TestCase):
