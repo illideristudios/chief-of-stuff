@@ -123,6 +123,7 @@ MAILBOX = "mailbox"
 BOXES = ("inbox", "taken", "acks", "rejected")
 POLL_S = 0.05
 ECHO_WAIT_S = 30.0  # after the final result, how long a written message may wait for its echo before stdin closes
+WRITE_WAIT_S = 5.0  # maximum time to write one complete input line, including the assignment
 
 
 def messaging(run_dir: Path) -> bool:
@@ -183,6 +184,32 @@ def revoke(run_dir: Path, delivery_id: str) -> bool:
     return True
 
 
+def replayed(run_dir: Path, delivery_id: str, session_id: str, body: str) -> bool:
+    """Recover a replay from this attempt's durable stream, only for its matching taken handoff."""
+    try:
+        command = json.loads((run_dir / "command.json").read_text())
+        started = json.loads((run_dir / "started.json").read_text())
+        taken = json.loads((run_dir / MAILBOX / "taken" / f"{delivery_id}.json").read_text())
+        if (command.get("session_id") != session_id or started.get("session_id") != session_id
+                or taken.get("session_id") != session_id or taken.get("delivery_id") != delivery_id
+                or taken.get("body") != body):
+            return False
+        with (run_dir / "stream.jsonl").open("rb") as stream:
+            for line in stream:
+                if not line.endswith(b"\n"):
+                    break  # an event still being appended is not evidence yet
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(event, dict) and event.get("type") == "user" and event.get("isReplay") is True
+                        and event.get("uuid") == delivery_id and event.get("session_id", session_id) == session_id):
+                    return True
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return False
+
+
 def _close_intake(run_dir: Path) -> None:
     box = run_dir / MAILBOX
     with mailbox_lock(run_dir):
@@ -197,8 +224,43 @@ def _send(process: subprocess.Popen, content: str, session_id: str, uuid_: str |
             "parent_tool_use_id": None, "session_id": session_id}
     if uuid_:
         line["uuid"] = uuid_
-    process.stdin.write((json.dumps(line) + "\n").encode())
-    process.stdin.flush()
+    data = memoryview((json.dumps(line) + "\n").encode())
+    fd = process.stdin.fileno()
+    os.set_blocking(fd, False)
+    deadline = time.monotonic() + WRITE_WAIT_S
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_WRITE)
+        while data:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise TimeoutError("Claude stdin write timed out")
+            try:
+                count = os.write(fd, data)
+            except BlockingIOError:
+                continue
+            if not count:
+                raise BrokenPipeError("Claude stdin closed during write")
+            data = data[count:]
+
+
+def _stop_after_write_failure(process: subprocess.Popen) -> None:
+    """A partial JSON line cannot safely be followed by another message."""
+    try:
+        process.stdin.close()
+    except OSError:
+        pass
+    if process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=1)
+        except ProcessLookupError:
+            pass
 
 
 def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: str) -> bytes:
@@ -211,8 +273,11 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
     finished = closed = False
     try:
         _send(process, prompt, session_id)
-    except OSError:
-        pass  # the host already exited; its exit is collected below
+    except OSError as exc:
+        print(f"assignment stdin write failed: {exc}", file=sys.stderr)
+        _close_intake(run_dir)
+        _stop_after_write_failure(process)
+        return final
     (box / "open").touch()
     while True:
         exited = process.poll() is not None
@@ -228,7 +293,8 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
                 continue  # login rc output stays in stream.jsonl, never an event
             if not isinstance(event, dict):
                 continue
-            if event.get("type") == "user" and event.get("uuid") in inflight:
+            if (event.get("type") == "user" and event.get("isReplay") is True
+                    and event.get("session_id", session_id) == session_id and event.get("uuid") in inflight):
                 delivery = event["uuid"]
                 inflight.pop(delivery)
                 # Evidence of CLI acknowledgment only: the CLI read and replayed the line, not that the model acted on it.
@@ -255,8 +321,11 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
                 # From here a failed or partial write is ambiguous; it stays taken and is never resent.
                 try:
                     _send(process, message["body"], session_id, path.stem)
-                except OSError:
-                    continue
+                except OSError as exc:
+                    print(f"message stdin write failed: {exc}", file=sys.stderr)
+                    _close_intake(run_dir)
+                    _stop_after_write_failure(process)
+                    return final
                 inflight[path.stem] = time.monotonic() + ECHO_WAIT_S
         elif not closed and all(deadline <= time.monotonic() for deadline in inflight.values()):
             _close_intake(run_dir)

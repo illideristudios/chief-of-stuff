@@ -36,7 +36,10 @@ def read():
     for line in sys.stdin:
         message = json.loads(line)
         seen.append(message)
-        if not os.environ.get("NOECHO") or len(seen) == 1:
+        if sys.argv[3] == "hold_echo" and len(seen) > 1:
+            while not gate.with_suffix(".echo").exists():
+                time.sleep(0.01)
+        if sys.argv[3] != "noecho" or len(seen) == 1:
             out({"type": "user", "isReplay": True, "uuid": message.get("uuid") or str(uuid.uuid4()),
                  "message": message["message"]})
         first.set()
@@ -50,6 +53,14 @@ reader.join()
 if len(seen) > 1:
     out({"type": "result", "subtype": "success", "is_error": False,
          "result": f"followed up with {len(seen) - 1}", "num_turns": 2})
+'''
+
+STALL_HOST = '''
+import json, sys, time
+if sys.argv[1] != "assignment":
+    json.loads(sys.stdin.readline())
+while True:
+    time.sleep(0.1)
 '''
 
 
@@ -85,11 +96,11 @@ class LiveMessagesTest(unittest.TestCase):
         self.addCleanup(db.engine.dispose)
         return db
 
-    def start(self, noecho: bool = False) -> subprocess.Popen:
-        env = {"NOECHO": "1"} if noecho else {}
-        runner = claude_adapter.spawn([sys.executable, str(self.host), str(self.gate), self.session],
+    def start(self, noecho: bool = False, hold_echo: bool = False) -> subprocess.Popen:
+        runner = claude_adapter.spawn([sys.executable, str(self.host), str(self.gate), self.session,
+                                       "noecho" if noecho else "hold_echo" if hold_echo else "echo"],
                                       Request("the assignment", session_id=self.session, cwd=str(self.root)),
-                                      self.run_dir, env, stdin_prompt="the assignment")
+                                      self.run_dir, stdin_prompt="the assignment")
         self.addCleanup(self.stop, runner)
         started = wait_for(lambda: (self.run_dir / "started.json").exists()
                            and json.loads((self.run_dir / "started.json").read_text()))
@@ -232,6 +243,84 @@ class LiveMessagesTest(unittest.TestCase):
         worker.deliver_messages(self.db, self.root)
         self.assertIn("session ended", self.status(later).evidence)
         self.assertEqual(os.listdir(self.run_dir / claude_adapter.MAILBOX / "taken"), [f"{claim.delivery_id}.json"])
+
+    def test_recover_echo_after_runner_dies_before_ack_with_identity_checks(self):
+        runner = self.start(noecho=True)
+        message = self.queue()
+        worker.deliver_messages(self.db, self.root)
+        claim = self.status(message)
+        taken = self.run_dir / claude_adapter.MAILBOX / "taken" / f"{claim.delivery_id}.json"
+        wait_for(taken.exists)
+        os.kill(runner.pid, signal.SIGKILL)
+        runner.wait(timeout=5)
+        stream = self.run_dir / "stream.jsonl"
+        def echo(delivery, session):
+            with stream.open("a") as out:
+                out.write(json.dumps({"type": "user", "isReplay": True, "uuid": delivery,
+                                      "session_id": session}) + "\n")
+        echo(str(uuid.uuid4()), self.session)
+        echo(claim.delivery_id, str(uuid.uuid4()))
+        worker.deliver_messages(self.db, self.root)
+        self.assertEqual(self.status(message).status, "sending")
+        original = json.loads(taken.read_text())
+        taken.write_text(json.dumps({**original, "session_id": str(uuid.uuid4())}))
+        echo(claim.delivery_id, self.session)
+        worker.deliver_messages(self.db, self.root)
+        self.assertEqual(self.status(message).status, "sending")
+        taken.write_text(json.dumps(original))
+        record = worker._resume(self.db, KEY)
+        record["runs"]["implement-1"]["session_id"] = str(uuid.uuid4())
+        self.db.set_resume(KEY, record)
+        worker.deliver_messages(self.db, self.root)
+        self.assertEqual(self.status(message).status, "sending")
+        self.save_record(runner.pid, "stale")
+        worker.deliver_messages(self.open_store(), self.root)
+        self.assertEqual(self.status(message).status, "delivered")
+        self.assertIn(claim.delivery_id, self.status(message).evidence)
+
+    def test_recover_actual_echo_when_runner_dies_before_writing_ack(self):
+        runner = self.start(hold_echo=True)
+        message = self.queue()
+        worker.deliver_messages(self.db, self.root)
+        claim = self.status(message)
+        taken = self.run_dir / claude_adapter.MAILBOX / "taken" / f"{claim.delivery_id}.json"
+        wait_for(taken.exists)
+        os.kill(runner.pid, signal.SIGSTOP)
+        self.gate.with_suffix(".echo").touch()
+        wait_for(lambda: claim.delivery_id in self.written())
+        self.assertFalse((self.run_dir / claude_adapter.MAILBOX / "acks" / f"{claim.delivery_id}.json").exists())
+        os.kill(runner.pid, signal.SIGKILL)
+        runner.wait(timeout=5)
+        worker.deliver_messages(self.open_store(), self.root)
+        self.assertEqual(self.status(message).status, "delivered")
+        self.assertEqual(self.written().count(claim.delivery_id), 1)
+
+    def test_stalled_assignment_write_is_bounded_and_does_not_open_intake(self):
+        self.host.write_text(STALL_HOST)
+        runner = claude_adapter.spawn([sys.executable, str(self.host), "assignment"],
+                                      Request("x", session_id=self.session, cwd=str(self.root)),
+                                      self.run_dir, stdin_prompt="x" * 1000000)
+        self.addCleanup(self.stop, runner)
+        started = wait_for(lambda: (self.run_dir / "started.json").exists()
+                           and json.loads((self.run_dir / "started.json").read_text()))
+        self.host_pid = started["pid"]
+        runner.wait(timeout=12)
+        self.assertFalse(claude_adapter.intake_open(self.run_dir))
+        self.assertTrue((self.run_dir / "exit.json").exists())
+        self.assertNotEqual(json.loads((self.run_dir / "exit.json").read_text())["exit_code"], 0)
+
+    def test_stalled_followup_write_is_bounded_and_never_resent(self):
+        self.host.write_text(STALL_HOST)
+        runner = self.start()
+        message = self.queue("x" * 1000000)
+        worker.deliver_messages(self.db, self.root)
+        claim = self.status(message)
+        runner.wait(timeout=12)
+        for _ in range(2):
+            worker.deliver_messages(self.db, self.root)
+        self.assertEqual(self.status(message).status, "sending")
+        self.assertEqual(os.listdir(self.run_dir / claude_adapter.MAILBOX / "taken"), [f"{claim.delivery_id}.json"])
+        self.assertFalse(claude_adapter.intake_open(self.run_dir))
 
     def test_an_untaken_message_of_a_dead_runner_is_revoked_and_failed(self):
         launch = {"argv": [], "cwd": "", "session_id": self.session, "env": {}, "stdin_prompt": "p"}

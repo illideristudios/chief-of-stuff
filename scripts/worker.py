@@ -525,6 +525,10 @@ def _deliver(store: Any, root: Path, message: Any) -> None:
             store.ack_worker_message(*identity, delivery_id=message.delivery_id,
                                      evidence=f"Claude CLI replayed uuid {message.delivery_id} at {ack.get('at')}; "
                                               "the CLI read it, which does not show the model acted on it")
+        elif state == "taken" and claude_adapter.replayed(run_dir, message.delivery_id, message.session_id, message.body):
+            store.ack_worker_message(*identity, delivery_id=message.delivery_id,
+                                     evidence=f"Claude CLI replayed uuid {message.delivery_id} in the attempt's stream; "
+                                              "the CLI read it, which does not show the model acted on it")
         elif state == "missing":
             fail(f"the handoff was interrupted before the mailbox write; {NEVER_WRITTEN}")
         elif state == "rejected" or (state == "inbox" and not _runner_live(record, run_dir)
