@@ -968,6 +968,11 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
 
     def test_closing_an_exhausted_issue_clears_current_needs_input(self) -> None:
         _seed_exhausted(self.db, KEY_A, title="Closed after exhaustion", failure="dispatch failed")
+        self.db.record_segment(KEY_A, "review", 1, (NOW - timedelta(minutes=20)).isoformat(),
+                               (NOW - timedelta(minutes=19)).isoformat(), "human_review", runner="old-review")
+        data = task_forge.page_data(self.db)
+        _, _, need, _ = workers_page._store_rows(data, set(), NOW, self.root / "trees", "")
+        self.assertEqual(need, 1)
         self.db.upsert_item(KEY_A, forge_state="closed")
         data = task_forge.page_data(self.db)
         self.assertIsNone(data.exhaustion(KEY_A))
@@ -980,6 +985,7 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
     def test_exhaustion_guidance_does_not_claim_resetting_the_worktree_retries(self) -> None:
         self.assertNotIn("Reset the worktree", task_forge.EXHAUSTED_UNBLOCK)
         self.assertIn("retry limit", task_forge.EXHAUSTED_UNBLOCK)
+        self.assertIn("hold", task_forge.EXHAUSTED_UNBLOCK)
 
     def test_a_recovered_issue_is_not_labelled_from_stale_exhausted_log_lines(self) -> None:
         _seed_exhausted(self.db, KEY_C, title="Recovered after raise",
