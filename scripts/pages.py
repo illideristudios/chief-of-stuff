@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import email.utils
+import errno
 import functools
 import hashlib
 import http.server
@@ -73,6 +74,42 @@ WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
 MAX_RESPONSE = 16 * 1024 * 1024  # bound the snapshot held while preparing a response
+# All active static snapshots in this process share a 1 GiB disk budget, including
+# copies still being sent to slow clients. Requests exceeding it receive 503.
+MAX_STATIC_SNAPSHOT_BYTES = 1024 * 1024 * 1024
+STATIC_SNAPSHOT_BYTES = 0
+STATIC_SNAPSHOT_GUARD = threading.Lock()
+
+
+class StaticSnapshot:
+    def __init__(self, size):
+        global STATIC_SNAPSHOT_BYTES
+        self.size = size
+        self.file = None
+        with STATIC_SNAPSHOT_GUARD:
+            if size > MAX_STATIC_SNAPSHOT_BYTES - STATIC_SNAPSHOT_BYTES:
+                raise OSError(errno.ENOSPC, "static snapshot budget exhausted")
+            STATIC_SNAPSHOT_BYTES += size
+        try:
+            self.file = tempfile.TemporaryFile()
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        global STATIC_SNAPSHOT_BYTES
+        if self.size is not None:
+            try:
+                if self.file is not None:
+                    self.file.close()
+            finally:
+                with STATIC_SNAPSHOT_GUARD:
+                    STATIC_SNAPSHOT_BYTES -= self.size
+                self.size = None
+
+    def read(self, size):
+        return self.file.read(size)
+
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
 # An answer saved mid-render of another page (the board) can leave that page stale until the next forge refresh.
 PAGE_LOCKS: dict[str, threading.Lock] = {}
@@ -683,6 +720,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try:
             try:
                 stream = prepare()
+                if callable(stream):
+                    stream = stream()  # the publication lock has been released
             except ResponseTooLarge:
                 snapshot = ResponseSnapshot()
                 self.wfile = snapshot
@@ -731,68 +770,75 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return os.fdopen(fd, "rb")
 
     def _send_static(self, body):
+        # This open and metadata read run under the publication lock. The descriptor
+        # pins the checked inode even if a publisher replaces its pathname later.
         path = self.translate_path(self.path)
         file = None
-        snapshot = None
         try:
             file = self._open_static(path)
             stat = os.fstat(file.fileno())
             if not S_ISREG(stat.st_mode):
                 raise OSError("not a regular file")
-        except OSError:
+        except OSError as error:
             if file is not None:
                 file.close()
-            self.send_error(404, "File not found")
+            resource = error.errno in (errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.ENOSPC, errno.EIO)
+            self.send_error(503 if resource else 404, "Static file unavailable" if resource else "File not found")
             return None
-        try:
-            if "If-Modified-Since" in self.headers and "If-None-Match" not in self.headers:
-                try:
-                    modified_since = email.utils.parsedate_to_datetime(self.headers["If-Modified-Since"])
-                    if modified_since.tzinfo is None:
-                        modified_since = modified_since.replace(tzinfo=timezone.utc)
-                    last_modified = datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0)
-                    if modified_since.tzinfo is timezone.utc and last_modified <= modified_since:
-                        self.send_response(304)
-                        self.end_headers()
-                        file.close()
-                        return None
-                except (TypeError, IndexError, OverflowError, ValueError):
-                    pass
-            # An open descriptor survives rename, but not an in-place rewrite. Copy to an
-            # anonymous disk file before publishing headers, and reject changes during the copy.
-            snapshot = tempfile.TemporaryFile()
-            remaining = stat.st_size
-            while remaining:
-                chunk = file.read(min(64 * 1024, remaining))
-                if not chunk:
-                    raise OSError("file changed during snapshot")
-                snapshot.write(chunk)
-                remaining -= len(chunk)
-            after = os.fstat(file.fileno())
-            if (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-                raise OSError("file changed during snapshot")
-            snapshot.seek(0)
-            file.close()
-            self.send_response(200)
-            self.send_header("Content-Type", self.guess_type(path))
-            self.send_header("Content-Length", str(stat.st_size))
-            self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
-            self.end_headers()
-            if body:
-                return snapshot, stat.st_size
-            snapshot.close()
-            return None
-        except OSError:
-            file.close()
-            if snapshot is not None:
-                snapshot.close()
-            self.send_error(404, "File not found")
-            return None
-        except BaseException:
-            file.close()
-            if snapshot is not None:
-                snapshot.close()
-            raise
+
+        def finish():
+            snapshot = None
+            try:
+                if "If-Modified-Since" in self.headers and "If-None-Match" not in self.headers:
+                    try:
+                        modified_since = email.utils.parsedate_to_datetime(self.headers["If-Modified-Since"])
+                        if modified_since.tzinfo is None:
+                            modified_since = modified_since.replace(tzinfo=timezone.utc)
+                        last_modified = datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0)
+                        if modified_since.tzinfo is timezone.utc and last_modified <= modified_since:
+                            self.send_response(304)
+                            self.end_headers()
+                            return None
+                    except (TypeError, IndexError, OverflowError, ValueError):
+                        pass
+                if body:
+                    # Copy outside the publication lock, with a reserved disk budget.
+                    # Detect in-place edits before sending any headers or body.
+                    snapshot = StaticSnapshot(stat.st_size)
+                    remaining = stat.st_size
+                    while remaining:
+                        chunk = file.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError("file changed during snapshot")
+                        if snapshot.file.write(chunk) != len(chunk):
+                            raise OSError(errno.ENOSPC, "short snapshot write")
+                        remaining -= len(chunk)
+                    after = os.fstat(file.fileno())
+                    if (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                        raise ValueError("file changed during snapshot")
+                    snapshot.file.seek(0)
+                file.close()
+                self.send_response(200)
+                self.send_header("Content-Type", self.guess_type(path))
+                self.send_header("Content-Length", str(stat.st_size))
+                self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
+                self.end_headers()
+                if snapshot is not None:
+                    result = snapshot, stat.st_size
+                    snapshot = None  # ownership passes to _snapshot_response
+                    return result
+                return None
+            except ValueError:
+                self.send_error(404, "File not found")
+                return None
+            except OSError:
+                self.send_error(503, "Static snapshot unavailable")
+                return None
+            finally:
+                file.close()
+                if snapshot is not None:
+                    snapshot.close()
+        return finish
 
     def do_GET(self):
         self._serve(True)

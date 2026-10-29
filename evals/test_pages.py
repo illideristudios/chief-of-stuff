@@ -1946,6 +1946,92 @@ server.serve_forever()
                     self.assertEqual(response.getheader("Content-Length"), str(len(payload)))
                     self.assertEqual(response.body, payload if method == "GET" else b"")
 
+    def test_head_never_allocates_a_snapshot(self):
+        (self.pages / "asset.bin").write_bytes(b"asset")
+        with mock.patch.object(pg.tempfile, "TemporaryFile", side_effect=AssertionError("HEAD copied file")):
+            response = get(self.port, "/asset.bin", method="HEAD")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Length"), "5")
+
+    def test_snapshot_storage_failure_is_not_a_missing_file(self):
+        (self.pages / "asset.bin").write_bytes(b"asset")
+        with mock.patch.object(pg.tempfile, "TemporaryFile", side_effect=OSError(28, "no space")):
+            response = get(self.port, "/asset.bin")
+        self.assertEqual(response.status, 503)
+        self.assertEqual(pg.STATIC_SNAPSHOT_BYTES, 0)
+        real_temp = pg.tempfile.TemporaryFile
+        opened = []
+        class FailingWrite:
+            def __init__(self):
+                self.file = real_temp()
+                opened.append(self.file)
+            def write(self, data):
+                raise OSError(28, "disk full")
+            def close(self):
+                self.file.close()
+        with mock.patch.object(pg.tempfile, "TemporaryFile", side_effect=FailingWrite):
+            self.assertEqual(get(self.port, "/asset.bin").status, 503)
+        self.assertTrue(opened[0].closed)
+        self.assertEqual(pg.STATIC_SNAPSHOT_BYTES, 0)
+        with mock.patch.object(pg.Handler, "_open_static", side_effect=OSError(24, "too many files")):
+            self.assertEqual(get(self.port, "/asset.bin").status, 503)
+        self.assertEqual(get(self.port, "/asset.bin").status, 200)
+
+    def test_concurrent_snapshots_reserve_storage_until_client_disconnects(self):
+        (self.pages / "asset.bin").write_bytes(b"x" * (4 * 1024 * 1024))
+        client = socket.socket()
+        self.addCleanup(client.close)
+        self.server.handle_error = lambda *args: None
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        client.settimeout(10)
+        with mock.patch.object(pg, "MAX_STATIC_SNAPSHOT_BYTES", 4 * 1024 * 1024):
+            client.connect(("127.0.0.1", self.port))
+            client.sendall(f"GET /asset.bin HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n\r\n".encode())
+            self.assertIn(b"200", client.recv(1024))
+            self.assertEqual(get(self.port, "/asset.bin").status, 503)
+            self.assertEqual(get(self.port, "/asset.bin", method="HEAD").status, 200)
+            client.close()
+            for _ in range(100):
+                if pg.STATIC_SNAPSHOT_BYTES == 0:
+                    break
+                threading.Event().wait(0.01)
+            self.assertEqual(pg.STATIC_SNAPSHOT_BYTES, 0)
+            self.assertEqual(get(self.port, "/asset.bin").status, 200)
+
+    def test_cli_can_publish_while_static_copy_is_paused(self):
+        (self.pages / "asset.bin").write_bytes(b"x" * 100_000)
+        entered, release = threading.Event(), threading.Event()
+        real_open = pg.Handler._open_static
+        class PausedFile:
+            def __init__(self, stream):
+                self.stream = stream
+            def fileno(self):
+                return self.stream.fileno()
+            def read(self, size):
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError("copy not released")
+                return self.stream.read(size)
+            def close(self):
+                self.stream.close()
+        results = []
+        with mock.patch.object(pg.Handler, "_open_static", lambda handler, name: PausedFile(real_open(handler, name))), \
+             mock.patch.object(pg, "MAX_STATIC_SNAPSHOT_BYTES", 100_000):
+            thread = threading.Thread(target=lambda: results.append(get(self.port, "/asset.bin")), daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertEqual(get(self.port, "/asset.bin").status, 503)
+                script = Path(__file__).resolve().parent.parent / "scripts" / "render_board.py"
+                proc = subprocess.run([sys.executable, str(script), "--root", str(self.root), "--date", self.day],
+                                      capture_output=True, text=True, timeout=5)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+            finally:
+                release.set()
+                thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(results[0].status, 200)
+
     def test_static_paths_cannot_escape_or_follow_external_symlinks(self):
         outside = self.root / "secret.bin"
         outside.write_bytes(b"secret")
@@ -2045,8 +2131,11 @@ server.serve_forever()
             def close(self):
                 self.stream.close()
         def wrap_stream(handler, body):
-            result = real_send(handler, body)
-            return (TruncateDuringTransmission(result[0]), result[1])
+            finish = real_send(handler, body)
+            def wrapped():
+                result = finish()
+                return (TruncateDuringTransmission(result[0]), result[1])
+            return wrapped
         with mock.patch.object(pg.Handler, "_send_static", wrap_stream):
             response = get(self.port, "/asset.bin")
         self.assertEqual(path.read_bytes(), b"changed")
