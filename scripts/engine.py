@@ -780,10 +780,16 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
              if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
     _remember_verified(store, facts)
     inputs = _planning_inputs(store, items)
-    actions = reconcile.plan(items, policies=policies,
-                             free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
-                             hold_stages=board.hold_stages if board is not None else (),
-                             facts=facts, **inputs)
+    free_slots = slots.free_slots(max_concurrency, slots.running(store))
+
+    def plan():
+        return reconcile.plan(items, policies=policies, free_slots=free_slots, now=now,
+                              hold_stages=board.hold_stages if board is not None else (), facts=facts, **inputs)
+
+    actions = plan()
+    if reviews := engine_merge.consultations(forge, store, actions, at):
+        inputs["architect_reviews"] = reviews
+        actions = plan()
     intents = {key: decision_actions.current_intent(rows) for key, rows in inputs["decisions"].items()}  # what planning saw
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}

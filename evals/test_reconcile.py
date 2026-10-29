@@ -280,7 +280,8 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(item, history, {"minor": 1}),
                          [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open")])
         history.append(Segment("architect", started_at=history[-1].started_at, ended_at=NOW))
-        self.assertEqual(self.plan(item, history, {}), [reconcile.Merge(KEY)])
+        self.assertEqual(self.plan(item, history, {}, architect_reviews={KEY: reconcile.ArchitectReview(
+            HEAD, (f"Architect: APPROVED {HEAD}",))}), [reconcile.Merge(KEY)])
 
     def test_review_edge_counts_every_repair_attempt_against_the_retry_limit(self):
         self.p.stages["repair"] = policy.Place("repair", "builder")

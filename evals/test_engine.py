@@ -247,6 +247,26 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(len(self.forge.merges), 1)
         self.assertEqual(self.architect_requests, [])
 
+    def test_architect_request_carries_the_review_findings(self):
+        self.architect_gate()
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True, "blocking_severity": "critical"})
+        self.findings(counts={"minor": 1})
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "architect consultation is required")])
+        self.assertEqual(json.loads(self.architect_requests[0].split("Findings to dispose of:\n", 1)[1]),
+                         [{"severity": "minor", "title": "finding", "evidence": "seen"}])
+
+    def test_architect_comment_failure_keeps_waiting_without_posting(self):
+        self.architect_gate()
+        self.forge.comments = mock.Mock(side_effect=ForgeError("comments unavailable"))
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "architect consultation is required")])
+        self.assertEqual(self.architect_requests, [])
+        self.assertEqual(self.forge.merges, [])
+
+    def test_existing_architect_request_is_not_reposted_after_engine_restart(self):
+        self.architect_gate((f"Architect review requested: {tf.tma.HEAD}\n\nFindings to dispose of:\n[]",))
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "architect consultation is required")])
+        self.assertEqual(self.architect_requests, [])
+
     def test_new_head_after_approval_posts_one_new_architect_request(self):
         self.architect_gate((f"Architect review requested: {tf.tma.HEAD}", f"Architect: APPROVED {tf.tma.HEAD}"))
         self.forge.closing_request = lambda key: SimpleNamespace(number=10, head="b" * 40, verdict="ready", approval="")
@@ -276,6 +296,20 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "architect consultation is required")])
         self.assertEqual(len(self.architect_requests), 1)
         self.assertEqual(self.forge.merges, [])
+
+    def test_architect_changes_are_carried_into_the_fix_assignment(self):
+        self.architect_gate((f"Architect: CHANGES {tf.tma.HEAD}\nfix: preserve the parser state",))
+        self.run_pass()
+        got = SimpleNamespace(ok=True, issue=SimpleNamespace(title="Parser", body="Fix parsing"))
+        with mock.patch.object(self.forge, "issue", return_value=got), \
+             mock.patch.object(engine.worker, "_existing_run", return_value=None), \
+             mock.patch.object(engine.worker.dispatch_prompt, "compose_issue", side_effect=RuntimeError("captured")) as compose:
+            with self.assertRaisesRegex(RuntimeError, "captured"):
+                engine.worker.launch(KEY, "implement", 1, "builder", store=self.db, root=self.root,
+                                     trees=self.trees, policies=self.p, forge=self.forge)
+        body = compose.call_args.args[2]
+        self.assertIn(f"Architect: CHANGES {tf.tma.HEAD}", body)
+        self.assertIn("fix: preserve the parser state", body)
 
     def released_implementation(self, *, request=True, held=False, shared=False):
         pr = {**tf.tma.pr(10, [], draft=True), "headRefName": "work/issue-1"}
