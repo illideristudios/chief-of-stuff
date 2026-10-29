@@ -29,7 +29,9 @@ def source_key(key: str, home) -> str:
     namespace, sep, number = key.rpartition("#")
     if sep and number.isdecimal():
         if namespace.startswith("github:"):
-            return issue_key(f"https://github.com/{namespace[len('github:'):]}/issues/{number}", home)
+            url = f"https://github.com/{namespace[len('github:'):]}/issues/{number}"
+            ref = board_sources.backlog.issue_ref(url, home, any_host=True)
+            return ref.label(home) if ref else key.strip()
         if namespace.startswith("gitlab:"):
             return board_sources.store_label(key, home)
         if namespace and "/" in namespace and isinstance(home, board_sources.backlog.Backlog):
@@ -264,7 +266,8 @@ def forge_ends(tasks: list[Task], sources: board_sources.Sources, zone: ZoneInfo
             continue
         if merges := [c.merged_at for c in task_changes(t, sources) if c.state == "merged" and c.merged_at]:
             out[name] = (max(merges).astimezone(zone), "merged")
-        elif (issue := sources.issues.get(issue_key(t.issue, sources.home)) if t.issue.strip() else None) and issue.state == "closed" and issue.closed_at:
+        elif (issue := next((sources.issues[k] for k in lookup_keys((t.issue,), sources.home)
+                             if k in sources.issues), None)) and issue.state == "closed" and issue.closed_at:
             out[name] = (issue.closed_at.astimezone(zone), "closed")
     return out
 

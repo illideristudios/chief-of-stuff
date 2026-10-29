@@ -74,6 +74,8 @@ def workspace(backlog: str, issue: str = "#115", mr: str = "") -> Path:
 def gh_pr(number, merged_at=None, state="OPEN"):
     return {"__typename": "PullRequest", "number": number, "url": f"https://github.com/o/app/pull/{number}",
             "title": f"PR {number}", "state": state, "isDraft": False, "mergedAt": merged_at,
+            "mergeable": "UNKNOWN", "headRefName": "", "headRef": None, "headRepository": None,
+            "closingIssuesReferences": {"nodes": []}, "reviewThreads": {"nodes": []},
             "baseRefName": "main", "body": "Closes #118", "headRefOid": HEAD, "reviewDecision": "APPROVED",
             "files": {"nodes": [{"path": "src/a.py"}]},
             "latestReviews": {"nodes": [{"author": {"login": "robin"}}, {"author": {"login": "robin"}, "state": "APPROVED",
@@ -84,7 +86,7 @@ def gh_pr(number, merged_at=None, state="OPEN"):
 
 def gh_issue(number, labels=("stage:2-implement",)):
     return {"__typename": "Issue", "number": number, "url": f"https://github.com/o/app/issues/{number}",
-            "title": f"Issue {number}", "state": "OPEN", "labels": {"nodes": [{"name": x} for x in labels]}}
+            "title": f"Issue {number}", "state": "OPEN", "body": "", "closedAt": None, "milestone": None, "labels": {"nodes": [{"name": x} for x in labels]}}
 
 
 class FakeGh:
@@ -97,8 +99,13 @@ class FakeGh:
             return 1, "", "gh: not logged in"
         query = args[args.index("-f") + 1]
         repo = {"n118": gh_issue(118), "n115": gh_issue(115, ()), "n58": gh_pr(58), **self.nodes}
-        data = {"r0": {n: v for n, v in repo.items() if f"{n}: " in query},
-                "merged": {"nodes": [gh_pr(41, "2026-09-26T05:41:00Z", "MERGED")]}}
+        merged = {**gh_pr(41, "2026-09-26T05:41:00Z", "MERGED"), "updatedAt": "2026-09-26T05:41:00Z"}
+        data = {"r0": {n: repo.get(n) for n in re.findall(r"(n\d+): issueOrPullRequest", query)},
+                "rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000},
+                "inventory": {"pullRequests": {"nodes": ([{k: merged[k] for k in ("number", "state", "mergedAt", "updatedAt")}] if "states: [MERGED]" in query else []),
+                                                "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        if 'pullRequest(number:' in query:
+            data['r0'] = {'n41': merged}
         return 0, json.dumps({"data": data}), ""
 
 
@@ -108,13 +115,14 @@ class GitHubTest(unittest.TestCase):
         self.gh = FakeGh()
         self.got = bs.refresh(self.root, NOW, gh=self.gh)
 
-    def test_one_batched_graphql_call_for_what_the_tracker_names(self):
-        self.assertEqual(len(self.gh.calls), 1)
-        args = self.gh.calls[0]
-        self.assertEqual(args[:2], ["api", "graphql"])
-        query = args[args.index("-f") + 1]
-        for asked in ("n118: issueOrPullRequest(number: 118)", "n115:", "n58:", "is:merged"):
-            self.assertIn(asked, query)
+    def test_named_and_merged_are_separate_bounded_queries(self):
+        self.assertEqual(len(self.gh.calls), 4)
+        queries = [args[args.index("-f") + 1] for args in self.gh.calls]
+        for asked in ("n118: issueOrPullRequest(number: 118)", "n115:", "n58:"):
+            self.assertIn(asked, queries[0])
+        self.assertIn("pullRequests(first: 100", queries[1])
+        self.assertIn("pullRequests(first: 100", queries[2])
+        self.assertIn("pullRequest(number: 41)", queries[3])
 
     def test_issues_and_changes_by_ref(self):
         self.assertEqual(self.got.issues["#118"].labels, ("stage:2-implement",))
@@ -131,7 +139,7 @@ class GitHubTest(unittest.TestCase):
         self.assertEqual((merged.state, merged.merged_at.astimezone(ZONE).strftime("%H:%M")), ("merged", "00:41"))
 
     def test_fetched_times_and_the_cache_round_trip(self):
-        self.assertEqual(self.got.fetched, {"kanban": NOW, "merge requests": NOW, "workers": NOW})
+        self.assertEqual(self.got.fetched, {"kanban": NOW, "merge requests": NOW, "github sweep": NOW, "workers": NOW})
         self.assertEqual(bs.load(self.root / "pages"), self.got)
 
     def test_a_failed_forge_is_an_error_and_keeps_the_last_good_facts(self):
@@ -1275,6 +1283,19 @@ class CarriedStateKeepsItsHomeTest(unittest.TestCase):
         view = bs.for_home(stale, cfg.backlog)
         self.assertEqual(task_forge.effective_stage(task, view, lanes), "implement")
 
+    def test_write_reports_changed_home_as_unavailable_without_old_fetch_times(self):
+        root, first = self.refreshed()
+        claude = root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("repo o/app", "repo acme/web"))
+        for errors in ({}, {"kanban": "offline", "merge requests": "offline"}):
+            with self.subTest(errors=errors):
+                bs._write(root / "pages" / bs.CACHE, replace(first, errors=errors))
+                html = rb.write(root, day=DAY, now=NOW)[0].read_text().split("</style>", 1)[1]
+                self.assertIn("kanban: unavailable", html)
+                self.assertIn("merge requests: unavailable", html)
+                self.assertNotIn("kanban " + first.fetched["kanban"].astimezone(NOW.tzinfo).strftime("%H:%M"), html)
+                self.assertNotIn("merge requests " + first.fetched["merge requests"].astimezone(NOW.tzinfo).strftime("%H:%M"), html)
+
     def test_rendering_follows_each_refresh_outcome(self):
         root = workspace("GitLab; host https://forge.example; project group/old; token env OLD")
         path = root / "daily" / f"{DAY}-tracker.md"
@@ -1443,25 +1464,31 @@ class StoreWorkspaceSourcesTest(unittest.TestCase):
         def gh(args, input_text=None):
             query = args[args.index("-f") + 1]
             queries.append(query)
-            # Repos sorted alphabetically: r0 is acme/other, r1 is o/app.
-            data = {
-                "r0": {"n7": {**gh_issue(7), "url": "https://github.com/acme/other/issues/7"}},
-                "r1": {
-                    "n92": gh_issue(92),
-                    "n5": {**gh_issue(5, ()), "state": "CLOSED", "closedAt": "2026-09-20T18:00:00Z"},
-                    "n6": {**gh_issue(6, ()), "state": "CLOSED", "closedAt": "2026-09-25T15:00:00Z"},
-                    "n33": recorded_merged,
-                },
-                "merged": {"nodes": [recent_merged]},
-                "open": {"nodes": [open_pr]},
-            }
-            return 0, json.dumps({"data": data}), ""
+            updated = "2026-09-26T06:00:00Z"
+            prs = [{**open_pr, "updatedAt": updated}, {**recent_merged, "updatedAt": updated}]
+            if 'inventory: repository' in query:
+                result = {"inventory": {"pullRequests": {"nodes": [
+                    {k: p[k] for k in ("number", "state", "mergedAt", "updatedAt")} for p in prs
+                    if p["state"] == ("OPEN" if "states: [OPEN]" in query else "MERGED")],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+            elif 'issueOrPullRequest' in query:
+                if 'owner: "acme"' in query:
+                    nodes = {"n7": {**gh_issue(7), "url": "https://github.com/acme/other/issues/7"}}
+                else:
+                    nodes = {"n92": gh_issue(92), "n5": {**gh_issue(5, ()), "state": "CLOSED", "closedAt": "2026-09-20T18:00:00Z"},
+                             "n6": {**gh_issue(6, ()), "state": "CLOSED", "closedAt": "2026-09-25T15:00:00Z"}, "n33": recorded_merged,
+                             "n115": gh_issue(115), "n118": gh_issue(118), "n58": gh_pr(58)}
+                result = {"r0": {n: nodes.get(n) for n in re.findall(r"(n\d+): issueOrPullRequest", query)}}
+            else:
+                result = {"r0": {f"n{p['number']}": p for p in prs}}
+            result['rateLimit'] = {"cost": 1, "remaining": 4900, "limit": 5000}
+            return 0, json.dumps({"data": result}), ""
 
         got = bs.refresh(root, NOW, gh=gh)
         self.assertEqual(got.errors, {})
-        self.assertEqual(len(queries), 1)
-        self.assertNotIn("team/app", queries[0])
-        self.assertNotIn("n8:", queries[0])
+        self.assertGreaterEqual(len(queries), 5)
+        self.assertNotIn("team/app", " ".join(queries))
+        self.assertNotIn("n8:", " ".join(queries))
         self.assertEqual(bs.load(root / "pages"), got)
 
         self.assertEqual(got.issues["#92"].url, "https://github.com/o/app/issues/92")
@@ -1604,23 +1631,22 @@ class StoreWorkspaceIssuesTest(unittest.TestCase):
         def fake_gh(args, input_text=None):
             query = args[args.index("-f") + 1]
             queries.append(query)
-            data = {
-                "r0": {"n118": {**gh_issue(118), "body": "## Context\nHome body.\n\n## Acceptance\n- [x] Home criterion\n"}},
-                "r1": {"n118": {
-                    "__typename": "Issue", "number": 118, "url": "https://github.com/other/lib/issues/118",
-                    "title": "Other issue 118", "state": "OPEN", "labels": {"nodes": []},
-                    "body": "## Context\nOther body.\n\n## Acceptance\n- [ ] Other criterion\n",
-                }},
-                "merged": {"nodes": []},
-                "open": {"nodes": [gh_pr(58)]},
-            }
+            data = {"rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000}}
+            if "inventory: repository" in query:
+                data["inventory"] = {"pullRequests": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+            else:
+                other = 'owner: "other", name: "lib"' in query
+                data["r0"] = {"n118": {**gh_issue(118),
+                    "url": "https://github.com/other/lib/issues/118" if other else "https://github.com/o/app/issues/118",
+                    "title": "Other issue 118" if other else "Home issue 118",
+                    "body": "## Context\nOther body.\n\n## Acceptance\n- [ ] Other criterion\n" if other else
+                            "## Context\nHome body.\n\n## Acceptance\n- [x] Home criterion\n"}}
             return 0, json.dumps({"data": data}), ""
 
         got = bs.refresh(root, NOW, gh=fake_gh)
-        self.assertEqual(len(queries), 1)
-        self.assertIn('owner: "o", name: "app"', queries[0])
-        self.assertIn('owner: "other", name: "lib"', queries[0])
-        self.assertNotIn("labs.example.test", queries[0])
+        self.assertTrue(any('owner: "o", name: "app"' in q for q in queries))
+        self.assertTrue(any('owner: "other", name: "lib"' in q for q in queries))
+        self.assertFalse(any("labs.example.test" in q for q in queries))
         self.assertEqual(got.errors, {})
         self.assertEqual(sorted(got.issues), ["#118", "other/lib#118"])
         self.assertIn("Home criterion", got.issues["#118"].body)
@@ -1717,12 +1743,18 @@ class StoreWorkspaceIssuesTest(unittest.TestCase):
         root = self.store_workspace("GitHub issues; repo o/app", "github:o/app#118", "github:other/lib#118")
         def answer(fail=False):
             def gh(args, input_text=None):
-                data = {"r0": {"n118": {**gh_issue(118), "body": "Changed" if fail else "Home"}},
-                        "r1": None if fail else {"n118": {**gh_issue(118),
-                            "url": "https://github.com/other/lib/issues/118", "body": "Other"}},
-                        "merged": {"nodes": []}, "open": {"nodes": []}}
-                errors = [{"path": ["r1"], "message": "other/lib unavailable"}] if fail else []
-                return int(fail), json.dumps({"data": data, "errors": errors}), ""
+                query = args[-1]
+                data = {"rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000}}
+                if "inventory: repository" in query:
+                    data["inventory"] = {"pullRequests": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+                else:
+                    other = 'owner: "other", name: "lib"' in query
+                    if fail and other:
+                        return 1, json.dumps({"data": data, "errors": [{"message": "other/lib unavailable"}]}), ""
+                    data["r0"] = {"n118": {**gh_issue(118),
+                        "url": "https://github.com/other/lib/issues/118" if other else "https://github.com/o/app/issues/118",
+                        "body": "Other" if other else "Changed" if fail else "Home"}}
+                return 0, json.dumps({"data": data}), ""
             return gh
         first = bs.refresh(root, NOW, gh=answer())
         self.assertEqual(sorted(first.issues), ["#118", "other/lib#118"])

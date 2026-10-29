@@ -1,5 +1,6 @@
 """Regression coverage for task and forge identity across projects and hosts."""
 import json
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -16,6 +17,22 @@ from tracker import parse_tracker
 from test_board_sources import gl_mr
 
 
+def github_identity_fixture(args):
+    from test_board_sources import gh_issue, gh_pr
+    q = args[-1]
+    data = {'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}
+    if 'inventory: repository' in q:
+        data['inventory'] = {'pullRequests': {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}}
+    else:
+        sibling = 'name: "sibling"' in q
+        pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7',
+              'closingIssuesReferences': {'nodes': [{'number': 7, 'repository': {'name': 'sibling', 'owner': {'login': 'o'}}}]}}
+        issue = {**gh_issue(7), 'url': 'https://github.com/o/sibling/issues/7',
+                 'body': 'Sibling task body\n<!-- hidden comment -->\n\n## Acceptance\n- [ ] Sibling criterion'}
+        data['r0'] = {f'n{n}': (pr if sibling and n == '42' else issue if sibling and n == '7' else gh_pr(58) if n == '58' else gh_issue(int(n)))
+                      for n in re.findall(r'n(\d+): issueOrPullRequest', q)}
+    return 0, json.dumps({'data': data}), ''
+
 def configured(home):
     return replace(tip.BoardTest().cfg(), backlog=home)
 
@@ -23,6 +40,22 @@ def configured(home):
 class IdentityTest(unittest.TestCase):
     def setUp(self):
         self.home = bs.backlog.Backlog("https://labs.example.test", "team/app")
+
+    def test_malformed_qualified_references_never_select_home_forge_facts(self):
+        home = bs.backlog.GitHubBacklog("example/repo")
+        merged = bs.Change("#12", "https://github.com/example/repo/pull/12", "home change", "merged", False,
+                           "passed", True, 1, tip.NOW, "main", (), ("#7",))
+        closed = bs.Issue("#7", "https://github.com/example/repo/issues/7", "home issue", "closed", (), closed_at=tip.NOW)
+        src = bs.Sources({}, {"#7": closed}, {merged.ref: merged}, (), {}, home=home)
+        for ref in ("github:bad#7", "https://foreign.example/unsupported/7"):
+            with self.subTest(ref=ref):
+                task = parse_tracker(tip.TODAY_START.replace("#109", ref)).tasks[0]
+                self.assertNotIn("#7", task_forge.lookup_keys((ref,), home))
+                self.assertEqual(task_forge.task_changes(task, src), ())
+                self.assertEqual(task_forge.forge_ends([task], src, tip.NOW.tzinfo), {})
+        valid = parse_tracker(tip.TODAY_START.replace("#109", "#7")).tasks[0]
+        self.assertEqual(task_forge.task_changes(valid, src), (merged,))
+        self.assertIn(valid.name, task_forge.forge_ends([valid], src, tip.NOW.tzinfo))
 
     def test_gitlab_closing_references_are_host_safe_and_shorthand_matches(self):
         description = ("Fixes #7, team/app#8, team/other#9, team/nested/other#10 and "
@@ -178,10 +211,12 @@ class IdentityTest(unittest.TestCase):
         home = bs.backlog.GitHubBacklog('o/app')
         pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7',
               'closingIssuesReferences': {'nodes': [{'number': 7, 'repository': {'name': 'sibling', 'owner': {'login': 'o'}}}]}}
-        def gh(args):
-            return 0, json.dumps({'data': {'r0': {'n7': gh_issue(7)}, 'r1': {'n42': pr}, 'merged': {'nodes': []}}}), ''
-        issues, changes, error = bs.github(home, {'o/app': {7}, 'o/sibling': {42}}, NOW, '', gh)
-        self.assertEqual(error, '')
+        import github_scan
+        with tempfile.TemporaryDirectory() as tmp:
+            issues, changes, error, _ = github_scan.scan(Path(tmp) / 'scan.json', home,
+                {'o/app': {7}, 'o/sibling': {42}}, NOW, '', False,
+                github_scan.Admission(github_identity_fixture, 40, 200, 500), NOW, bs)
+        self.assertEqual(error, {})
         self.assertEqual(changes['o/sibling#42'].issues, ('o/sibling#7',))
         src = bs.Sources({}, issues, changes, (), {}, home=home)
         home_task = parse_tracker(tip.TODAY_START.replace('#109', '#7')).tasks[0]
@@ -299,13 +334,10 @@ class ReviewFindingsTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         calls = []
         def gh(args):
-            query = args[-1]
-            calls.append(query)
-            pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7'}
-            return 0, json.dumps({'data': {'r0': {'n118': gh_issue(118), 'n58': gh_pr(58)},
-                                             'r1': {'n7': gh_issue(7), 'n42': pr}, 'merged': {'nodes': []}}}), ''
+            calls.append(args[-1])
+            return github_identity_fixture(args)
         src = bs.refresh(root, NOW, gh=gh)
-        self.assertIn('n42: issueOrPullRequest(number: 42)', calls[0])
+        self.assertTrue(any('n42: issueOrPullRequest(number: 42)' in query for query in calls))
         self.assertEqual(src.changes['o/sibling#42'].issues, ('o/sibling#7',))
         sibling = parse_tracker(tip.TODAY_START.replace('#109', 'o/sibling#7')).tasks[0]
         local = parse_tracker(tip.TODAY_START.replace('#109', '#7')).tasks[0]
@@ -394,12 +426,7 @@ class IndependentReviewRegressions(unittest.TestCase):
         import shutil
         root = workspace('GitHub issues; repo o/app', issue='o/sibling#7', mr='https://github.com/o/sibling/pull/42')
         self.addCleanup(shutil.rmtree, root, True)
-        def gh(args):
-            pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7'}
-            issue = {**gh_issue(7), 'url': 'https://github.com/o/sibling/issues/7',
-                     'body': 'Sibling task body\n<!-- hidden comment -->\n\n## Acceptance\n- [ ] Sibling criterion'}
-            return 0, json.dumps({'data': {'r0': {'n118': gh_issue(118), 'n58': gh_pr(58)},
-                                             'r1': {'n7': issue, 'n42': pr}, 'merged': {'nodes': []}}}), ''
+        gh = github_identity_fixture
         src = bs.refresh(root, NOW, gh=gh)
         tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
         task_html = issue_page.render(7, [(NOW.date(), tracker)], src, NOW, cfg=bs.read_config(root))

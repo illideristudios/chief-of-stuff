@@ -50,7 +50,7 @@ class ExternalLinksTest(tsp.SourcePage):
         # #208: panels no longer supply external links; a merged card with no issue links to its forge page.
         sources = replace(tfb.SOURCES, changes={**tfb.SOURCES.changes,
                           "!90": tfb.change("!90", state="merged", merged_at=NOW)})
-        html = rb.render(tfb.TRACKER, parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW, lanes=tfb.LANES,
+        html = rb.render(tfb.TRACKER, parse_coordinator(tfb.CLAUDE_MD, today=NOW.date()), NOW, lanes=tfb.LANES,
                          kanban=tfb.KANBAN, sources=sources,
                          decisions=[("x", {"headline": "Pick", "recommended": "B", "default": "d"},
                                      NOW.replace(hour=10, minute=0), "")],

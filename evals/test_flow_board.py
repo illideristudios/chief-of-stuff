@@ -267,7 +267,7 @@ class Build(unittest.TestCase):
     def test_a_card_gains_its_change_ref_and_marks(self) -> None:
         # Both refs open the task page (#209): !48 names #9, so it lands there too.
         card = next(c for col in self.cols() for c in col.cards if c.name == "Cut the release")
-        self.assertEqual(card.refs, (("#9", "/issues/9"), ("!48", "/issues/9")))
+        self.assertEqual(card.refs, (("#9", fragment.issue_href("gitlab:forge.example/group/project#9")), ("!48", fragment.issue_href("gitlab:forge.example/group/project#9"))))
         self.assertEqual(card.marks, (columns.Mark("passed", "passed"),
                                       columns.Mark("shares file with !42", "shared"),
                                       columns.Mark("shares file with !50", "shared")))
@@ -284,23 +284,22 @@ class Build(unittest.TestCase):
         self.assertEqual(rb.change_marks((change("!1", pipeline="running"),)), (columns.Mark("running", "pending"),))
 
     def test_an_issue_url_matches_its_number(self) -> None:
-        # A ref's number, not a matching sources.issues URL, decides its link: it still opens /issues/7,
-        # sources.issues["#7"] notwithstanding (#209).
+        # The task's URL determines the canonical issue route, independently of the cache.
         card = next(c for col in self.cols() for c in col.cards if c.name == "Write README")
-        self.assertEqual(card.refs, (("#7", "/issues/7"),))
+        self.assertEqual(card.refs, (("#7", fragment.issue_href("gitlab:forge.example/group/project#7")),))
 
     def test_a_tracker_issue_url_links_without_sources(self) -> None:
         card = next(c for col in rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES,
                                                   sources=replace(bs.EMPTY, home=SOURCES.home))
                     for c in col.cards if c.name == "Write README")
-        self.assertEqual(card.refs, (("#7", "/issues/7"),))
+        self.assertEqual(card.refs, (("#7", fragment.issue_href("gitlab:forge.example/group/project#7")),))
         bare = next(c for col in self.cols() for c in col.cards if c.name == "Webhook check")
         self.assertEqual((bare.refs, bare.href), ((), ""))
 
     def test_main_holds_the_changes_merged_today(self) -> None:
         main = self.cols()[-1]
         self.assertEqual((main.name, [(c.name, c.refs, c.owner, c.state, c.kind) for c in main.cards]),
-                         ("main", [("Locale fallback", (("#8", "/issues/8"), ("!37", "/issues/8")),
+                         ("main", [("Locale fallback", (("#8", fragment.issue_href("gitlab:forge.example/group/project#8")), ("!37", fragment.issue_href("gitlab:forge.example/group/project#8"))),
                                     "merged 12:30", "done", "merged today")]))
         html = columns.render([columns.Column("main", main.cards * 5)])
         self.assertEqual(html.count('class="columns-card"'), 5)
@@ -450,6 +449,25 @@ class CardFactsTest(unittest.TestCase):
             html = rb.write(root, day=today.isoformat())[0].read_text().split("</style>", 1)[1]
             self.assertIn("looping", self.marks(html))
 
+    def test_write_reads_old_fix_history_when_cached_forge_home_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(CLAUDE_MD + "\n- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "fix", "merge"] }\n')
+            (root / "daily").mkdir()
+            today = datetime.now(NOW.tzinfo).date()
+            tracker = "\n".join(line for line in TRACKER.splitlines() if not line.startswith(("| Write README |", "| Webhook check |", "| Console |"))) + "\n"
+            (root / f"daily/{today}-tracker.md").write_text(tracker + "- 11:00 stage: Cut the release → fix\n")
+            earlier = tracker.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
+            earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"
+            (root / f"daily/{today - timedelta(days=5)}-tracker.md").write_text(earlier)
+            old = replace(SOURCES, home=backlog.Backlog("https://forge.example", "group/old"),
+                          changes={"!48": replace(change("!48", state="merged", issues=("#9",)),
+                                                  url="https://forge.example/group/old/-/merge_requests/48")})
+            bs._write(root / "daily" / bs.CACHE, old)
+            html = rb.write(root, day=today.isoformat())[0].read_text().split("</style>", 1)[1]
+            self.assertIn("looping", self.marks(html))
+
     def test_a_reused_name_keeps_moves_with_the_issue_on_their_day(self):
         earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
         earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"
@@ -550,14 +568,14 @@ class HomeProjectUrlTest(unittest.TestCase):
 
     def test_the_card_names_the_issue_by_its_short_key(self) -> None:
         card = card_named(rb.build_columns(self.tasks, LANES, KANBAN, self.sources, NOW), "Ship it")
-        self.assertEqual(card.refs, (("#8", "/issues/8"), ("!60", "/issues/8")))
+        self.assertEqual(card.refs, (("#8", fragment.issue_href("gitlab:example.com/o/app#8")), ("!60", fragment.issue_href("gitlab:example.com/o/app#8"))))
         self.assertIn(columns.Mark("drift", "drift"), card.marks)
 
     def test_the_cards_own_key_decides_its_ref(self) -> None:
         # no change and no known issue: only the card's own issue_key call decides its ref
         bare = replace(self.sources, changes={}, issues={})
         card = card_named(rb.build_columns(self.tasks, LANES, KANBAN, bare, NOW), "Ship it")
-        self.assertEqual(card.refs, (("#8", "/issues/8"),))
+        self.assertEqual(card.refs, (("#8", fragment.issue_href("gitlab:example.com/o/app#8")),))
 
 
 class CardLinkTest(unittest.TestCase):
@@ -571,11 +589,11 @@ class CardLinkTest(unittest.TestCase):
         for sources in (SOURCES, replace(bs.EMPTY, home=SOURCES.home)):
             cols = rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, sources, NOW)
             with self.subTest(sources="some" if sources.changes else "none"):
-                self.assertEqual(card_named(cols, "Write README").href, "/issues/7")
-                self.assertEqual(card_named(cols, "Write README").refs, (("#7", "/issues/7"),))
-                self.assertEqual(card_named(cols, "Cut the release").href, "/issues/9")
+                self.assertEqual(card_named(cols, "Write README").href, fragment.issue_href("gitlab:forge.example/group/project#7"))
+                self.assertEqual(card_named(cols, "Write README").refs, (("#7", fragment.issue_href("gitlab:forge.example/group/project#7")),))
+                self.assertEqual(card_named(cols, "Cut the release").href, fragment.issue_href("gitlab:forge.example/group/project#9"))
         cut = card_named(rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, SOURCES, NOW), "Cut the release")
-        self.assertEqual(cut.refs, (("#9", "/issues/9"), ("!48", "/issues/9")))
+        self.assertEqual(cut.refs, (("#9", fragment.issue_href("gitlab:forge.example/group/project#9")), ("!48", fragment.issue_href("gitlab:forge.example/group/project#9"))))
 
     def test_a_card_whose_issue_has_no_number_keeps_its_link(self) -> None:
         # "A card whose issue cell has no number keeps its current link." Set beside a numbered card, which moves.
@@ -592,7 +610,7 @@ class CardLinkTest(unittest.TestCase):
                                                                             title="Unfiled fix")})
         main = rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, sources, NOW)[-1]
         self.assertEqual({c.name: (c.href, c.refs) for c in main.cards}, {
-            "Locale fallback": ("/issues/8", (("#8", "/issues/8"), ("!37", "/issues/8"))),
+            "Locale fallback": (fragment.issue_href("gitlab:forge.example/group/project#8"), (("#8", fragment.issue_href("gitlab:forge.example/group/project#8")), ("!37", fragment.issue_href("gitlab:forge.example/group/project#8")))),
             "Unfiled fix": ("https://forge.example/group/project/-/merge_requests/38",
                             (("!38", "https://forge.example/group/project/-/merge_requests/38"),))})
 
@@ -623,13 +641,13 @@ class CardRefAndOwnerLinkTest(unittest.TestCase):
 
     def test_an_issue_ref_links_to_its_issues_page(self) -> None:
         html = columns.render(rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, SOURCES, NOW))
-        self.assertIn('<a href="/issues/9">#9</a>', html)
+        self.assertIn(f'<a href="{fragment.issue_href("gitlab:forge.example/group/project#9")}">#9</a>', html)
 
     def test_a_change_ref_links_to_its_issues_task_page_not_the_forge(self) -> None:
         # !48 belongs to #9 (SOURCES). Today it opens https://forge/48; no change route exists to replace that
         # with, so it should take #9's task page instead.
         html = columns.render(rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, SOURCES, NOW))
-        self.assertIn('<a href="/issues/9">!48</a>', html)
+        self.assertIn(f'<a href="{fragment.issue_href("gitlab:forge.example/group/project#9")}">!48</a>', html)
         self.assertNotIn('href="https://forge/48"', html)
 
     def test_a_change_ref_takes_the_changes_own_first_issue(self) -> None:
@@ -638,7 +656,7 @@ class CardRefAndOwnerLinkTest(unittest.TestCase):
         multi = change("!99", issues=("#3", "#9"), title="Cross-filed fix")
         sources = replace(SOURCES, changes={**SOURCES.changes, "!99": multi})
         html = columns.render(rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, sources, NOW))
-        self.assertIn('<a href="/issues/3">!99</a>', html)
+        self.assertIn(f'<a href="{fragment.issue_href("gitlab:forge.example/group/project#3")}">!99</a>', html)
 
     def test_only_a_worker_owner_becomes_a_link(self) -> None:
         # "A worker owner links to that worker on /workers; a person or unassigned owner stays plain text."

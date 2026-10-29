@@ -33,7 +33,7 @@ DRAWS_NOTHING = (
     "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog", "inbox",
     "probe_health", "runtimes", "estimate", "task_forge", "tracker_log", "findings", "tree_state", "orphans",
     "git_trees", "git_view", "tree_claims", "notify_service", "tracker_read",
-    "one_shot_report", "flow", "sync_page_theme", "store", "store_access",
+    "one_shot_report", "flow", "sync_page_theme", "store", "store_access", "private_state",
     "model_port",
     "claude_adapter",
     "host_adapter",
@@ -47,8 +47,8 @@ DRAWS_NOTHING = (
     "decision_escalation",
     "performance",
     "performance_report",
-    "limits", "limits_history", "limits_probe", "limits_cli", "session_logs",
-    "supervisor",
+    "limits", "limits_history", "limits_probe", "limits_cli", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
+    "supervisor", "release_selection", "engine_intent",
     "startup",
     "guard_commands",  # Entities: pure shell command gate judgements.
     "guard_rules",  # Use Cases: pure Stop, permission-ask and resume judgements.
@@ -222,9 +222,9 @@ CIRCLES: dict[str, frozenset[str]] = {
     }),
     "adapters": frozenset({
         "fragment", "page_common", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
-        "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge",
+        "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge", "private_state",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
-        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history", "session_logs",
+        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
         # §4: store's migrations/ — path keys, not top-level stems.
         "migrations/env",
         "migrations/versions/0001_initial",
@@ -240,7 +240,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "migrations/versions/0010_worker_messages",
     }),
     "drivers": frozenset({
-        "claude_adapter", "host_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
+        "claude_adapter", "host_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor", "release_selection", "engine_intent",
         "startup", "store_access", "kanban_cli", "pipeline_cli", "process_status", "session_exec", "spawn_session",
         "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
