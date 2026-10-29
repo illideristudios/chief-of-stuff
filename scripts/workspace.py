@@ -238,10 +238,13 @@ def engine_health(status: EngineStatus, now: datetime, zone: ZoneInfo) -> Engine
     if status.last_error:
         at_clause = f" at {_engine_stamp(status.last_attempt_at, now, zone)}" if status.last_attempt_at else ""
         pass_clause = f" (last pass {last_pass})" if last_pass is not None else ""
+        long_pass = ""
+        if status.pass_started_at is not None and (now - status.pass_started_at).total_seconds() > ENGINE_LONG_PASS_S:
+            long_pass = f"; engine pass has been in progress since {_engine_stamp(status.pass_started_at, now, zone)}; it may be stuck"
         return EngineHealth(
             "failed",
             ("engine error", pass_meta),
-            f"engine pass failed{at_clause}{pass_clause}: {status.last_error}",
+            f"engine pass failed{at_clause}{pass_clause}: {status.last_error}{long_pass}",
         )
     if status.pass_started_at is not None:
         if (now - status.pass_started_at).total_seconds() > ENGINE_LONG_PASS_S:

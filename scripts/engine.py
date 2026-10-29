@@ -8,7 +8,9 @@ import contextlib
 import hashlib
 import json
 import os
+import plistlib
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -1030,6 +1032,25 @@ def _handoff(release: Path, python: Path, root: Path, interval: float, once: boo
                               "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []))
 
 
+def _persist_launchd_handoff(root: Path, release: Path) -> bool:
+    """Reload launchd from a detached helper while this engine holds its pass lock."""
+    path = supervisor.job_path(supervisor.label("engine", root), None)
+    if sys.platform != "darwin" or not path.exists():
+        return False
+    job = plistlib.loads(path.read_bytes())
+    if supervisor.current_release_from_job(job) != supervisor.RELEASE:
+        return False
+    target = f"gui/{os.getuid()}/{supervisor.label('engine', root)}"
+    if not supervisor.launchctl("print", target, missing_ok=True):
+        return False
+    result = subprocess.run([sys.executable, str(Path(supervisor.__file__).resolve()), "--root", str(root),
+                             "--release", str(release), "commit-handoff"],
+                            stdin=subprocess.DEVNULL, start_new_session=True, timeout=1500)
+    if result.returncode:
+        raise supervisor.ServiceError("launchd handoff failed; see engine log")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run passes until stopped, or one with --once; `install`, `uninstall`, `ensure` and `status` manage the LaunchAgent.
 
@@ -1058,6 +1079,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if (installed := supervisor.selected_release(root)) != supervisor.RELEASE:
             if (python := _prepare_handoff(installed)) is not None and supervisor.selected_release(root) == installed:
+                with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
+                    if _persist_launchd_handoff(root, installed):
+                        return 0
                 _handoff(installed, python, root, args.interval, args.once)
                 return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
@@ -1142,7 +1166,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 if not args.once:
                     import pages  # deferred: --once never serves the board
-                    page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
+                    page_thread = threading.Thread(target=pages.supervise_with_retry, args=(root, stop_pages), daemon=True)
                     page_thread.start()
                 while True:
                     with contextlib.suppress(OSError):
@@ -1191,7 +1215,7 @@ def main(argv: list[str] | None = None) -> int:
                         # A temporary supervisor-lock conflict or unexpected thread exit must not
                         # disable board recovery for the remainder of this engine process.
                         print("engine: page supervisor exited; restarting it", file=sys.stderr, flush=True)
-                        page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
+                        page_thread = threading.Thread(target=pages.supervise_with_retry, args=(root, stop_pages), daemon=True)
                         page_thread.start()
             finally:
                 stop_pages.set()
@@ -1211,6 +1235,8 @@ def main(argv: list[str] | None = None) -> int:
                         error_kind=error_kind,
                         release=release,
                     )
+            if newer is not None and _persist_launchd_handoff(root, newer[0]):
+                return 0
         if newer is not None:  # after the lock and board thread are released, so the new release can take them
             _handoff(*newer, root, args.interval, args.once)
         return 0

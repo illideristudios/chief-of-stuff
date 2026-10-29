@@ -3720,7 +3720,7 @@ class MainTest(unittest.TestCase):
                 self.assertTrue(second_started.wait(2))
                 raise KeyboardInterrupt
         errors = io.StringIO()
-        with mock.patch.object(pages, "supervise", side_effect=serve), \
+        with mock.patch.object(pages, "supervise_with_retry", side_effect=serve), \
              mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass"), \
              mock.patch.object(engine.time, "sleep", side_effect=sleep), \

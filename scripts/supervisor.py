@@ -20,7 +20,7 @@ import shell_setup
 
 RELEASE = Path(__file__).resolve().parent.parent
 
-ACTIONS = ("install", "uninstall", "status", "ensure", "ensure-background")
+ACTIONS = ("install", "uninstall", "status", "ensure", "ensure-background", "ensure-retry", "commit-handoff")
 DISABLED_MARKER = "engine.disabled"
 PLUGIN_RELEASE_MARKER = "engine-plugin-release"
 ENSURE_LOCK_TIMEOUT = 1200.0
@@ -30,6 +30,10 @@ ENGINE: tuple[str, ...] = (str(RELEASE / "scripts/engine.py"),)
 
 
 class ServiceError(RuntimeError):
+    pass
+
+
+class LockTimeout(ServiceError):
     pass
 
 
@@ -64,7 +68,7 @@ def lock(path: Path, wait: bool = False, timeout: float | None = None):
                     raise ServiceError(f"already running or being managed ({path.name} is held)") from None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise ServiceError(f"timed out waiting for {path.name}") from None
+                    raise LockTimeout(f"timed out waiting for {path.name}") from None
                 time.sleep(min(0.25, remaining))
         try:
             yield
@@ -193,10 +197,12 @@ def selected_release(root: Path) -> Path:
     return current
 
 
-def _request_plugin_release(root: Path, selected: Path, existing: dict) -> None:
+def _request_plugin_release(root: Path, selected: Path, existing: dict) -> bool:
     """Publish a newer cache sibling under the global lock after its dependencies are prepared."""
     try:
         running = Path(existing["ProgramArguments"][1]).resolve().parent.parent
+        if selected == running:
+            return True
         candidate_version = _plugin_version(selected)
         running_version = _plugin_version(running)
         prior_version = None
@@ -211,8 +217,12 @@ def _request_plugin_release(root: Path, selected: Path, existing: dict) -> None:
         if (selected.parent == running.parent and candidate_version is not None and baseline is not None
                 and candidate_version > baseline):
             atomic_write(marker, str(selected).encode())
+            return True
+        # A previously requested newer sibling already satisfies an older session's ensure.
+        return (selected.parent == running.parent and candidate_version is not None and baseline is not None
+                and candidate_version <= baseline)
     except (OSError, RuntimeError, ValueError, KeyError, IndexError, TypeError):
-        return
+        return False
 
 
 def _venv_python_runs(python: Path, *, timeout: float = 30) -> bool:
@@ -352,7 +362,11 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                 if launchctl("print", f"gui/{os.getuid()}/{label('engine', root)}", missing_ok=True):
                     # Prepare the selected release without disrupting the pass; the engine follows it at a boundary.
                     ensure_venv(data, release=selected)
-                    _request_plugin_release(root, selected, existing)
+                    running = current_release_from_job(existing)
+                    installed_pointer = (selected.parent.name == "versions" and running.parent == selected.parent
+                                         and (selected.parent.parent / "current").is_symlink())
+                    if not _request_plugin_release(root, selected, existing) and not installed_pointer:
+                        raise ServiceError(f"cannot request safe handoff to {selected}; existing engine is serving another release")
                     return "engine: serving"
         log_path = state_dir(root) / "engine.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -364,6 +378,8 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                    "EnvironmentVariables": launch_env(selected),
                    "StandardOutPath": log, "StandardErrorPath": log}
         outcome = load_agent(desired, jobs_dir)
+        if not respect_disabled:
+            (state_dir(root) / PLUGIN_RELEASE_MARKER).unlink(missing_ok=True)
         (state_dir(root) / DISABLED_MARKER).unlink(missing_ok=True)
         return "engine: " + outcome
 
@@ -386,9 +402,63 @@ def ensure_background(root: Path) -> str:
     log = state_dir(root) / "engine-ensure.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a") as output:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--root", str(root), "ensure"],
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--root", str(root), "ensure-retry"],
                          stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
     return "engine: ensuring"
+
+
+def current_release_from_job(job: dict) -> Path:
+    try:
+        return Path(job["ProgramArguments"][1]).resolve().parent.parent
+    except (KeyError, IndexError, TypeError, OSError, RuntimeError):
+        raise ServiceError("cannot identify existing engine release") from None
+
+
+def ensure_retry(root: Path) -> str:
+    """One detached worker per workspace retries timed-out lock acquisitions until resolved."""
+    try:
+        with lock(state_dir(root) / "engine-ensure.lock"):
+            while True:
+                try:
+                    return ensure(root)
+                except LockTimeout as exc:
+                    print(f"engine: {exc}; retrying", file=sys.stderr, flush=True)
+                    time.sleep(5)
+    except ServiceError as exc:
+        if "engine-ensure.lock is held" in str(exc):
+            return "engine: ensure already pending"
+        raise
+
+
+def commit_handoff(root: Path, selected: Path, jobs_dir: Path | None = None) -> str:
+    """Replace the launchd registration at a pass boundary, without racing a newer install."""
+    root = root.resolve()
+    with lock(data_dir() / "supervisor.lock", timeout=ENSURE_LOCK_TIMEOUT):
+        path = job_path(label("engine", root), jobs_dir)
+        if (state_dir(root) / DISABLED_MARKER).exists() or not path.exists() or selected_release(root) != selected:
+            return "engine: handoff superseded"
+        job = plistlib.loads(path.read_bytes())
+        if job.get("Label") != label("engine", root) or job.get("WorkingDirectory") != str(root):
+            raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
+        if current_release_from_job(job) != RELEASE:
+            return "engine: handoff superseded"
+        python = ensure_venv(data_dir(), release=selected)
+        old_arguments, old_environment = job["ProgramArguments"], job.get("EnvironmentVariables", {})
+        job["ProgramArguments"] = [str(python), str(selected / "scripts/engine.py")]
+        job["EnvironmentVariables"] = launch_env(selected)
+        # Persist before bootout so the selected entry survives an interrupted replacement.
+        atomic_write(path, plistlib.dumps(job))
+        target = f"gui/{os.getuid()}/{label('engine', root)}"
+        if launchctl("print", target, missing_ok=True):
+            try:
+                launchctl("bootout", target)
+            except ServiceError:
+                # The old job is still loaded; retain its matching registration on failure.
+                job["ProgramArguments"] = old_arguments
+                job["EnvironmentVariables"] = old_environment
+                atomic_write(path, plistlib.dumps(job))
+                raise
+        return "engine: " + load_agent(job, jobs_dir)
 
 
 def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
@@ -413,6 +483,7 @@ def status(root: Path, jobs_dir: Path | None = None) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=".", help="workspace root the engine serves")
+    ap.add_argument("--release", help=argparse.SUPPRESS)
     ap.add_argument("cmd", choices=ACTIONS)
     args = ap.parse_args(argv)
     root = Path(args.root).resolve()
@@ -424,6 +495,12 @@ def main(argv: list[str] | None = None) -> int:
             print(ensure(root))
         elif args.cmd == "ensure-background":
             print(ensure_background(root))
+        elif args.cmd == "ensure-retry":
+            print(ensure_retry(root))
+        elif args.cmd == "commit-handoff":
+            if not args.release:
+                raise ServiceError("handoff requires a release")
+            print(commit_handoff(root, Path(args.release)))
         else:
             print(install(root) if args.cmd == "install" else uninstall(root))
         return 0

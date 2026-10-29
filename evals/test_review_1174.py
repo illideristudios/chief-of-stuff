@@ -32,7 +32,7 @@ class StartupRegression(unittest.TestCase):
                 (root / 'store.db').touch()
                 self.assertEqual(supervisor.ensure_background(root), 'engine: ensuring')
                 self.assertTrue(child.call_args.kwargs['start_new_session'])
-                self.assertEqual(child.call_args.args[0][-1], 'ensure')
+                self.assertEqual(child.call_args.args[0][-1], 'ensure-retry')
 
 
 class HealthRegression(unittest.TestCase):

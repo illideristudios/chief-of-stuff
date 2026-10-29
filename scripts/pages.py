@@ -990,6 +990,13 @@ def supervise(root: Path, stop: threading.Event) -> None:
         print("pages: another engine already holds pages-supervisor.lock", file=sys.stderr, flush=True)
 
 
+def supervise_with_retry(root: Path, stop: threading.Event) -> None:
+    """Keep trying to take over while an independent board supervisor holds the lock."""
+    while not stop.is_set():
+        supervise(root, stop)
+        stop.wait(min(POLL, RETRY_MAX))
+
+
 def supervise_standalone(root: Path, stop: threading.Event) -> None:
     """The board LaunchAgent's loop, for a workspace no engine supervises (#935). While another supervisor holds
     the lock it waits and tries again, rather than exit for launchd to relaunch it every ThrottleInterval."""
