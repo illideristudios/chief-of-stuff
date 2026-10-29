@@ -296,6 +296,28 @@ A page may show the same measures over time: each runtime, model and effort pair
 
 Review findings are not counted until review reports have one shape (issue #563). Then findings are joined to runs by the issue key.
 
+Workers fan out across the workspace's configured rotation entries in round robin, a retry goes to the next entry (section 15), and the engine records each entry's outcomes at each kind of work (owner, 2026-10-29, T3 design §8). The T3 design calls a rotation entry an "agent type": one configured runtime, model and effort. This document says rotation entry, because `agent_type` above is the declared type of the `Agent:` lines.
+- **Records only.** No routing by success rate yet; scoring still never blocks a launch.
+- **No new rotation.** The round robin and the next-agent retry extend the engine's existing rotation (section 13) and `[models.trio]` (section 6), and add none (call).
+- **Near-cap entries are skipped** where limits are read (section 10). For a runtime whose limits are not read, the signal is a failed launch (call).
+- **Raw outcomes are kept** (completed, sent to human review, relaunched, minutes), keyed as above by runtime, model, effort, agent type and the issue's workflow, so any later definition of success can be computed over them (call).
+- **T3 runs** take their runtime and model fields from the thread's provider and model (section 13).
+- **Every worker choice is configurable** (owner, 2026-10-29): strategy, tuning and launcher. Tuning is set by modes and policies. An auto mode lets the coordinator tune itself from the records. The definition of success is open, and auto mode is not built until it is settled. Other modes are named only once the system has been tried (section 19). The settings keys are the builder's.
+
+```
+Rr := workers fan out in round robin over rotation entries      Nx := a retry goes to the next entry
+Nr := a new rotation is added      Rs := launches are routed by success rate      Sd := success is defined      Au := auto mode is built
+Nc := the entry's account is near its cap and its limits are read      Sk := the rotation skips the entry
+
+1.  Rr ∧ Nx           [owner, 2026-10-29]
+2.  ¬Nr               [call: Rr and Nx extend section 13's rotation]
+3.  ¬Rs               [owner, 2026-10-29: records only]
+4.  Nc → Sk           [call, T3 design §8]
+5.  Au → Sd           [owner, 2026-10-29]
+6.  ¬Sd               [open, section 19]
+∴   ¬Au (5, 6, modus tollens), and the records keep raw outcomes until Sd is settled
+```
+
 ## 10. Runtime limits
 
 Each runtime's limits are read without a billed call, recorded over time, and shown on the board: rolling windows, weekly caps and model caps. Today only claude's limits are read. They feed the quota-breach interrupt (plan M5, items 3 and 4). codex, cursor and agy workers now run (section 13, #857), but their limits are still recorded as unknown, with the reason "read in 1.1", until their probes land beside their adapters (#757). Until then, a quota stop on those hosts is caught only after it happens, by the host adapter's classification and the rotation's fallback (#851), never by a near-cap judgement in advance. A reading is one pass over every runtime the workspace can launch, each under the account it launches with: `limits_probe.read` is called once per runtime and account, and the results are recorded together. A limit that cannot be read is recorded as unknown with the reason, never as zero.
@@ -333,7 +355,8 @@ One engine can work several workspaces at once (owner, 2026-10-17). A parent wor
 - **One slot pool.** The parent owns a slot pool that caps running workers across all children at its `[workers] max_concurrency`. Each child's own `max_concurrency` still caps that child. Runtime limits are already per account (section 10), so a near-cap judgement covers every child on that account.
 - **One engine per workspace still holds.** The parent engine takes each child's singleton lock. A child already run by its own engine is skipped with a warning. Installing a child's own supervisor while a parent runs it is refused. The parent has one supervisor service.
 - **One board index.** The parent board lists each child's board. Each child keeps its own board.
-- **Not covered here:** dependencies between issues in different children. They wait for a need.
+- **The meta coordinator** is an agent thread on the parent workspace (call, T3 design §4), which today has an engine pass and a slot pool but no agent. It reads the children's trackers and orders work across them. Each child's project coordinator prioritizes and executes within its own project. A cross-project dashboard is deferred (owner, 2026-10-29).
+- **Not covered here:** dependencies between issues in different children. They wait for a need. The T3 design lists them as open (section 19), and `compliance.md` row C29 records the uncovered need.
 
 ```
 Ch := a child is an unchanged full workspace      P := one engine runs the per-workspace pass for each child
@@ -346,6 +369,12 @@ G ∧ A → no overrun of the machine or the account
 X ∧ O             [per-child error boundary; child locks taken by the parent]
 Ch ∧ P ∧ G ∧ A ∧ X ∧ O → S
 ∴ add [workspaces], the per-child loop and the parent slot pool; nothing in a child changes
+```
+
+```
+Mc := the parent workspace has a meta coordinator agent thread      Pc := each child has its own project coordinator
+Mc ∧ Pc           [call, T3 design §4: the meta and project coordinators map to the parent and its children]
+∴ ordering work across children is the meta coordinator's, and nothing in a child's pass changes for it
 ```
 
 ## 13. Host adapters
