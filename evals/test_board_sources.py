@@ -1430,5 +1430,158 @@ class StoreWorkspaceSourcesTest(unittest.TestCase):
                 self.assertEqual(got.branch_url, "")
 
 
+class StoreWorkspaceIssuesTest(unittest.TestCase):
+    """#919: a store-backed workspace fetches issues named in `store.db` across GitHub and GitLab without namespace
+    collisions, and handles store or forge failures without wiping cached issues."""
+
+    LATER = NOW + timedelta(minutes=5)
+
+    def store_workspace(self, backlog: str, *keys: str) -> Path:
+        import shutil
+        import store
+
+        root = workspace(backlog)
+        self.addCleanup(shutil.rmtree, root, True)
+        # Empty the markdown tracker so only `store.db` names the work items.
+        (root / "daily" / f"{DAY}-tracker.md").unlink()
+        db_path = root / "store.db"
+        store.migrate(db_path)
+        db = store.Store(db_path)
+        try:
+            for idx, key in enumerate(keys, 1):
+                db.upsert_item(key, workflow="build", stage="implement", forge_state="open", title=f"Task {idx}")
+        finally:
+            db.engine.dispose()
+        return root
+
+    def test_github_store_workspace_fetches_home_and_cross_repo_issues_without_collision(self) -> None:
+        root = self.store_workspace(
+            "GitHub issues; repo o/app",
+            "github:o/app#118",
+            "github:other/lib#118",
+            "gitlab:labs.example.test/team/app#99",
+        )
+        queries = []
+
+        def fake_gh(args, input_text=None):
+            query = args[args.index("-f") + 1]
+            queries.append(query)
+            data = {
+                "r0": {"n118": {**gh_issue(118), "body": "## Context\nHome body.\n\n## Acceptance\n- [x] Home criterion\n"}},
+                "r1": {"n118": {
+                    "__typename": "Issue", "number": 118, "url": "https://github.com/other/lib/issues/118",
+                    "title": "Other issue 118", "state": "OPEN", "labels": {"nodes": []},
+                    "body": "## Context\nOther body.\n\n## Acceptance\n- [ ] Other criterion\n",
+                }},
+                "merged": {"nodes": []},
+                "open": {"nodes": [gh_pr(58)]},
+            }
+            return 0, json.dumps({"data": data}), ""
+
+        got = bs.refresh(root, NOW, gh=fake_gh)
+        self.assertEqual(len(queries), 1)
+        self.assertIn('owner: "o", name: "app"', queries[0])
+        self.assertIn('owner: "other", name: "lib"', queries[0])
+        self.assertNotIn("labs.example.test", queries[0])
+        self.assertEqual(got.errors, {})
+        self.assertEqual(sorted(got.issues), ["#118", "other/lib#118"])
+        self.assertIn("Home criterion", got.issues["#118"].body)
+        self.assertIn("Other criterion", got.issues["other/lib#118"].body)
+        self.assertEqual(got.issues["other/lib#118"].title, "Other issue 118")
+        self.assertEqual(bs.load(root / "pages"), got)
+
+    def test_gitlab_store_workspace_fetches_home_and_sibling_projects_and_skips_foreign_hosts(self) -> None:
+        root = self.store_workspace(
+            "GitLab issues; host https://labs.example.test; project team/app",
+            "gitlab:labs.example.test/team/app#15",
+            "gitlab:labs.example.test/team/other#15",
+            "gitlab:elsewhere.example.test/team/app#77",
+            "github:o/app#15",
+        )
+        posts = []
+
+        def fake_gl(method, url, token, timeout, payload=None):
+            posts.append((url, payload["query"]))
+            q = payload["query"]
+            if '"team/other"' in q:
+                node = {
+                    "iid": "15", "webUrl": "https://labs.example.test/team/other/-/issues/15",
+                    "title": "Sibling 15", "state": "opened", "labels": {"nodes": []},
+                    "description": "## Acceptance\n- [ ] Sibling criterion\n",
+                }
+                return {"data": {"p0": {"issues": {"nodes": [node]}}}}, {}, ""
+            node = {
+                "iid": "15", "webUrl": "https://labs.example.test/team/app/-/issues/15",
+                "title": "Home 15", "state": "opened", "labels": {"nodes": []},
+                "description": "## Acceptance\n- [x] Home criterion\n",
+            }
+            return {"data": {"p0": {"issues": {"nodes": [node]}, "mergeRequests": {"nodes": []},
+                                    "merged": {"nodes": []}, "open": {"nodes": []}}}}, {}, ""
+
+        got = refresh_gitlab(root, NOW, fake_gl)
+        self.assertEqual({u for u, _ in posts}, {"https://labs.example.test/api/graphql"})
+        self.assertFalse(any("elsewhere.example.test" in q for _, q in posts))
+        self.assertEqual(got.errors, {})
+        self.assertEqual(sorted(got.issues), ["#15", "labs.example.test/team/other#15"])
+        self.assertIn("Home criterion", got.issues["#15"].body)
+        self.assertIn("Sibling criterion", got.issues["labs.example.test/team/other#15"].body)
+
+    def test_corrupt_store_db_records_kanban_error_and_preserves_last_good_issues(self) -> None:
+        root = self.store_workspace("GitHub issues; repo o/app", "github:o/app#118")
+        first = bs.refresh(root, NOW, gh=FakeGh(n118={**gh_issue(118), "body": "## Acceptance\n- [x] Kept\n"}))
+        self.assertEqual(first.errors, {})
+        self.assertIn("#118", first.issues)
+
+        (root / "store.db").write_bytes(b"corrupt sqlite header")
+        again = bs.refresh(root, self.LATER, gh=FakeGh())
+        self.assertIn("cannot read the workspace store", again.errors.get("kanban", ""))
+        self.assertEqual(again.issues, first.issues)
+        self.assertEqual(again.fetched["kanban"], NOW)
+        self.assertEqual(again.fetched["merge requests"], NOW)
+
+        cold = workspace("GitHub issues; repo o/app")
+        import shutil
+        self.addCleanup(shutil.rmtree, cold, True)
+        (cold / "daily" / f"{DAY}-tracker.md").unlink()
+        (cold / "store.db").write_bytes(b"corrupt sqlite header")
+        cold_got = bs.refresh(cold, NOW, gh=FakeGh())
+        self.assertEqual(cold_got.issues, {})
+        self.assertNotIn("kanban", cold_got.fetched)
+        self.assertIn("cannot read the workspace store", cold_got.errors.get("kanban", ""))
+
+    def test_inaccessible_gitlab_project_records_kanban_error_and_preserves_home_cache(self) -> None:
+        root = self.store_workspace(
+            "GitLab issues; host https://labs.example.test; project team/app",
+            "gitlab:labs.example.test/team/app#15",
+            "gitlab:labs.example.test/team/secret#15",
+        )
+        partial = refresh_gitlab(root, NOW, FakeGitLab(issues=[gl_issue(15)], hidden={"team/secret"}))
+        self.assertEqual(sorted(partial.issues), ["#15"])
+        self.assertIn("team/secret", partial.errors.get("kanban", ""))
+
+        lost = refresh_gitlab(root, self.LATER, FakeGitLab(issues=[gl_issue(15)], hidden={"team/app"}))
+        self.assertIn("team/app", lost.errors.get("kanban", ""))
+        self.assertEqual(lost.issues, partial.issues)
+        self.assertEqual(lost.fetched["kanban"], NOW)
+
+    def test_inaccessible_github_repository_records_error_and_preserves_cache_when_all_repos_fail(self) -> None:
+        root = self.store_workspace("GitHub issues; repo o/app", "github:o/app#118")
+        first = bs.refresh(root, NOW, gh=FakeGh(n118={**gh_issue(118), "body": "Cached body"}))
+        self.assertIn("#118", first.issues)
+
+        def missing_repo_gh(args, input_text=None):
+            body = {
+                "data": {"r0": None, "merged": {"nodes": []}, "open": {"nodes": []}},
+                "errors": [{"type": "NOT_FOUND", "path": ["r0"],
+                            "message": "Could not resolve to a Repository with the name 'o/app'."}],
+            }
+            return 1, json.dumps(body), "gh: Could not resolve to a Repository"
+
+        again = bs.refresh(root, self.LATER, gh=missing_repo_gh)
+        self.assertIn("Could not resolve to a Repository", again.errors.get("kanban", ""))
+        self.assertEqual(again.issues, first.issues)
+        self.assertEqual(again.fetched["kanban"], NOW)
+
+
 if __name__ == "__main__":
     unittest.main()

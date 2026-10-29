@@ -1636,5 +1636,111 @@ class SuperviseTest(unittest.TestCase):
         ensured.assert_called_once()
 
 
+class StoreTaskPageEndToEndTest(unittest.TestCase):
+    """#919: end-to-end HTTP task pages served from a store-backed workspace via Refresher + board_sources.refresh."""
+
+    def setUp(self) -> None:
+        import store
+
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        self.root = Path(parent.name) / "ws"
+        self.root.mkdir()
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            f"- Timezone: {ZONE}\n- Worktrees: `trees/`\n"
+            "- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n"
+            "- Backlog: GitHub Issues; repo example/repo\n- Settings: `cos.toml`\n"
+        )
+        (self.root / "cos.toml").write_text(LANES)
+        (self.root / "daily").mkdir()
+        (self.root / "trees").mkdir()
+        self.pages = self.root / "pages"
+        self.pages.mkdir()
+        store.migrate(self.root / "store.db")
+        self.db = store.Store(self.root / "store.db")
+        self.addCleanup(self.db.engine.dispose)
+
+    def test_refresher_populates_store_issues_and_serves_distinct_colliding_pages_and_stale_notices(self) -> None:
+        import urllib.parse
+        import board_sources as bs
+
+        home_key = "github:example/repo#12"
+        other_key = "github:other/repo#12"
+        self.db.upsert_item(home_key, workflow="build", stage="implement", forge_state="open", title="Home limit")
+
+        fail_next = False
+
+        def fake_gh(args, input_text=None):
+            if fail_next:
+                return 1, "", "gh: HTTP 503 Service Unavailable"
+            query = args[args.index("-f") + 1]
+            data = {"merged": {"nodes": []}, "open": {"nodes": []}}
+            if 'owner: "example", name: "repo"' in query:
+                data["r0"] = {"n12": {
+                    "__typename": "Issue", "number": 12, "url": "https://github.com/example/repo/issues/12",
+                    "title": "Home limit", "state": "OPEN", "labels": {"nodes": []},
+                    "body": "## Context\nHome context paragraph.\n\n## Acceptance\n- [x] First home check\n- [ ] Second home check\n",
+                }}
+            if 'owner: "other", name: "repo"' in query:
+                alias = "r1" if "r0" in data else "r0"
+                data[alias] = {"n12": {
+                    "__typename": "Issue", "number": 12, "url": "https://github.com/other/repo/issues/12",
+                    "title": "Other limit", "state": "OPEN", "labels": {"nodes": []},
+                    "body": "## Context\nOther context paragraph.\n\n## Acceptance\n- [ ] Only other check\n",
+                }}
+            return 0, json.dumps({"data": data}), ""
+
+        done = threading.Event()
+
+        def run_refresh(root, now):
+            try:
+                return bs.refresh(root, now, gh=fake_gh)
+            finally:
+                done.set()
+
+        server = pg.make_server(self.pages, 0, root=self.root, refresh=run_refresh, every=3600)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.assertTrue(done.wait(WAIT))
+
+        for route in ("/issues/12", f"/issues/{urllib.parse.quote(home_key, safe='')}"):
+            resp = get(port, route)
+            self.assertEqual(resp.status, 200, route)
+            body = resp.body.decode()
+            self.assertIn("Home context paragraph.", body)
+            self.assertIn("Acceptance · 1 of 2 met", body)
+            self.assertIn("First home check", body)
+
+        # Add colliding `#12` in `other/repo` and run a refresh cycle.
+        self.db.upsert_item(other_key, workflow="build", stage="review", forge_state="open", title="Other limit")
+        done.clear()
+        server.refresher.wake.set()
+        self.assertTrue(done.wait(WAIT))
+
+        self.assertEqual(get(port, "/issues/12").status, 404)
+        home_page = get(port, f"/issues/{urllib.parse.quote(home_key, safe='')}").body.decode()
+        other_page = get(port, f"/issues/{urllib.parse.quote(other_key, safe='')}").body.decode()
+        self.assertIn("Home context paragraph.", home_page)
+        self.assertNotIn("Other context paragraph.", home_page)
+        self.assertIn("Other context paragraph.", other_page)
+        self.assertIn("Only other check", other_page)
+        self.assertNotIn("Home context paragraph.", other_page)
+
+        # Fail the next refresh and verify the page keeps cached facts while marking them stale.
+        fail_next = True
+        time.sleep(0.05)
+        done.clear()
+        server.refresher.wake.set()
+        self.assertTrue(done.wait(WAIT))
+        stale_page = get(port, f"/issues/{urllib.parse.quote(home_key, safe='')}").body.decode()
+        self.assertIn("Home context paragraph.", stale_page)
+        self.assertIn("First home check", stale_page)
+        self.assertIn("HTTP 503 Service Unavailable", stale_page)
+        self.assertRegex(stale_page, r"(?i)\bstale\b")
+
+
 if __name__ == "__main__":
     unittest.main()

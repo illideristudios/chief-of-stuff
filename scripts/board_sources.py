@@ -3,7 +3,7 @@
 
     chief-of-stuff sources --root R [--refresh]    # print what the cache holds; --refresh reads it all first
 
-Only what today's tracker names is fetched: its tasks' issues, the pull or merge requests their rows
+Only what today's tracker or store names is fetched: its tasks' issues, the pull or merge requests their rows
 mention (`!58` on GitLab, `PR #58` on GitHub, or the request's URL), and the requests merged today, in
 one GraphQL call per forge. An engine workspace (one with a `store.db`) names its tasks in `work_item`
 rather than tracker rows, so there the store's issues, recorded merge requests, open requests and recent
@@ -334,7 +334,10 @@ def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: date
             changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver, home.repo))
     for node in filter(None, (data.get("open") or {}).get("nodes") or []):
         changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver, home.repo))
-    return issues, changes, _graphql_errors(body) or (err.strip() if code else "")
+    err_msg = _graphql_errors(body) or (err.strip() if code else "")
+    if repos and all(data.get(f"r{i}") is None for i in range(len(repos))) and err_msg:
+        return None, changes, err_msg
+    return issues, changes, err_msg
 
 
 # --- GitLab ----------------------------------------------------------------------------------------
@@ -407,9 +410,14 @@ def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], si
             if lose:
                 lost.add(panel)
             return None
+        if body["data"].get("p0") is None:
+            errors.setdefault(panel, _graphql_errors(body) or f"GitLab did not answer for {project}")
+            if lose and project == home.project:
+                lost.add(panel)
+            return None
         if message := _graphql_errors(body):
             errors.setdefault(panel, message)
-        return body["data"].get("p0") or {}
+        return body["data"]["p0"]
 
     def pages(project: str, name: str, iids: list[int], body: str, panel: str, lose: bool = True):
         for start in range(0, len(iids), GL_PAGE):
@@ -599,8 +607,10 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
         if changes:
             wanted.setdefault(home.repo, set()).update(changes)
         issues, found, error = github(home, wanted, since, approver, gh, every_open)
-        return issues, found, {"kanban": error, "merge requests": error} if error else {}
-    return gitlab(home, wanted, changes, since, approver, call, every_open)
+        errors = {"kanban": error, "merge requests": error} if error else {}
+    else:
+        issues, found, errors = gitlab(home, wanted, changes, since, approver, call, every_open)
+    return issues, found, errors
 
 
 # --- workers ---------------------------------------------------------------------------------------
