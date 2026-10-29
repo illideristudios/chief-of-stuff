@@ -443,6 +443,25 @@ class CardFactsTest(unittest.TestCase):
             html = rb.write(root, day=today.isoformat())[0].read_text().split("</style>", 1)[1]
             self.assertIn("looping", self.marks(html))
 
+    def test_write_reads_old_fix_history_when_cached_forge_home_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(CLAUDE_MD + "\n- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "fix", "merge"] }\n')
+            (root / "daily").mkdir()
+            today = datetime.now(NOW.tzinfo).date()
+            tracker = "\n".join(line for line in TRACKER.splitlines() if not line.startswith(("| Write README |", "| Webhook check |", "| Console |"))) + "\n"
+            (root / f"daily/{today}-tracker.md").write_text(tracker + "- 11:00 stage: Cut the release → fix\n")
+            earlier = tracker.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
+            earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"
+            (root / f"daily/{today - timedelta(days=5)}-tracker.md").write_text(earlier)
+            old = replace(SOURCES, home=backlog.Backlog("https://forge.example", "group/old"),
+                          changes={"!48": replace(change("!48", state="merged", issues=("#9",)),
+                                                  url="https://forge.example/group/old/-/merge_requests/48")})
+            bs._write(root / "daily" / bs.CACHE, old)
+            html = rb.write(root, day=today.isoformat())[0].read_text().split("</style>", 1)[1]
+            self.assertIn("looping", self.marks(html))
+
     def test_a_reused_name_keeps_moves_with_the_issue_on_their_day(self):
         earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
         earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"

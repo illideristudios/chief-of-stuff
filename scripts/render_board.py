@@ -527,7 +527,7 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
     pending = decision_page.write_all(out.parent, ctx, day, root, db=db, navigation=navigation)
     reach = (now - flow_chart.WINDOWS[-1][1]).date()
     looked = looked_before(out.parent)
-    sources = board_sources.load(out.parent)
+    sources = board_sources.for_home(board_sources.load(out.parent), cfg.backlog)
     since_day = (looked.astimezone(cfg.zone).date() if looked else now.date())
     bound = min(reach, since_day)
     # Follow active laned tasks backwards only while they occur in consecutive available snapshots.

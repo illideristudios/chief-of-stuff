@@ -109,12 +109,13 @@ class OfflineIssueMigration(unittest.TestCase):
         self.assertNotIn('team/other#7', loaded.issues)
         self.assertNotIn('team/other#9', loaded.issues)
         tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
-        self.assertIn('Sibling issue', issue_page.render(7, [(NOW.date(), tracker)], loaded, NOW))
+        cfg = bs.read_config(root)
+        self.assertIn('Sibling issue', issue_page.render(7, [(NOW.date(), tracker)], loaded, NOW, cfg=cfg))
         foreign = tracker.replace('https://labs.example.test/team/other/-/issues/7', 'https://foreign.example/team/other/-/issues/7')
-        self.assertIn('Foreign issue', issue_page.render(7, [(NOW.date(), foreign)], loaded, NOW))
-        self.assertNotIn('Sibling issue', issue_page.render(7, [(NOW.date(), foreign)], loaded, NOW))
+        self.assertIn('Foreign issue', issue_page.render(7, [(NOW.date(), foreign)], loaded, NOW, cfg=cfg))
+        self.assertNotIn('Sibling issue', issue_page.render(7, [(NOW.date(), foreign)], loaded, NOW, cfg=cfg))
         github = tracker.replace('https://labs.example.test/team/other/-/issues/7', 'https://github.com/team/other/issues/7')
-        self.assertNotIn('Sibling issue', issue_page.render(7, [(NOW.date(), github)], loaded, NOW))
+        self.assertNotIn('Sibling issue', issue_page.render(7, [(NOW.date(), github)], loaded, NOW, cfg=cfg))
 
     def test_conflicting_entries_for_one_canonical_identity_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
