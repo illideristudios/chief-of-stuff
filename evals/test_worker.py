@@ -372,6 +372,7 @@ class WorkerTest(unittest.TestCase):
         self.report(run)
         (run / "exit.json").write_text(json.dumps({"exit_code": 0}))
         with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker.t3_adapter, "observe", return_value=worker.t3_adapter.Evidence(alive=False, launcher="t3")), \
              mock.patch.object(worker.host_adapter, "moved_outside_engine", return_value="trunk moved") as moved:
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         moved.assert_called_once()

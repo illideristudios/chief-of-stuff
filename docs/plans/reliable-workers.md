@@ -17,16 +17,25 @@ Work is tracked in [the autonomous workers rework](https://github.com/illiderist
 - Configure the stall policy per workspace:
 
 ```toml
+[workers]
+failure_limit = 2
+
 [workers.stall]
-after_minutes = 20
+after_minutes = 3
 action = "wait" # "wait" or "restart"
 max_restarts = 2
 ```
 
 - The default reports a suspected stall and leaves the worker running. An automatic restart is opt-in, bounded, and verifies the original has stopped before launching another attempt.
-- Repeated failures and retry limits are tracked separately from silence; exhaustion holds the job for a person and retains evidence.
+- Failures count per issue across stages and agents. At `failure_limit` the engine parks the issue with the attempts, reports, research, options and a recommendation. Merely surfacing a suspected stall spends no failure budget; a stall counts only after a replacement worker actually starts.
 
-The current engine measures repository progress rather than full worker activity. Automatic restart must remain unavailable until the activity signal and a verified stop-and-restart path are in place.
+The engine reads T3 thread status, update time and pending requests using the launch's saved CLI and environment. For local launches it uses process identities, repository progress and transcript activity. Silence is a suspected stall. Pending requests wait for an answer before the silence threshold expires; architectural decisions and split trios keep waiting. Failed T3 reads remain unknown, even if the local polling process died.
+
+Local automatic recovery records its stop intent before acting and verifies that the previous host, runner and session processes ended before releasing the attempt. The next launch uses the existing worktree and runtime rotation. Attempts, transcripts, restart counts and pending-request age survive engine restarts in the existing store and run directories.
+
+T3 cancellation remains an open item for the owner: the CLI has no stop or interrupt command. A T3 launch configured with `action = "restart"` waits and surfaces `T3 cannot cancel a thread`. No T3 replacement is launched by stall recovery.
+
+After investigating a parked issue, explicitly acknowledge its existing failures and permit another attempt with `chief-of-stuff work "Retry after investigation" --issue NUMBER --recover --commit --root /path/to/workspace`. Omit `--commit` to preview. This refuses a live worker, retains all attempts and work, and logs the acknowledgement. Raising `[workers] failure_limit` also permits another attempt, subject to any existing hold or decision.
 
 ## Delivery
 
