@@ -2,8 +2,10 @@
 """The Workers page, `/workers` (#195, #235): header tiles (`NEEDS INPUT`, `RUNNING`, `SLOTS FREE`); RUNNING, a row per
 worker with a task (sessions with no task are omitted), leading with a state chip (`RUNNING`, `LOOPING`) and the worker
 name over `runtime model · kind`, the stage as a chip after the task name, and last activity and tokens from its Claude
-session log; and ENDED TODAY, a row per one-shot launcher end line in today's tracker with a state chip (`DONE`,
-`CRASHED`), a one-line summary, and a link or `re-dispatch`. pages.py renders it into `workers.html` on every request.
+session log; and ENDED TODAY, a row per segment or launcher end line today, newest end first, with a chip naming
+the outcome (`DONE`, `CRASHED` for a failure, else the stored outcome: `HUMAN REVIEW`, `BLOCKED`, `QUOTA`), a one-line
+summary, and a link to the task. No retry is promised: whether the engine retries depends on state the page does not
+read. pages.py renders it into `workers.html` on every request.
 """
 
 from __future__ import annotations
@@ -64,6 +66,14 @@ def activity(tree: Path, *, account: str = "") -> tuple[datetime | None, int]:
     return last, sum(v for u in usage.values() if isinstance(u, dict) for k in USAGE if isinstance(v := u.get(k), int))
 
 
+def _end_chip(outcome: str | None) -> str:
+    """The chip for an ended segment: its stored outcome, with `failed` drawn as the crash it is."""
+    if outcome == "failed":
+        return '<span class="chip crashed">CRASHED</span>'
+    name = outcome or "ended"
+    return f'<span class="chip {escape(name.replace("_", "-"), quote=True)}">{escape(name.replace("_", " ").upper())}</span>'
+
+
 def _task(t, fallback: str) -> str:
     """The task's name, linked to its page when its issue cell has a number."""
     name = escape(t.name.strip() if t and t.name.strip() else fallback)
@@ -99,8 +109,8 @@ def _table(heads: tuple[str, ...], rows: list[list[str]]) -> str:
     return f'    <div class="card scroll"><table>\n<tr>{head}</tr>\n{body}</table></div>'
 
 
-def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[list[str]], int]:
-    """From the tracker's Log: fix-loop counts by task, ENDED TODAY rows newest first, and the human-review count."""
+def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[tuple[tuple, list[str]]], int]:
+    """From the tracker's Log: fix-loop counts by task, ENDED TODAY rows keyed by end time, and the human-review count."""
     task_of, fix_counts, last_stage, ended, need = {}, {}, {}, [], 0
     for line in map(str.strip, _section(tracker_text, "## Log")):
         if m := STAGE.match(line):
@@ -114,17 +124,16 @@ def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[list[
             task_of[m[3]] = m[4]
         elif m := ENDED.match(line) or RELAUNCH.match(line):
             t, name = row_of(task_of.get(m[3], ""))
-            done = m[4] == COMPLETED
+            outcome = {COMPLETED: "done", HUMAN_REVIEW: "human_review"}.get(m[4], "failed")
             need += m[4] == HUMAN_REVIEW
-            state = "DONE" if done else "CRASHED"
             summary = (line[m.end():].removeprefix(" — ").strip() if m.re is ENDED
                        else line[m.end():].partition(" — ")[2].strip())
             ref = TRAILING_NUMBER.search(t.issue) if t else None
-            action = ((f'<a class="ref" data-k="issue" href="/issues/{ref[1]}">#{ref[1]}</a>' if ref else escape(name))
-                      if done else '<span class="chip redispatch">re-dispatch</span>')
-            ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{escape(m[3])}</b>',
-                          f"{int(m[1]):02d}:{m[2]}", _task(t, name), escape(summary), action])
-    ended.reverse()  # newest first
+            action = ("relaunch requested" if m.re is RELAUNCH else
+                      f'<a class="ref" data-k="issue" href="/issues/{ref[1]}">#{ref[1]}</a>' if ref else escape(name))
+            ended.append(((int(m[1]) * 60 + int(m[2]), 0, len(ended)),
+                          [f'{_end_chip(outcome)} <b>{escape(m[3])}</b>', f"{int(m[1]):02d}:{m[2]}", _task(t, name),
+                           escape(summary), action]))
     return fix_counts, ended, need
 
 
@@ -154,10 +163,10 @@ def _session_rows(sources: board_sources.Sources, row_of, fix_counts: dict[str, 
 
 
 def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now: datetime, trees: Path,
-                account: str) -> tuple[list[list[str]], list[list[str]], int, int]:
+                account: str) -> tuple[list[list[str]], list[tuple[tuple, list[str]]], int, int]:
     """RUNNING and ENDED TODAY rows from the store's segments, the human-review count and the running one-shot count."""
     running: list[list[str]] = []
-    ended: list[list[str]] = []
+    ended: list[tuple[tuple, list[str]]] = []
     need = store_shots = 0
     all_segs = db.segments()
     fix_by_issue: dict[str, int] = {}
@@ -189,17 +198,15 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
                 continue
             reports = db.reports(seg.issue_key, stage=seg.stage, attempt=seg.attempt)
             summary = reports[-1].summary if reports else (seg.outcome or "")
-            done = seg.outcome == "done"
             if seg.outcome == "human_review":
                 need += 1
-            state = "DONE" if done else "CRASHED"
-            action = (f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a>'
-                      if done else '<span class="chip redispatch">re-dispatch</span>')
+            action = f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a>'
             worker_name = escape(runner)
             if type(getattr(seg, "id", None)) is int and seg.id > 0:
                 worker_name = f'<a href="/workers/sessions/{seg.id}">{worker_name}</a>'
-            ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{worker_name}</b>',
-                          f"{ended_dt:%H:%M}", task_link, escape(summary), action])
+            ended.append(((ended_dt.hour * 60 + ended_dt.minute, ended_dt.second, len(ended)),
+                          [f'{_end_chip(seg.outcome)} <b>{worker_name}</b>', f"{ended_dt:%H:%M}", task_link,
+                           escape(summary), action]))
     return running, ended, need, store_shots
 
 
@@ -219,6 +226,7 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
         running += store_running
         ended += store_ended
         need += store_need
+    ended = [r for _, r in sorted(ended, key=lambda e: e[0], reverse=True)]  # by the time shown, newest first
     shots = sum(w.kind == "one-shot" for w in source_workers(sources)) + store_shots
     boxes = [("NEEDS INPUT", str(need), " hot" if need else ""), ("RUNNING", str(len(running)), "")]
     if cap:
