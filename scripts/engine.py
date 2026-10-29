@@ -584,30 +584,26 @@ class HoldReleaseFailed(ForgeError):
 
 
 def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) -> None:
-    """Retry pending suite labels; only a published label's explicit removal accepts its segment."""
-    observed = {row["issue_key"]: row.get("human_review") for row in snapshots}
+    """Retire legacy owner-release suite gates into the normal issue failure/retry path."""
     for item in store.items():
         key = item.issue_key
         data = _resume(store, key)
         if "suite_hold" not in data:
             continue
         try:
-            action = reconcile.suite_hold_action(item, data["suite_hold"], store.segments(key),
-                                                  observed=observed.get(key))
-            if action in ("retire", "accept"):
-                store.finish_suite_hold(key, accept=action == "accept")
-                if action == "accept":
-                    store.add_log(key, "suite hold released: accepted completion", at)
-                continue
-            store.set_human_review(key, True)
-            if action == "publish":
-                error = forge.add_human_hold(int(key.rpartition("#")[2]))
-                if error:
-                    raise ForgeError(error)
-                data["suite_hold"]["published"] = True
-                store.set_resume(key, data)
-        except Exception as exc:
-            # A corrupt record or one unavailable forge operation must not halt unrelated work.
+            hold = data["suite_hold"]
+            history = store.segments(key)
+            reconcile.suite_hold_action(item, hold, history, observed=None)  # validate the saved identity
+            segment = next(s for s in history if s.stage == hold["stage"] and s.attempt == hold["attempt"])
+            data.pop("suite_hold")
+            if item.forge_state != "closed":
+                store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
+                                     segment.ended_at, "failed")
+                # The attempt-owned release protocol preserves stage and worktree on a retry.
+                data["launcher_hold"] = {"stage": segment.stage, "attempt": segment.attempt}
+                store.add_log(key, "legacy suite hold retired: failed check enters automatic retry", at)
+            store.set_resume(key, data)
+        except (ValueError, KeyError, TypeError, StopIteration) as exc:
             store.set_human_review(key, True)
             message = f"suite hold: {exc}"
             logged = store.log(key)
@@ -642,7 +638,8 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
         outcome = verdict.outcome
         reason = "; ".join(part for part in (reason, verdict.reason) if part)
     if verdict.suite_hold:
-        _arm_suite_hold(store, key, segment.stage, segment.attempt)
+        # A failed automated check spends the issue failure budget; it needs no owner release.
+        outcome, held = "failed", False
     _close_segment(forge, store, key, segment.stage, segment.attempt, outcome, reason, held, now)
 
 
@@ -884,12 +881,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     for rev in decision_escalation.restarted(store.decisions(key), stage, action.attempt):
                         trio_gate.record(store, key, rev)
             elif isinstance(action, reconcile.Merge):
-                if board is not None and board.holds("merge") and stages[key] != "merge":
-                    # Enter the hold before merging; a later pass observes the human's release.
-                    stage = "merge"
-                elif engine_merge.execute(action, forge, store, at, policies=policies,
-                                         inputs=_planning_inputs(store, [by_key[key]]),
-                                         hold_stages=board.hold_stages if board is not None else ()):
+                if engine_merge.execute(action, forge, store, at, policies=policies,
+                                        inputs=_planning_inputs(store, [by_key[key]]), hold_stages=()):
                     stage = "merge"
                     _clear_waived_gates(store, key)
             elif isinstance(action, reconcile.Close):
@@ -898,17 +891,6 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     _arm_suite_hold(store, key, action.stage, action.attempt)
                 _close_segment(forge, store, key, action.stage, action.attempt, action.outcome,
                                action.reason, action.human_review, now)
-            elif isinstance(action, reconcile.Ask):
-                resolved = _resolved(policies, store, key, action.source)
-                if _consultation_blocked(store, key, resolved, at, stage=action.source):
-                    continue
-                choice = _choice(store, key, action.gate, action.reason, ("approve", "hold"),
-                                 resolved, policies.personas, model, context=action.context, stage=action.stage,
-                                 attempt=action.attempt, gate=True, clock=clock)
-                if choice == "approve":
-                    data = _resume(store, key)
-                    data["waived_gates"] = sorted(set(data.get("waived_gates") or ()) | {action.gate})
-                    store.set_resume(key, data)
             elif isinstance(action, (reconcile.Escalate, reconcile.Limit)):
                 kind = "exhausted" if isinstance(action, reconcile.Escalate) else "limit"
                 _interrupt(store, key, kind, action.reason, at, scope={"stage": action.stage})
@@ -916,6 +898,24 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     # A spent retry limit blocks the intent's own decision, which keeps holding the issue.
                     _settle(store, key, decision_actions.block, planned.intent_id, action.reason)
                 if isinstance(action, reconcile.Escalate):
+                    # Preparation is durable before the issue is parked and the owner is notified.
+                    data = _resume(store, key)
+                    data["park"] = {
+                        "reason": action.reason,
+                        "research": {
+                            "attempts": [{"stage": segment.stage, "attempt": segment.attempt,
+                                          "outcome": segment.outcome, "runtime": segment.runtime,
+                                          "model": segment.model} for segment in store.segments(key)],
+                            "reports": [{"summary": report.summary, "findings": report.findings}
+                                        for report in store.reports(key)],
+                            "log": [entry.message for entry in store.log(key)],
+                        },
+                        "options": ["Resolve the architectural question with the architect",
+                                    "Investigate the recorded failures and prepare a revised approach",
+                                    "Close the issue if the work is no longer needed"],
+                        "recommendation": "Use the recorded findings and failures to settle the cause before retrying; preserve the worktree.",
+                    }
+                    store.set_resume(key, data)
                     # A permanent refusal or exhausted budget ends automatic release; removing the
                     # hold later works without editing the engine's resume records.
                     _retire_ownership(forge, store, key, stages[key], at)

@@ -88,7 +88,7 @@ class Workflow:
     architecture_reviewer: str | None = None
     reviewer_session: str | None = None
     delivery: str = "pull-request"
-    merge_owner: str = "user"
+    merge_owner: str = "coordinator"
     approver: str | None = None
 
 
@@ -448,16 +448,14 @@ def _workflow(table) -> Workflow:
     delivery = table.get("delivery", "pull-request")
     if delivery not in ("pull-request", "branch"):
         raise SettingsError("[workflow] delivery must be `pull-request` or `branch`")
-    merge_owner = table.get("merge_owner", "user")
-    if merge_owner not in ("user", "worker", "approval"):
-        raise SettingsError("[workflow] merge_owner must be `user`, `worker` or `approval`")
-    if delivery == "branch" and merge_owner != "user":
-        raise SettingsError(f"[workflow] merge_owner={merge_owner} requires delivery=pull-request")
-    # #97: the forge username whose approval the coordinator merges on; nobody else's counts.
-    approver = table.get("approver")
-    if merge_owner == "approval" and (not isinstance(approver, str) or not approver.strip()):
-        raise SettingsError("[workflow] merge_owner=approval needs approver, the user's forge username")
-    return Workflow(**names, delivery=delivery, merge_owner=merge_owner, approver=approver)
+    # Accept old settings without retaining their owner wait. The engine owns every merge.
+    merge_owner = table.get("merge_owner", "coordinator")
+    if merge_owner not in ("user", "worker", "approval", "coordinator"):
+        raise SettingsError("[workflow] merge_owner must be `coordinator` (legacy values are accepted)")
+    approver = table.get("approver")  # optional review-thread filter, never merge authority
+    if approver is not None and (not isinstance(approver, str) or not approver.strip()):
+        raise SettingsError("[workflow] approver must be a non-empty forge username")
+    return Workflow(**names, delivery=delivery, merge_owner="coordinator", approver=approver)
 
 
 def _lane(name: str, table) -> Lane:
@@ -470,7 +468,7 @@ def _lane(name: str, table) -> Lane:
         raise SettingsError(f"[lanes] {name}: a stage appears twice")
     if not isinstance(gates, list) or not all(isinstance(g, str) for g in gates) or not set(gates) <= set(stages):
         raise SettingsError(f"[lanes] {name}: gates must be stages of the lane")
-    return Lane(tuple(stages), tuple(gates))
+    return Lane(tuple(stages))
 
 
 def _github_project(table, stages: list[str], terminal: list[str]) -> GitHubProject:
@@ -542,7 +540,7 @@ def _kanban(table) -> Kanban:
         project = _github_project(table["github_project"], stages, terminal)
     elif "project" in table:
         project = _github_project(_project_ref(table["project"]), stages, terminal)
-    return Kanban(tuple(stages), human, mapping, tuple(holds), tuple(terminal), project)
+    return Kanban(tuple(stages), human, mapping, (), tuple(terminal), project)
 
 
 def _notify(table: dict, root: Path) -> Notify:

@@ -144,13 +144,12 @@ class SettingsTest(unittest.TestCase):
 
     def test_code_delivery_and_merge_owner(self):
         self.assertEqual((st.load(self.root, None).workflow.delivery,
-                          st.load(self.root, None).workflow.merge_owner), ("pull-request", "user"))
+                          st.load(self.root, None).workflow.merge_owner), ("pull-request", "coordinator"))
         workflow = st.load(self.root, self.write('[workflow]\ndelivery = "branch"\n')).workflow
         self.assertEqual(workflow.delivery, "branch")
         workflow = st.load(self.root, self.write('[workflow]\nmerge_owner = "worker"\n')).workflow
-        self.assertEqual(workflow.merge_owner, "worker")
-        for text in ('delivery = "direct"', 'merge_owner = "bot"',
-                     'delivery = "branch"\nmerge_owner = "worker"'):
+        self.assertEqual(workflow.merge_owner, "coordinator")
+        for text in ('delivery = "direct"', 'merge_owner = "bot"'):
             with self.subTest(text=text), self.assertRaises(st.SettingsError):
                 st.load(self.root, self.write('[workflow]\n' + text + '\n'))
 
@@ -458,7 +457,7 @@ class LanesTest(unittest.TestCase):
     def test_a_lane_is_its_stages_and_gates(self):
         lane = self.load(LANES).lanes["build"]
         self.assertEqual(lane.stages, ("implement", "pr", "review", "triage", "merge"))
-        self.assertEqual(lane.gates, ("triage", "merge"))
+        self.assertEqual(lane.gates, ())
 
     def test_lanes_do_not_need_notify(self):
         got = self.load(LANES)
@@ -550,7 +549,7 @@ class KanbanSettingsTest(unittest.TestCase):
         cfg = self.load(KANBAN).kanban
         self.assertEqual(cfg.label_for("implement"), "03 - BUILD")
         self.assertEqual(cfg.label_for("fix"), "05 - FIX")
-        self.assertTrue(cfg.holds("triage"))
+        self.assertFalse(cfg.holds("triage"))
         self.assertFalse(cfg.holds("review"))
         # Terminal stages leave a forge mark named like the stage so a rebuild can round-trip (#627).
         self.assertEqual(cfg.label_for("main"), "main")

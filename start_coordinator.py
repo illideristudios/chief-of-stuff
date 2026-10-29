@@ -109,7 +109,7 @@ def prompt(runtime: str, release: Path, root: Path) -> str:
                  "every five minutes, notifying on new findings without editing tracker or board. "
                  "Next turn, read clock, inbox, "
                  "audit and worker registry; reconcile task state; board renders itself. "
-                 "Dispatch ready one-shot tasks automatically under Dispatch authority. New interactive sessions need approval.\n\n"
+                 "Dispatch ready tasks automatically under Dispatch authority, including interactive sessions.\n\n"
                  + host_schedule + "\n\n" + silence + "\n\n")
         rules = re.sub(r"## Check\n.*?(?=## Sessions\n)", check, rules, flags=re.S)
         sessions = ("## Sessions\n\nThe workspace `Sessions:` line may name Claude native list and send tools; "

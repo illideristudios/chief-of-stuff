@@ -49,6 +49,9 @@ class ExecutorTest(unittest.TestCase):
         self.at = datetime.now(timezone.utc).isoformat()
         self.p = tr.policies()
         self.ready()
+        main_ci = mock.patch.object(forge.Forge, "branch_head", return_value=forge.Pipeline(1, "main", "main-head", "passed", ""))
+        main_ci.start()
+        self.addCleanup(main_ci.stop)
 
     def ready(self):
         self.db.upsert_item(self.key, stage="merge", review_state="approved", merge_state="ready")
@@ -76,6 +79,17 @@ class ExecutorTest(unittest.TestCase):
         segment, = self.db.segments(self.key)
         self.db.record_segment(self.key, "review", 1, segment.started_at, self.at, "failed")
         self.refused("review")
+
+    def test_review_of_an_earlier_request_head_never_merges(self):
+        self.planned()
+        self.db.update_resume(self.key, lambda data: data["runs"]["review-1"].update(reviewed_head="old-head"))
+        self.refused("reviewed head")
+        self.assertEqual(self.db.segments(self.key)[0].outcome, "stale")
+
+    def test_main_ci_must_be_green_before_merging(self):
+        self.planned()
+        with mock.patch.object(forge.Forge, "branch_head", return_value=forge.Pipeline(1, "main", "main-head", "failed", "")):
+            self.refused("main CI")
 
     def test_skipped_review_hook_refuses_even_with_a_green_approved_request(self):
         with self.db.session() as session:
@@ -141,7 +155,7 @@ class ExecutorTest(unittest.TestCase):
             "zach_gates": ("merge",), "approvals": (policy.Approval("merge", now + timedelta(seconds=1)),)})
         self.planned()
         self.db.clock = lambda: now + timedelta(seconds=1)  # the pass's `at` is still the planning time
-        self.refused("gate requires Zach's approval")
+        self.assertTrue(self.execute())
 
     def test_an_issue_closed_after_planning_refuses(self):
         self.planned()

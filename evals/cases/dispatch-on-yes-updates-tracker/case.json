@@ -20,7 +20,7 @@
       "graders": [
         {
           "name": "reads the dispatch skill before the first launch, worktree, models call or tracker write",
-          "rule": "Keep the existing Tasks item and name cells byte-for-byte: approval changes ownership and state, not the task's wording.",
+          "rule": "Keep the existing Tasks item and name cells byte-for-byte: dispatch changes ownership and state, not the task's wording.",
           "type": "tool_used",
           "tool": "Read",
           "input_match": "\"file_path\": \"[^\"\\n]*skills/dispatch/SKILL\\.md\"",
@@ -61,5 +61,6 @@
         }
       ]
     }
-  ]
+  ],
+  "superseded_by": "autonomy-interactive-dispatch"
 }

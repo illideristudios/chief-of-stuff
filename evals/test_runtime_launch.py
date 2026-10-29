@@ -133,8 +133,8 @@ class CoordinatorLaunchTest(unittest.TestCase):
         for runtime in runtimes.NAMES:
             with self.subTest(runtime=runtime):
                 rendered = start.prompt(runtime, release, self.root)
-                self.assertIn("automatically assign and launch ready tasks", rendered)
-                self.assertIn("never ask for approval of routine one-shot assignments or launches", rendered)
+                self.assertIn("automatically assign and launch ready tasks", rendered.casefold())
+                self.assertIn("interactive or one-shot", rendered)
                 self.assertIn("Never automatically open the board URL", rendered)
                 self.assertNotIn("Never launch a new session without", rendered)
                 self.assertNotIn("Do not launch a new session without", rendered)
@@ -320,13 +320,14 @@ class WorkerRuntimeTest(unittest.TestCase):
         (self.root / "daily").mkdir()
         (self.root / "daily" / "2026-09-18-tracker.md").write_text(TRACKER)
 
-    def test_codex_and_cursor_launch_in_planning_state(self):
+    def test_codex_and_cursor_launch_ready_to_implement(self):
         codex = spawn.ghostty_script(cwd="/tmp/wt", agent_type=None, claude=Path("/bin/codex"),
             title="impl01", runtime="codex", workspace=str(self.root))
         cursor = spawn.ghostty_script(cwd="/tmp/wt", agent_type=None, claude=Path("/bin/agent"),
             title="impl02", runtime="cursor", workspace=str(self.root))
-        self.assertIn("/bin/codex -C /tmp/wt --sandbox read-only", codex)
-        self.assertIn("/bin/agent --workspace /tmp/wt --mode plan", cursor)
+        self.assertIn("/bin/codex -C /tmp/wt --sandbox workspace-write", codex)
+        self.assertIn("/bin/agent --workspace /tmp/wt", cursor)
+        self.assertNotIn("--mode plan", cursor)
         for text in (codex, cursor):
             self.assertIn("session_exec.py", text)
             self.assertIn("--registry", text)
@@ -341,10 +342,10 @@ class WorkerRuntimeTest(unittest.TestCase):
             if runtime in ("codex", "cursor"):
                 self.assertIn("--from \"impl01\" --type register", body)
                 self.assertNotIn("List your sessions", body)
-                self.assertIn("/plan", body)
+                self.assertIn("**Plan and proceed.**", body)
             if runtime == "codex":
-                self.assertIn("resume-codex", body)
-                self.assertIn("--session-id <session-id>", body)
+                self.assertNotIn("resume-codex", body)
+                self.assertNotIn("plan gate", body)
 
     def test_registration_and_liveness_use_the_assigned_identity(self):
         path = self.root / ".chief-of-stuff" / "sessions" / "impl01.json"
