@@ -58,9 +58,14 @@ def validate_release(root: Path, release: Path, error) -> None:
         resolved = release.resolve(strict=True)
         if resolved != release or resolved == root or root in resolved.parents:
             raise error("engine release must be stable and outside the workspace")
-        for path in (release / "scripts/engine.py", release / "requirements.txt"):
-            target = path.resolve()
-            if target == root or root in target.parents:
-                raise error("engine release must not point into the workspace")
+        if not resolved.is_dir():
+            raise error("engine release must be a directory")
+        def fail(exc):
+            raise exc
+        for directory, dirs, files in os.walk(resolved, followlinks=False, onerror=fail):
+            for name in dirs + files:
+                path = Path(directory) / name
+                if path.is_symlink():
+                    raise error(f"engine release must not contain symlinks: {path}")
     except (OSError, RuntimeError) as exc:
         raise error(f"invalid engine release: {exc}") from exc

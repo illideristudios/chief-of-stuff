@@ -51,6 +51,12 @@ class ReleaseSelectionTest(unittest.TestCase):
             self.marker.write_text("\0")
             self.assertEqual(release_selection.selected_release(self.root, supervisor), self.old)
 
+    def test_marker_selection_distinguishes_newer_candidate_from_fallback(self):
+        with mock.patch.object(supervisor, "RELEASE", self.old):
+            for target, expected in ((self.old, None), (self.new, self.new)):
+                self.marker.write_text(str(target))
+                self.assertEqual(release_selection.marker_release(self.root, self.old, supervisor), expected)
+
     def test_installed_pointer_takes_precedence_even_for_a_rollback(self):
         installed = self.root.parent / "install/versions/old"
         installed.mkdir(parents=True)
@@ -98,6 +104,18 @@ class ReleaseSelectionTest(unittest.TestCase):
             (private / (label + ".json")).write_text(json.dumps(intent))
             with self.assertRaises(supervisor.ServiceError):
                 release_selection.selected_release(self.root, supervisor)
+
+    def test_rejects_any_symlink_in_external_release_tree(self):
+        target = self.root / "payload"
+        target.write_text("workspace controlled")
+        for name in ("scripts/indirect.py", "vendor/package", "pip-inputs/constraints.txt"):
+            with self.subTest(name=name):
+                link = self.new / name
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target)
+                with self.assertRaises(supervisor.ServiceError):
+                    release_selection.validate_handoff(self.root, self.new, supervisor)
+                link.unlink()
 
     def test_cached_selector_is_never_called(self):
         with mock.patch.object(supervisor, "selected_release", side_effect=AssertionError("untrusted selector"), create=True), \

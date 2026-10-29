@@ -35,9 +35,9 @@ def validate_handoff(root: Path, release: Path, supervisor) -> None:
             raise supervisor.ServiceError(f"invalid board release: {exc}") from exc
 
 
-def explicit_release(root: Path, supervisor) -> Path | None:
+def explicit_release(root: Path, supervisor, *, completed_only: bool = False) -> Path | None:
     intent = engine_intent.read(root, supervisor.data_dir(), supervisor.ServiceError)
-    if intent is None or intent["operation"] != "install":
+    if intent is None or intent["operation"] != "install" or (completed_only and intent["pending"]):
         return None
     chosen = Path(intent["release"])
     # Completed installed releases follow the stable current pointer, as in the engine.
@@ -61,9 +61,14 @@ def selected_release(root: Path, supervisor) -> Path:
             return current
         except supervisor.ServiceError:
             return supervisor.RELEASE
+    return marker_release(root, current, supervisor) or current
+
+
+def marker_release(root: Path, current: Path, supervisor) -> Path | None:
+    """Return a validated newer marker selection, never the caller fallback."""
     current_version = _plugin_version(current)
     if current_version is None:
-        return current
+        return None
     try:
         candidate = Path((supervisor.state_dir(root) / "engine-plugin-release").read_text()).resolve(strict=True)
         validate_handoff(root, candidate, supervisor)
@@ -72,4 +77,4 @@ def selected_release(root: Path, supervisor) -> Path:
             return candidate
     except (OSError, RuntimeError, ValueError, supervisor.ServiceError):
         pass
-    return current
+    return None

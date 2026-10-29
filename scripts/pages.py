@@ -899,11 +899,12 @@ def _version_tuple(value: str) -> tuple[int, ...] | None:
     return tuple(int(part) for part in value.split("."))
 
 
-def _authoritative_release(root: Path | None) -> Path | None:
+def _authoritative_release(root: Path | None, *, completed_only: bool = False) -> Path | None:
     """Return only an explicit selection, never the selector's fallback to this release."""
     release = supervisor.RELEASE.resolve()
     if root is not None:
-        explicit = release_selection.explicit_release(root, supervisor)
+        explicit = (release_selection.explicit_release(root, supervisor, completed_only=True)
+                    if completed_only else release_selection.explicit_release(root, supervisor))
         if explicit is not None:
             return explicit
     pointer = release.parent.parent / "current"
@@ -915,18 +916,15 @@ def _authoritative_release(root: Path | None) -> Path | None:
                     if root is not None:
                         release_selection.validate_handoff(root, selected, supervisor)
                     return selected
-        if root is not None and release_selection._plugin_version(release) is not None:
-            marker = supervisor.state_dir(root) / "engine-plugin-release"
-            selected = Path(marker.read_text()).resolve(strict=True)
-            if _selected_release(root).resolve() == selected:
-                return selected
+        if root is not None:
+            return release_selection.marker_release(root, release, supervisor)
     except (OSError, RuntimeError, ValueError, supervisor.ServiceError):
         pass
     return None
 
 
 def _selected_for_rollback(root: Path | None) -> bool:
-    return _authoritative_release(root) == supervisor.RELEASE.resolve()
+    return _authoritative_release(root, completed_only=True) == supervisor.RELEASE.resolve()
 
 
 def _server_not_older(who: str) -> bool:

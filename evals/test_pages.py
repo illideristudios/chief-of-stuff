@@ -567,7 +567,7 @@ class EnsureTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "selected upgrade"):
                         pg.ensure(self.dir, self.port, self.log, root)
 
-    def test_plugin_marker_selects_same_version_release_for_replacement(self):
+    def test_forged_marker_equal_to_caller_does_not_authorize_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
             release = Path(tmp) / "plugins/cache/market/chief/1.2.3"
@@ -579,13 +579,36 @@ class EnsureTest(unittest.TestCase):
             marker = pg.supervisor.state_dir(root) / "engine-plugin-release"
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(str(release))
-            with mock.patch.object(pg.supervisor, "RELEASE", release), \
-                 mock.patch.object(pg.supervisor, "current_release", return_value=release), \
-                 mock.patch.object(pg, "VERSION", "1.2.3"), \
-                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.2.3"), \
-                 mock.patch.object(pg, "_stop", side_effect=RuntimeError("marker selected")):
-                with self.assertRaisesRegex(RuntimeError, "marker selected"):
-                    pg.ensure(self.dir, self.port, self.log, root)
+            for version in ("1.2.3", "2.0.0"):
+                for identity in ("", " release-" + "a" * 24):
+                    with self.subTest(version=version, identity=identity), \
+                         mock.patch.object(pg.supervisor, "RELEASE", release), \
+                         mock.patch.object(pg.supervisor, "current_release", return_value=release), \
+                         mock.patch.object(pg, "VERSION", "1.2.3"), \
+                         mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/{version}{identity}"), \
+                         mock.patch.object(pg, "_stop", side_effect=AssertionError("forged marker stopped server")):
+                        self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
+
+    def test_selected_newer_marker_protects_legacy_server_without_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "workspace"
+            cache = Path(tmp).resolve() / "plugins/cache/market/chief"
+            old, new = cache / "old", cache / "new"
+            for release, version in ((old, "1.0.0"), (new, "2.0.0")):
+                (release / "scripts").mkdir(parents=True)
+                (release / "scripts/engine.py").touch()
+                (release / "requirements.txt").touch()
+                (release / ".claude-plugin").mkdir()
+                (release / ".claude-plugin/plugin.json").write_text(json.dumps({"version": version}))
+            marker = pg.supervisor.state_dir(root) / "engine-plugin-release"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(new))
+            with mock.patch.object(pg.supervisor, "RELEASE", old), \
+                 mock.patch.object(pg.supervisor, "current_release", return_value=old), \
+                 mock.patch.object(pg, "VERSION", "1.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/0.9.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=AssertionError("selected server stopped")):
+                self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
 
     def test_authoritative_installed_rollback_replaces_newer_server(self):
         root = self.dir.parent / "workspace"
@@ -598,6 +621,32 @@ class EnsureTest(unittest.TestCase):
                  mock.patch.object(pg, "VERSION", "1.0.0"), \
                  mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
                  mock.patch.object(pg, "_stop", side_effect=RuntimeError("rollback selected")):
+                with self.assertRaisesRegex(RuntimeError, "rollback selected"):
+                    pg.ensure(self.dir, self.port, self.log, root)
+
+    def test_pending_private_intent_does_not_authorize_rollback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "workspace"
+            root.mkdir()
+            release = Path(tmp).resolve() / "old"
+            (release / "scripts").mkdir(parents=True)
+            (release / "scripts/engine.py").touch()
+            (release / "requirements.txt").touch()
+            data = Path(tmp) / "data"
+            private = data / "engine-intents"
+            private.mkdir(parents=True, mode=0o700)
+            label = pg.supervisor.label("engine", root)
+            intent = {"operation": "install", "pending": True, "release": str(release),
+                      "job": {"Label": label, "WorkingDirectory": str(root)}}
+            (private / (label + ".json")).write_text(json.dumps(intent))
+            with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": str(data)}), \
+                 mock.patch.object(pg.supervisor, "RELEASE", release), \
+                 mock.patch.object(pg, "VERSION", "1.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=RuntimeError("rollback selected")):
+                self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
+                intent["pending"] = False
+                (private / (label + ".json")).write_text(json.dumps(intent))
                 with self.assertRaisesRegex(RuntimeError, "rollback selected"):
                     pg.ensure(self.dir, self.port, self.log, root)
 
@@ -2234,9 +2283,12 @@ class StandaloneBoardTest(unittest.TestCase):
             self.assertFalse(thread.is_alive())
 
     def test_handoff_rejects_workspace_inputs_before_prepare_and_execution(self):
-        for change_after_prepare in (False, True):
-            with self.subTest(change_after_prepare=change_after_prepare):
-                release = self.root.parent / ("candidate-after" if change_after_prepare else "candidate-before")
+        for change_after_prepare, link_name in ((after, name) for after in (False, True)
+                                                for name in ("scripts/pages.py", "scripts/indirect.py",
+                                                             "pip-inputs/constraints.txt")):
+            with self.subTest(change_after_prepare=change_after_prepare, link_name=link_name):
+                release = self.root.parent / (("candidate-after-" if change_after_prepare else "candidate-before-")
+                                              + link_name.replace("/", "-"))
                 (release / "scripts").mkdir(parents=True)
                 entry = release / "scripts/pages.py"
                 entry.write_text("# candidate\n")
@@ -2244,9 +2296,13 @@ class StandaloneBoardTest(unittest.TestCase):
                 (release / "requirements.txt").touch()
                 malicious = self.root / "pages-attack.py"
                 malicious.write_text("# workspace code\n")
+                link = release / link_name
+                link.parent.mkdir(parents=True, exist_ok=True)
+                def add_link():
+                    link.unlink(missing_ok=True)
+                    link.symlink_to(malicious)
                 if not change_after_prepare:
-                    entry.unlink()
-                    entry.symlink_to(malicious)
+                    add_link()
                 stop = threading.Event()
                 prepared = threading.Event()
                 rejected = threading.Event()
@@ -2260,8 +2316,7 @@ class StandaloneBoardTest(unittest.TestCase):
                         raise
                 def prepare(*args, **kwargs):
                     prepared.set()
-                    entry.unlink()
-                    entry.symlink_to(malicious)
+                    add_link()
                     return Path(sys.executable)
                 with mock.patch.object(pg, "_selected_release", return_value=release), \
                      mock.patch.object(pg.release_selection, "validate_handoff", side_effect=validate), \
