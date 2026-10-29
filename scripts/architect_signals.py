@@ -60,7 +60,7 @@ def pending(rows: Sequence[GapRow], acted_ids: Collection[str] | Mapping[str, An
 
 def signal_key(gap_id: str, against: str) -> str:
     sha = against.strip()
-    if not gap_id or not sha:
+    if not re.fullmatch(r"C\d+", gap_id) or not re.fullmatch(r"[0-9a-fA-F]{3,64}", sha):
         raise ValueError("signal key needs a gap id and a commit")
     return f"{KEY_PREFIX}{gap_id}@{sha}"
 
@@ -86,7 +86,7 @@ def find_existing(issues: Sequence[Mapping[str, Any]], key: str) -> int | None:
         return None
     for row in issues:
         body = str(row.get("body") or "")
-        if needle in body.splitlines() or needle in body:
+        if needle in body.splitlines():
             number = row.get("number")
             if isinstance(number, int):
                 return number

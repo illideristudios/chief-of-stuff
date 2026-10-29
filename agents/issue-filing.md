@@ -13,24 +13,19 @@ You file exactly one forge issue from an architect signal, then end. You do not 
 
 ## Input
 
-Your assignment names one compliance gap id (for example `C4`) and the commit the signal was written against. Read that row from `architecture/compliance.md`. Do not invent a second gap.
+Your assignment names one compliance gap id (for example `C4`), the commit the signal was written against, and the absolute coordinator root. Read that root's `architecture/compliance.md`. Do not use your worker tree as the coordinator root. Do not invent a second gap.
 
 ## Dedupe
 
-1. Compute the signal key with `chief-of-stuff architect-signals --root . key <gap-id> --against <sha>` (it prints `architect-signal:<gap-id>@<sha>`).
-2. Search the forge for an existing open or closed issue whose body already contains that key on its own line (`gh issue list` / search, then `gh issue view`).
-3. If one exists: do not file. Record the ledger with that issue and end.
-4. If none exists: continue.
+Run `chief-of-stuff architect-signals --root <coordinator-root> file <gap-id> --against <sha>`. This command searches all open and closed issues for the exact `architect-signal:<gap-id>@<sha>` line, files if absent, and records the coordinator ledger under one lock. If an issue already exists, it does not file again.
 
 ## File
 
-1. Build the body with `chief-of-stuff architect-signals --root . body <gap-id> --against <sha>` and write it to a temp file.
-2. File with `chief-of-stuff backlog --create <title> --body-file <path> --commit` (or the workspace's backlog create). Never put an issue number in a shell-expanded body; use `--body-file`. The body already embeds `architect-signal:<gap-id>@<sha>` so a repeated signal files nothing twice.
-3. Title names the gap id and a short restatement of the gap text.
+The command builds the title and body from the row. Never create an issue through a separate forge command. If creation is unconfirmed, report that failure and end; do not bypass it or choose a new key. A later invocation recovers an existing issue with the original key, even if the compliance commit changed. Without a confirming forge record, it files nothing twice.
 
 ## Ledger
 
-After a create or a dedupe hit, run `chief-of-stuff architect-signals --root . mark <gap-id> --issue-key <forge-key> --signal-key <key>`. That writes `.chief-of-stuff/architect-signals.json` only. Never edit `architecture/compliance.md`; only the architect writes that file.
+The filing command writes `.chief-of-stuff/architect-signals.json` at the coordinator root atomically. Do not mark an issue separately or edit `architecture/compliance.md`; only the architect writes that file.
 
 ## End
 

@@ -14,6 +14,51 @@ import architect_signal_store as store
 import architect_signals as signals
 
 
+def file_signal(root: Path, gap_id: str, *, against: str, cfg, token=None, fetch=None, create=None) -> str:
+    """Serialize search/create/record; preserve the original key across ambiguous failures.
+
+    The forge has no idempotency token. After an unconfirmed create, only a positive dedupe
+    hit permits recovery: an empty search must never authorize a second POST.
+    """
+    import backlog
+    from backlog_ref import home_of, IssueRef
+    fetch, create = fetch or backlog.issues, create or backlog.create
+    with store.exclusive(root):
+        data = store.load_ledger(root)
+        if gap_id in data["acted"]:
+            return data["acted"][gap_id]["issue_key"]
+        inflight = data.setdefault("filing", {})
+        intent = inflight.get(gap_id)
+        if intent is None:
+            rows = {row.id: row for row in signals.unassigned_gaps(store.compliance_text(root))}
+            gap = rows[gap_id]
+            intent = {"signal_key": signals.signal_key(gap_id, against),
+                      "title": f"{gap.id}: {gap.gap}",
+                      "body": signals.issue_body(gap=gap, against=against, source="architecture/compliance.md"),
+                      "creating": False}
+            inflight[gap_id] = intent
+            store.save_ledger(root, data)
+        got = fetch(cfg, token=token, state="all")
+        if got.error:
+            raise RuntimeError(f"cannot dedupe architect signal: {got.error}")
+        number = signals.find_existing([{"number": i.iid, "body": i.body} for i in got.issues], intent["signal_key"])
+        if number is None:
+            if intent["creating"]:
+                raise RuntimeError(f"{gap_id} creation is unconfirmed; preserving its key, no second issue filed")
+            intent["creating"] = True
+            store.save_ledger(root, data)  # durable before the remote side effect
+            made = create(cfg, intent["title"], body=intent["body"], token=token, commit=True)
+            if made.error or not made.done or not made.iid:
+                raise RuntimeError(f"{gap_id} creation is unconfirmed: {made.error}")
+            number = made.iid
+        host, repo = home_of(cfg)
+        key = IssueRef(repo, number, host).store_key
+        data["acted"][gap_id] = {"issue_key": key, "signal_key": intent["signal_key"]}
+        del inflight[gap_id]
+        store.save_ledger(root, data)
+        return key
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Unassigned compliance gaps become forge issues once; the coordinator ledger never edits compliance.md.")
@@ -36,9 +81,20 @@ def main(argv: list[str] | None = None) -> int:
     body_p.add_argument("gap_id")
     body_p.add_argument("--against", required=True)
 
+    file_p = sub.add_parser("file", help="dedupe, file and record under the coordinator's ledger lock")
+    file_p.add_argument("gap_id")
+    file_p.add_argument("--against", required=True)
+
     args = parser.parse_args(argv)
     root = args.root.resolve()
     try:
+        if args.cmd == "file":
+            from startup import workspace_forge
+            _, _, forge = workspace_forge(root)
+            if forge is None:
+                raise ValueError("workspace has no configured backlog")
+            print(file_signal(root, args.gap_id, against=args.against, cfg=forge.home, token=forge.token))
+            return 0
         if args.cmd == "pending":
             rows = signals.pending(
                 signals.unassigned_gaps(store.compliance_text(root)),
@@ -64,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             print(signals.issue_body(gap=rows[args.gap_id], against=args.against,
                                      source="architecture/compliance.md"), end="")
             return 0
-    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
         print(f"architect-signals: {exc}", file=sys.stderr)
         return 1
     return 2
