@@ -326,7 +326,7 @@ def render_session(db: PageData, segment_id: int, trees: Path, *, config_dir: Pa
         c = page.cursor
         token = f"{c.device},{c.inode},{c.offset},{c.tail_hash}"
         next_link = f'<p><a href="/workers/sessions/{segment_id}?cursor={escape(token, quote=True)}">Next transcript page</a></p>'
-    refresh = '<meta http-equiv="refresh" content="5">' if not seg.ended_at and not next_link and not csrf else ""
+    pending = any(m.status in ("queued", "sending") for m in messages)
     labels = {"queued": "Queued", "sending": "Sending / unconfirmed", "delivered": "Delivered to Claude CLI", "failed": "Failed"}
     message_rows = "".join(
         f'<div class="session-event"><span class="session-time">{escape(str(m.created_at))}</span>'
@@ -350,14 +350,47 @@ def render_session(db: PageData, segment_id: int, trees: Path, *, config_dir: Pa
       event.preventDefault(); form.querySelector('.meta').textContent = 'Message exceeds 8 KiB. Shorten it before sending.';
     }
   });
-  setInterval(async () => { try { const response = await fetch(location.href, {cache:'no-store'});
-    if (!response.ok) return; const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
-    const current = document.querySelector('#session-live'), fresh = doc.querySelector('#session-live');
-    if (current && fresh) current.replaceWith(fresh);
-    if (form && !doc.querySelector('.compose')) { form.querySelector('button').disabled = true;
-      form.querySelector('textarea').readOnly = true; form.querySelector('.meta').textContent = 'This attempt is no longer accepting messages. Your draft was not sent.'; }
-  } catch (_) {} }, 5000);
-})();</script>""" if not seg.ended_at else ""
+  // Keep equal nodes (including links and their focus); defer changes to a focused subtree.
+  function sync(current, fresh) {
+    if (current.isEqualNode(fresh)) return true;
+    if (current.nodeType !== fresh.nodeType || current.nodeName !== fresh.nodeName || current.nodeType !== 1) return replace(current, fresh);
+    if (current.attributes.length !== fresh.attributes.length ||
+        Array.from(current.attributes).some(a => fresh.getAttribute(a.name) !== a.value)) return replace(current, fresh);
+    let complete = true, i = 0;
+    while (i < fresh.childNodes.length || i < current.childNodes.length) {
+      const old = current.childNodes[i], next = fresh.childNodes[i];
+      if (!old) current.appendChild(next.cloneNode(true));
+      else if (!next) { if (old.contains(document.activeElement)) { complete = false; i++; continue; } old.remove(); continue; }
+      else if (!sync(old, next)) complete = false;
+      i++;
+    }
+    return complete;
+  }
+  function replace(old, next) {
+    if (old.contains(document.activeElement)) return false;
+    old.replaceWith(next.cloneNode(true)); return true;
+  }
+  let busy = false;
+  const timer = setInterval(async () => { if (busy) return; busy = true;
+    try { const response = await fetch(location.href, {cache:'no-store'});
+      if (!response.ok) return; const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+      const current = document.querySelector('#session-live'), fresh = doc.querySelector('#session-live');
+      const state = document.querySelector('#session-state'), freshState = doc.querySelector('#session-state');
+      const anchor = Array.from(document.querySelectorAll('#session-live .session-event')).find(e => e.getBoundingClientRect().bottom > 0);
+      const top = anchor && anchor.getBoundingClientRect().top;
+      let complete = !!(current && fresh);
+      if (complete) for (const id of ['session-notice', 'session-events', 'session-pagination', 'session-messages']) {
+        const old = current.querySelector('#' + id), next = fresh.querySelector('#' + id);
+        if (!old || !next || !sync(old, next)) complete = false;
+      }
+      if (state && freshState && state.textContent !== freshState.textContent) state.textContent = freshState.textContent;
+      if (anchor && anchor.isConnected) window.scrollBy(0, anchor.getBoundingClientRect().top - top);
+      if (form && !doc.querySelector('.compose')) { form.querySelector('button').disabled = true;
+        form.querySelector('textarea').readOnly = true; form.querySelector('.meta').textContent = 'This attempt is no longer accepting messages. Your draft was not sent.'; }
+      if (complete && fresh.dataset.ended === 'true' && fresh.dataset.pending === 'false') clearInterval(timer);
+    } catch (_) {} finally { busy = false; }
+  }, 5000);
+})();</script>""" if not seg.ended_at or pending else ""
     state = "Ended" if seg.ended_at else "Recorded as running"
     css = """<style>
 .session-event{display:grid;grid-template-columns:minmax(130px,180px) minmax(0,1fr);gap:12px;padding:10px 0}
@@ -368,14 +401,16 @@ def render_session(db: PageData, segment_id: int, trees: Path, *, config_dir: Pa
 .compose label{font-weight:600}.compose textarea{display:block;box-sizing:border-box;width:100%;margin-top:8px;padding:8px;color:var(--fg);background:var(--surface);border:1px solid var(--line);border-radius:4px}.compose button{padding:7px 12px;cursor:pointer}
 @media(max-width:600px){.session-event{grid-template-columns:1fr;gap:4px}}
 </style>"""
-    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">{refresh}'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>{escape(title)} · Worker</title>'
             f'{HEAD}{CSS}{css}</head><body><main>{tab_bar("Workers", 0, parent=True)}'
             f'<header class="top"><div><span class="eyebrow"><a href="/workers">Workers</a> · '
             f'{escape(seg.runtime or "unknown runtime")} · attempt {seg.attempt}</span>'
-            f'<h1>{escape(title)}</h1><span class="meta">{state}</span></div></header>'
-            f'<section><div id="session-live"><h2>Transcript</h2>{reset}{warning}<div class="card">{events}</div>{next_link}'
-            f'<h2>Operator messages</h2><div class="card">{message_rows or "<p class=meta>No messages for this attempt.</p>"}</div></div>'
+            f'<h1>{escape(title)}</h1><span class="meta" id="session-state">{state}</span></div></header>'
+            f'<section><div id="session-live" data-ended="{str(bool(seg.ended_at)).lower()}" data-pending="{str(pending).lower()}">'
+            f'<h2>Transcript</h2><div id="session-notice">{reset}{warning}</div><div class="card" id="session-events">{events}</div>'
+            f'<div id="session-pagination">{next_link}</div><h2>Operator messages</h2>'
+            f'<div class="card" id="session-messages">{message_rows or "<p class=meta>No messages for this attempt.</p>"}</div></div>'
             f'{compose}{poll}</section></main></body></html>')
 
 

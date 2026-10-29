@@ -656,7 +656,8 @@ class Store:
             return row
 
     def _resolve_worker_message(self, message_id: int, issue_key: str, stage: str, attempt: int, session_id: str,
-                                status: str, evidence: str, delivery_id: str | None = None) -> None:
+                                status: str, evidence: str, delivery_id: str | None = None,
+                                expected_status: str | None = None) -> None:
         if not isinstance(evidence, str) or not evidence.strip():
             raise ValueError("message resolution requires evidence")
         with self.session() as s:
@@ -665,6 +666,9 @@ class Store:
                 raise ValueError("message does not belong to this worker session")
             if status == "delivered" and (not delivery_id or delivery_id != row.delivery_id):
                 raise ValueError("acknowledgment does not match the delivery claim")
+            if expected_status is not None and (row.status != expected_status or
+                    (expected_status == "sending" and (not delivery_id or row.delivery_id != delivery_id))):
+                raise ValueError("message state or delivery claim changed")
             if row.status == status and row.evidence == evidence:
                 return
             if row.status not in ("queued", "sending") or (status == "delivered" and row.status != "sending"):
@@ -679,9 +683,12 @@ class Store:
         self._resolve_worker_message(message_id, issue_key, stage, attempt, session_id, "delivered", evidence, delivery_id)
 
     def fail_worker_message(self, message_id: int, issue_key: str, stage: str, attempt: int, session_id: str,
-                            *, reason: str) -> None:
-        """Record a confirmed delivery failure; an ambiguous write remains sending and unconfirmed."""
-        self._resolve_worker_message(message_id, issue_key, stage, attempt, session_id, "failed", reason)
+                            *, reason: str, expected_status: str = "queued", delivery_id: str | None = None) -> None:
+        """Fail a queued message or the exact sending claim supported by transport evidence."""
+        if expected_status not in ("queued", "sending"):
+            raise ValueError("failure requires queued state or a sending claim")
+        self._resolve_worker_message(message_id, issue_key, stage, attempt, session_id, "failed", reason,
+                                     delivery_id, expected_status)
 
     def answer_ask(self, issue_key: str, ask_id: int, answer: str) -> None:
         """An operator's or the trio's adopted answer, bound to the named issue; worker tools never expose this write.

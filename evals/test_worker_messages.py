@@ -109,6 +109,18 @@ class WorkerMessagesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db.ack_worker_message(msg.id, KEY, "implement", 1, SESSION, delivery_id="late", evidence="late")
 
+    def test_failure_must_match_the_observed_state_and_delivery_claim(self) -> None:
+        message = self.queue()
+        claim = self.db.begin_worker_message_delivery(message.id, KEY, "implement", 1, SESSION)
+        for expected, delivery in (("queued", None), ("sending", "wrong"), ("sending", None)):
+            with self.subTest(expected=expected, delivery=delivery), self.assertRaises(ValueError):
+                self.db.fail_worker_message(message.id, KEY, "implement", 1, SESSION, reason="not written",
+                                            expected_status=expected, delivery_id=delivery)
+        self.assertEqual(self.db.worker_messages(KEY)[0].status, "sending")
+        self.db.fail_worker_message(message.id, KEY, "implement", 1, SESSION, reason="not written",
+                                    expected_status="sending", delivery_id=claim.delivery_id)
+        self.assertEqual(self.db.worker_messages(KEY)[0].status, "failed")
+
     def test_crash_after_claim_leaves_delivery_unconfirmed_and_cannot_retry_automatically(self) -> None:
         message = self.queue()
         claim = self.db.begin_worker_message_delivery(message.id, KEY, "implement", 1, SESSION)
@@ -161,7 +173,8 @@ class WorkerMessagesTest(unittest.TestCase):
                     other.ack_worker_message(message.id, KEY, "implement", 1, SESSION,
                                              delivery_id=claim.delivery_id, evidence="receipt")
                 else:
-                    other.fail_worker_message(message.id, KEY, "implement", 1, SESSION, reason="not delivered")
+                    other.fail_worker_message(message.id, KEY, "implement", 1, SESSION, reason="not delivered",
+                                              expected_status="sending", delivery_id=claim.delivery_id)
                 successes.append(status)
             except ValueError:
                 rejected.append(status)

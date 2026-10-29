@@ -140,7 +140,8 @@ class WorkerTranscriptPageTest(unittest.TestCase):
         link = re.search(r'href="(/workers/sessions/14\?cursor=[^"]+)"', first).group(1)
         last = self.get(link)[2]
         self.assertIn("entry-200", last)
-        self.assertIn('http-equiv="refresh"', last)
+        self.assertIn('setInterval', last)
+        self.assertNotIn('http-equiv="refresh"', last)
         self.assertEqual(self.get("/workers/sessions/14?cursor=bogus")[0], 400)
 
     def test_ended_worker_rows_link_to_the_same_attempt(self):

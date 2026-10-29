@@ -480,8 +480,9 @@ def deliver_messages(store: Any, root: Path, clock: engine_clock.Clock = engine_
 def _deliver(store: Any, root: Path, message: Any) -> None:
     identity = (message.id, message.issue_key, message.stage, message.attempt, message.session_id)
 
-    def fail(reason: str) -> None:
-        store.fail_worker_message(*identity, reason=reason)
+    def fail(reason: str, *, claim_id: str | None = None) -> None:
+        store.fail_worker_message(*identity, reason=reason,
+                                  expected_status="sending" if claim_id else "queued", delivery_id=claim_id)
 
     run_dir = _run_dir(root, message.issue_key, message.stage, message.attempt)
     record = _resume(store, message.issue_key).get("runs", {}).get(f"{message.stage}-{message.attempt}")
@@ -511,7 +512,7 @@ def _deliver(store: Any, root: Path, message: Any) -> None:
                                               "body": message.body})
             except OSError as exc:
                 if claude_adapter.handoff_state(run_dir, claim.delivery_id)[0] == "missing":
-                    fail(f"handoff failed ({exc}); {NEVER_WRITTEN}")
+                    fail(f"handoff failed ({exc}); {NEVER_WRITTEN}", claim_id=claim.delivery_id)
                 raise
         return
     if record is None or not claude_adapter.messaging(run_dir):
@@ -530,10 +531,10 @@ def _deliver(store: Any, root: Path, message: Any) -> None:
                                      evidence=f"Claude CLI replayed uuid {message.delivery_id} in the attempt's stream; "
                                               "the CLI read it, which does not show the model acted on it")
         elif state == "missing":
-            fail(f"the handoff was interrupted before the mailbox write; {NEVER_WRITTEN}")
+            fail(f"the handoff was interrupted before the mailbox write; {NEVER_WRITTEN}", claim_id=message.delivery_id)
         elif state == "rejected" or (state == "inbox" and not _runner_live(record, run_dir)
                                       and claude_adapter.revoke(run_dir, message.delivery_id)):
-            fail(f"the worker closed its intake before taking the message; {NEVER_WRITTEN}")
+            fail(f"the worker closed its intake before taking the message; {NEVER_WRITTEN}", claim_id=message.delivery_id)
 
 
 def _runner_live(record: dict, run_dir: Path) -> bool:

@@ -2,6 +2,8 @@
 import http.client
 import json
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -84,6 +86,35 @@ class WorkerMessageUITest(unittest.TestCase):
         other = self.db.worker_messages(KEY)[1]
         self.db.fail_worker_message(other.id, KEY, 'implement', 1, self.sid, reason='not written')
         self.assertIn('Failed', self.request('GET', self.path)[1])
+
+    def test_ended_attempt_polls_until_its_messages_settle(self):
+        form = self.form(); form['message'] = 'check this'
+        self.assertEqual(self.post(form)[0], 303)
+        message = self.db.worker_messages(KEY)[0]
+        second = self.db.queue_worker_message(KEY, 'implement', 1, self.sid, 'follow up', request_id=str(uuid.uuid4()))
+        claim = self.db.begin_worker_message_delivery(second.id, KEY, 'implement', 1, self.sid)
+        self.db.end_segment(KEY, 'implement', 1, 'end', 'done')
+        html = self.request('GET', self.path)[1]
+        self.assertIn('data-pending="true"', html)
+        self.assertIn('setInterval', html)
+        self.db.fail_worker_message(message.id, KEY, 'implement', 1, self.sid, reason='not written')
+        html = self.request('GET', self.path)[1]
+        self.assertIn('data-pending="true"', html)
+        self.assertIn('setInterval', html)
+        self.db.ack_worker_message(second.id, KEY, 'implement', 1, self.sid,
+                                   delivery_id=claim.delivery_id, evidence='CLI replayed the UUID')
+        html = self.request('GET', self.path)[1]
+        self.assertIn('data-pending="false"', html)
+        self.assertNotIn('setInterval', html)
+
+    def test_live_poll_preserves_focus_nodes_and_reading_position_in_javascript(self):
+        if not shutil.which('node'):
+            self.skipTest('node is required to exercise the session poll in JavaScript')
+        html = self.request('GET', self.path)[1]
+        script = re.search(r'<script>\n\(\(\) => \{ const form.*?</script>', html, re.S).group(0)
+        driver = Path(__file__).with_name('worker_session_poll_driver.js')
+        result = subprocess.run(['node', str(driver)], input=script, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_concurrent_same_request_creates_only_one_message(self):
         form = self.form(); form['message'] = 'one delivery'

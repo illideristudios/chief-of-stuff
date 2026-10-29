@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -201,6 +202,47 @@ class LiveMessagesTest(unittest.TestCase):
                 self.assertIn(reason, row.evidence)
                 self.assertIsNone(row.delivery_id)
         self.assertFalse((self.run_dir / claude_adapter.MAILBOX).exists())
+
+    def test_stale_queued_sweep_cannot_fail_a_message_echoed_after_another_sweep_claims(self):
+        self.start()
+        message = self.queue()
+        stale_store = self.open_store()
+        captured, release = threading.Event(), threading.Event()
+        original = stale_store.worker_messages
+        errors = []
+
+        def snapshot(*args, **kwargs):
+            rows = original(*args, **kwargs)
+            captured.set()
+            if not release.wait(10):
+                raise AssertionError("stale sweep was not released")
+            return rows
+
+        def sweep():
+            try:
+                worker.deliver_messages(stale_store, self.root)
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch.object(stale_store, "worker_messages", side_effect=snapshot):
+            thread = threading.Thread(target=sweep)
+            thread.start()
+            try:
+                self.assertTrue(captured.wait(5))
+                worker.deliver_messages(self.db, self.root)
+                claim = self.status(message)
+                self.assertEqual(claim.status, "sending")
+                wait_for(lambda: (self.run_dir / claude_adapter.MAILBOX / "acks" / f"{claim.delivery_id}.json").exists())
+                self.db.end_segment(KEY, "implement", 1, "end", "done")
+            finally:
+                release.set()
+                thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(self.status(message).status, "sending")
+        worker.deliver_messages(self.db, self.root)
+        self.assertEqual(self.status(message).status, "delivered")
+        self.assertEqual(self.written().count(claim.delivery_id), 1)
 
     def test_the_sweep_waits_for_a_handoff_in_progress_and_fails_only_a_crashed_one(self):
         self.start()
