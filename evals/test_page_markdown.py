@@ -304,8 +304,9 @@ class MarkdownTest(unittest.TestCase):
         from workspace import parse_coordinator
         from test_render_board import CLAUDE_MD
         merged = replace(MR, title='**Merged** change (#12)', state='merged', merged_at=NOW)
-        html = render_board.render('', parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
-                                   sources=sources(merged))
+        src = sources(merged)
+        cfg = replace(parse_coordinator(CLAUDE_MD, today=NOW.date()), backlog=src.home)
+        html = render_board.render('', cfg, NOW, sources=src)
         name, = Structure(html).by_class('columns-card-name')
         self.assertEqual(name['tag'], 'a')
         self.assertEqual(name['attrs'].get('href'), '/issues/109')

@@ -1506,7 +1506,7 @@ class UnavailableAndStaleIssueTest(unittest.TestCase):
         self.assertNotIn("fake item criterion", acc_sec)
         self.assertNotIn("fake checklist criterion", acc_sec)
 
-    def test_stale_issue_links_follow_cached_identity_after_backlog_change(self) -> None:
+    def test_old_cache_is_hidden_after_backlog_change_and_links_keep_cached_identity(self) -> None:
         cases = (
             (bs.backlog.GitHubBacklog("old/repo"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://github.com/old/repo/issues/12", "https://github.com/old/repo", "#12"),
             (bs.backlog.GitHubBacklog("Old/Repo"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://github.com/old/repo/issues/12", "https://github.com/Old/Repo", "#12"),
@@ -1524,6 +1524,15 @@ class UnavailableAndStaleIssueTest(unittest.TestCase):
                 self.assertIsNotNone(html)
                 for name in ("Issue", "Acceptance"):
                     part = page_section(html, name)
+                    self.assertIn("read failed", part)
+                    self.assertNotIn("Old issue", part)
+                    self.assertNotIn("Check #10", part)
+                    self.assertNotIn(f'href="{base}/', part)
+                    self.assertNotIn('href="https://github.com/new/repo/', part)
+                # If cached prose is used in its own namespace, its links must still
+                # resolve against that issue rather than the configured backlog.
+                linker = ip._issue_linker(issue, key, home, cfg, self.root)
+                for part in (ip._issue_section(issue, linker), ip._acceptance(issue, linker)):
                     self.assertIn(f'href="{base}/issues/10"', part)
                     self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
                     self.assertNotIn('href="https://github.com/new/repo/', part)
@@ -1543,11 +1552,9 @@ class UnavailableAndStaleIssueTest(unittest.TestCase):
         path = self.root / "src" / "lib.py"
         path.parent.mkdir()
         path.write_text("def target():\n    pass\n")
-        tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | #12 | |\n"
         issue = bs.Issue("#12", "https://github.com/old/repo/issues/12", "Old", "open", (), body="See src/lib.py:target.")
-        src = bs.Sources({"kanban": NOW}, {"#12": issue}, {}, (), {"kanban": "read failed"}, home=bs.backlog.GitHubBacklog("old/repo"))
-        html = ip.render(12, [(TODAY, tracker)], src, NOW, LANES, cfg=self.cfg, root=self.root)
-        part = page_section(html, "Issue")
+        linker = ip._issue_linker(issue, "#12", bs.backlog.GitHubBacklog("old/repo"), self.cfg, self.root)
+        part = ip._issue_section(issue, linker)
         self.assertIn('href="https://github.com/old/repo/blob/HEAD/src/lib.py"', part)
         self.assertNotIn("#L1", part)
 

@@ -103,7 +103,7 @@ class IdentityTest(unittest.TestCase):
                             ("https://foreign.example/example/repo/issues/109",))
         src = bs.Sources({"kanban": tip.NOW - timedelta(minutes=25)}, {"#109": issue}, {"#2": foreign}, (),
                          {"kanban": "HTTP 502"}, home=home)
-        html = issue_page.render(109, [(tip.TODAY - timedelta(days=1), old), (tip.TODAY, current)], src, tip.NOW)
+        html = issue_page.render(109, [(tip.TODAY - timedelta(days=1), old), (tip.TODAY, current)], src, tip.NOW, cfg=configured(home))
         for name in ("Issue", "Acceptance"):
             self.assertIn("stale", tip.text(tip.page_section(html, name)).lower())
         self.assertIn("Cached context", html)
@@ -402,7 +402,7 @@ class IndependentReviewRegressions(unittest.TestCase):
                                              'r1': {'n7': issue, 'n42': pr}, 'merged': {'nodes': []}}}), ''
         src = bs.refresh(root, NOW, gh=gh)
         tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
-        task_html = issue_page.render(7, [(NOW.date(), tracker)], src, NOW)
+        task_html = issue_page.render(7, [(NOW.date(), tracker)], src, NOW, cfg=bs.read_config(root))
         self.assertIn('Sibling task body', task_html)
         self.assertIn('Sibling criterion', task_html)
         self.assertNotIn('hidden comment', task_html)
