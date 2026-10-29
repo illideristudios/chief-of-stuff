@@ -27,7 +27,9 @@ def github_identity_fixture(args):
         sibling = 'name: "sibling"' in q
         pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7',
               'closingIssuesReferences': {'nodes': [{'number': 7, 'repository': {'name': 'sibling', 'owner': {'login': 'o'}}}]}}
-        data['r0'] = {f'n{n}': (pr if sibling and n == '42' else gh_pr(58) if n == '58' else gh_issue(int(n)))
+        issue = {**gh_issue(7), 'url': 'https://github.com/o/sibling/issues/7',
+                 'body': 'Sibling task body\n<!-- hidden comment -->\n\n## Acceptance\n- [ ] Sibling criterion'}
+        data['r0'] = {f'n{n}': (pr if sibling and n == '42' else issue if sibling and n == '7' else gh_pr(58) if n == '58' else gh_issue(int(n)))
                       for n in re.findall(r'n(\d+): issueOrPullRequest', q)}
     return 0, json.dumps({'data': data}), ''
 
@@ -122,6 +124,45 @@ class IdentityTest(unittest.TestCase):
             html = (render(109, ambiguous, src, tip.NOW, cfg=configured(home)) if render is issue_page.render
                     else render(109, ambiguous, src, tip.NOW))
             self.assertIsNone(html)
+
+    def test_stale_body_and_acceptance_follow_current_identity_without_foreign_change(self):
+        home = bs.backlog.GitHubBacklog("example/repo")
+        old = tip.TODAY_START.replace("#109", "example/other#109")
+        current = tip.TODAY_START
+        issue = bs.Issue("#109", "https://github.com/example/repo/issues/109", "Home issue", "open", (),
+                         body="Cached context\n\n## Acceptance\n- [x] Real criterion\n\n```md\n- [ ] Example only\n```\n")
+        foreign = bs.Change("#2", "https://github.com/example/repo/pull/2", "Foreign change", "open", False,
+                            "passed", True, 1, None, "main", (),
+                            ("https://foreign.example/example/repo/issues/109",))
+        src = bs.Sources({"kanban": tip.NOW - timedelta(minutes=25)}, {"#109": issue}, {"#2": foreign}, (),
+                         {"kanban": "HTTP 502"}, home=home)
+        html = issue_page.render(109, [(tip.TODAY - timedelta(days=1), old), (tip.TODAY, current)], src, tip.NOW, cfg=configured(home))
+        for name in ("Issue", "Acceptance"):
+            self.assertIn("stale", tip.text(tip.page_section(html, name)).lower())
+        self.assertIn("Cached context", html)
+        acceptance = tip.text(tip.page_section(html, "Acceptance"))
+        self.assertIn("1 of 1 met", acceptance)
+        self.assertIn("Real criterion", acceptance)
+        self.assertNotIn("Example only", acceptance)
+        self.assertNotIn("Foreign change", html)
+
+    def test_configured_home_resolves_history_when_cache_has_no_home(self):
+        cfg = tip.parse_coordinator("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n"
+                                    "- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n"
+                                    "- Backlog: GitLab; host https://labs.example.test; project team/app\n", tip.TODAY)
+        old = tip.TODAY_START.replace('- 00:01 opened the day', '- 00:03 stage: Upload size limit → implement')
+        current = (tip.TODAY_START.replace('#109', 'gitlab:labs.example.test/team/app#109')
+                   .replace('- 00:01 opened the day', '- 00:05 stage: Upload size limit → pr'))
+        src = bs.Sources({}, {}, {}, (), {})
+        html = issue_page.render(109, [(tip.YESTERDAY, old), (tip.TODAY, current)], src, tip.NOW, tip.LANES, cfg=cfg)
+        self.assertIn('00:03', html)
+        self.assertIn('00:05', html)
+        self.assertIn('Upload size limit', html)
+        self.assertIsNone(src.home)
+        github = current.replace('gitlab:labs.example.test/team/app#109', 'team/app#109')
+        html = issue_page.render(109, [(tip.YESTERDAY, old), (tip.TODAY, github)], src, tip.NOW, tip.LANES, cfg=cfg)
+        self.assertNotIn('00:03', html)
+        self.assertIn('00:05', html)
 
     def test_historical_nested_projects_do_not_share_flow_or_history(self):
         home = self.home
@@ -386,8 +427,12 @@ class IndependentReviewRegressions(unittest.TestCase):
         root = workspace('GitHub issues; repo o/app', issue='o/sibling#7', mr='https://github.com/o/sibling/pull/42')
         self.addCleanup(shutil.rmtree, root, True)
         gh = github_identity_fixture
-        bs.refresh(root, NOW, gh=gh)
+        src = bs.refresh(root, NOW, gh=gh)
         tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
+        task_html = issue_page.render(7, [(NOW.date(), tracker)], src, NOW, cfg=bs.read_config(root))
+        self.assertIn('Sibling task body', task_html)
+        self.assertIn('Sibling criterion', task_html)
+        self.assertNotIn('hidden comment', task_html)
         queries = []
         def notes_gh(args):
             queries.append(args[-1])

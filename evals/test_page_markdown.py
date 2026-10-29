@@ -266,6 +266,12 @@ class MarkdownTest(unittest.TestCase):
         from test_decision_page import BLOCK as CONFIG
         from test_issue_page import TODAY, today_tracker
         import issue_page
+        cfg = parse_coordinator(CONFIG.format(board='- Backlog: GitHub; repo o/app'), today=TODAY)
+        issue = replace(ISSUE, url='https://github.com/o/app/issues/109', body='See #12.')
+        src = replace(sources(MR, issue=issue), home=bs.backlog.GitHubBacklog('o/app'))
+        html = issue_page.render(109, [(TODAY, today_tracker())], src, NOW, cfg=cfg)
+        self.assertIn('href="https://github.com/o/app/issues/12"', html)
+
         cfg = parse_coordinator(CONFIG.format(board='- Backlog: GitLab; host https://forge.example; project grp/app'), today=TODAY)
         html = issue_page.render(109, [(TODAY, today_tracker())], sources(MR, issue=replace(ISSUE, body='See #12.')), NOW, cfg=cfg)
         self.assertIn('href="https://forge.example/grp/app/-/issues/12"', html)
@@ -302,8 +308,9 @@ class MarkdownTest(unittest.TestCase):
         from workspace import parse_coordinator
         from test_render_board import CLAUDE_MD
         merged = replace(MR, title='**Merged** change (#12)', state='merged', merged_at=NOW)
-        html = render_board.render('', parse_coordinator(CLAUDE_MD.replace('- Human-only', '- Backlog: GitLab; host https://forge.example; project grp/app\n- Human-only'), today=NOW.date()), NOW,
-                                   sources=sources(merged))
+        src = sources(merged)
+        cfg = replace(parse_coordinator(CLAUDE_MD, today=NOW.date()), backlog=src.home)
+        html = render_board.render('', cfg, NOW, sources=src)
         name, = Structure(html).by_class('columns-card-name')
         self.assertEqual(name['tag'], 'a')
         self.assertEqual(name['attrs'].get('href'), '/issues/gitlab%3Aforge.example%2Fgrp%2Fapp%23109')

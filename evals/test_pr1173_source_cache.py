@@ -97,11 +97,12 @@ class OfflineIssueMigration(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         home = bs.backlog.Backlog('https://labs.example.test', 'team/app')
         issues = {
-            'team/other#7': bs.Issue('team/other#7', 'https://labs.example.test/team/other/-/issues/7', 'Sibling issue', 'open', ()),
+            'team/other#7': bs.Issue('team/other#7', 'https://labs.example.test/team/other/-/issues/7', 'Sibling issue', 'open', (),
+                                     body='Cached context\n<!-- hidden -->\n\n## Acceptance\n- [x] Kept criterion'),
             'foreign.example/team/other#7': bs.Issue('foreign.example/team/other#7', 'https://foreign.example/team/other/-/issues/7', 'Foreign issue', 'open', ()),
             'team/other#9': bs.Issue('team/other#9', '', 'Unverified', 'open', ()),
         }
-        bs._write(root / 'pages' / bs.CACHE, bs.Sources({}, issues, {}, (), {}, home))
+        bs._write(root / 'pages' / bs.CACHE, bs.Sources({'kanban': NOW}, issues, {}, (), {}, home))
         with mock.patch.object(bs, 'forge', return_value=(None, None, {'kanban': 'offline'})):
             loaded = bs.refresh(root, NOW)
         self.assertEqual(loaded.issues['gitlab:labs.example.test/team/other#7'].title, 'Sibling issue')
@@ -109,13 +110,16 @@ class OfflineIssueMigration(unittest.TestCase):
         self.assertNotIn('team/other#7', loaded.issues)
         self.assertNotIn('team/other#9', loaded.issues)
         tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
-        cfg = bs.read_config(root)
-        self.assertIn('Sibling issue', issue_page.render(7, [(NOW.date(), tracker)], loaded, NOW, cfg=cfg))
+        html = issue_page.render(7, [(NOW.date(), tracker)], loaded, NOW, cfg=bs.read_config(root))
+        for expected in ('Sibling issue', 'Cached context', 'Kept criterion', 'Stale', 'offline'):
+            self.assertIn(expected, html)
+        self.assertNotIn('hidden', html)
+        self.assertEqual(bs.load(root / 'pages').issues, loaded.issues)
         foreign = tracker.replace('https://labs.example.test/team/other/-/issues/7', 'https://foreign.example/team/other/-/issues/7')
-        self.assertIn('Foreign issue', issue_page.render(7, [(NOW.date(), foreign)], loaded, NOW, cfg=cfg))
-        self.assertNotIn('Sibling issue', issue_page.render(7, [(NOW.date(), foreign)], loaded, NOW, cfg=cfg))
+        self.assertIn('Foreign issue', issue_page.render(7, [(NOW.date(), foreign)], loaded, NOW, cfg=bs.read_config(root)))
+        self.assertNotIn('Sibling issue', issue_page.render(7, [(NOW.date(), foreign)], loaded, NOW, cfg=bs.read_config(root)))
         github = tracker.replace('https://labs.example.test/team/other/-/issues/7', 'https://github.com/team/other/issues/7')
-        self.assertNotIn('Sibling issue', issue_page.render(7, [(NOW.date(), github)], loaded, NOW, cfg=cfg))
+        self.assertNotIn('Sibling issue', issue_page.render(7, [(NOW.date(), github)], loaded, NOW, cfg=bs.read_config(root)))
 
     def test_conflicting_entries_for_one_canonical_identity_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

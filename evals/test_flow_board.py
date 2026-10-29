@@ -99,7 +99,8 @@ class HoldCauseTest(unittest.TestCase):
     def test_a_pending_decision_on_the_issue_comes_first(self) -> None:
         task = replace(self.tasks["Write README"], issue="#7")
         self.assertEqual(self.cause("Write README", {"#7"}, task=task), "decision")
-        # An unrecognized URL is not evidence that this decision holds its issue.
+
+    def test_an_unrecognized_issue_url_does_not_match_a_bare_decision_ref(self) -> None:
         self.assertEqual(self.cause("Write README", {"#7"}), "triage")
 
     def test_else_a_kanban_hold_stage_names_the_stage(self) -> None:
@@ -270,6 +271,12 @@ class Build(unittest.TestCase):
         self.assertEqual(card.marks, (columns.Mark("passed", "passed"),
                                       columns.Mark("shares file with !42", "shared"),
                                       columns.Mark("shares file with !50", "shared")))
+
+    def test_a_bare_issue_does_not_match_a_change_without_a_home(self) -> None:
+        sources = replace(SOURCES, home=None)
+        card = next(c for col in self.cols(sources) for c in col.cards if c.name == "Cut the release")
+        self.assertEqual(card.refs, (("#9", "/issues/9"),))
+        self.assertEqual(card.marks, ())
 
     def test_approval_and_a_failed_pipeline_are_marks(self) -> None:
         self.assertEqual(rb.change_marks((SOURCES.changes["!52"],)),

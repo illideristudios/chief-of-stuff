@@ -799,9 +799,11 @@ class GitLabPanelsTest(unittest.TestCase):
                 got, _ = self.again(FailingGitLab, fail, BESIDE)
                 self.assertEqual(set(got.errors), {self.PANEL[fail]})
                 self.assertIn("complexity", got.errors[self.PANEL[fail]])
-                self.assertEqual((got.issues["#1"].title, got.changes["!1001"].title), ("Renamed", "Renamed"))
+                self.assertEqual(got.issues["#1"].title, "Issue 1" if fail == "issues" else "Renamed")
+                self.assertEqual(got.changes["!1001"].title, "Renamed")
                 self.assertEqual(sorted(got.changes), ["!1001", "!1002", "!3001"])
-                self.assertEqual((got.fetched["kanban"], got.fetched["merge requests"]), (self.LATER, self.LATER))
+                self.assertEqual(got.fetched["kanban"], NOW if fail == "issues" else self.LATER)
+                self.assertEqual(got.fetched["merge requests"], self.LATER)
 
     def test_a_failed_detail_request_leaves_the_open_changes_without_jobs_or_threads(self):
         for mode in (TRANSPORT, NO_DATA):
@@ -1591,6 +1593,194 @@ class StoreWorkspaceSourcesTest(unittest.TestCase):
                 }
                 got = bs._gh_change("#58", pr, "robin", "o/app")
                 self.assertEqual(got.branch_url, "")
+
+
+class StoreWorkspaceIssuesTest(unittest.TestCase):
+    """#919: a store-backed workspace fetches issues named in `store.db` across GitHub and GitLab without namespace
+    collisions, and handles store or forge failures without wiping cached issues."""
+
+    LATER = NOW + timedelta(minutes=5)
+
+    def store_workspace(self, backlog: str, *keys: str) -> Path:
+        import shutil
+        import store
+
+        root = workspace(backlog)
+        self.addCleanup(shutil.rmtree, root, True)
+        # Empty the markdown tracker so only `store.db` names the work items.
+        (root / "daily" / f"{DAY}-tracker.md").unlink()
+        db_path = root / "store.db"
+        store.migrate(db_path)
+        db = store.Store(db_path)
+        try:
+            for idx, key in enumerate(keys, 1):
+                db.upsert_item(key, workflow="build", stage="implement", forge_state="open", title=f"Task {idx}")
+        finally:
+            db.engine.dispose()
+        return root
+
+    def test_github_store_workspace_fetches_home_and_cross_repo_issues_without_collision(self) -> None:
+        root = self.store_workspace(
+            "GitHub issues; repo o/app",
+            "github:o/app#118",
+            "github:other/lib#118",
+            "gitlab:labs.example.test/team/app#99",
+        )
+        queries = []
+
+        def fake_gh(args, input_text=None):
+            query = args[args.index("-f") + 1]
+            queries.append(query)
+            data = {"rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000}}
+            if "inventory: repository" in query:
+                data["inventory"] = {"pullRequests": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+            else:
+                other = 'owner: "other", name: "lib"' in query
+                data["r0"] = {"n118": {**gh_issue(118),
+                    "url": "https://github.com/other/lib/issues/118" if other else "https://github.com/o/app/issues/118",
+                    "title": "Other issue 118" if other else "Home issue 118",
+                    "body": "## Context\nOther body.\n\n## Acceptance\n- [ ] Other criterion\n" if other else
+                            "## Context\nHome body.\n\n## Acceptance\n- [x] Home criterion\n"}}
+            return 0, json.dumps({"data": data}), ""
+
+        got = bs.refresh(root, NOW, gh=fake_gh)
+        self.assertTrue(any('owner: "o", name: "app"' in q for q in queries))
+        self.assertTrue(any('owner: "other", name: "lib"' in q for q in queries))
+        self.assertFalse(any("labs.example.test" in q for q in queries))
+        self.assertEqual(got.errors, {})
+        self.assertEqual(sorted(got.issues), ["#118", "other/lib#118"])
+        self.assertIn("Home criterion", got.issues["#118"].body)
+        self.assertIn("Other criterion", got.issues["other/lib#118"].body)
+        self.assertEqual(got.issues["other/lib#118"].title, "Other issue 118")
+        self.assertEqual(bs.load(root / "pages"), got)
+
+    def test_gitlab_store_workspace_fetches_home_and_sibling_projects_and_skips_foreign_hosts(self) -> None:
+        root = self.store_workspace(
+            "GitLab issues; host https://labs.example.test; project team/app",
+            "gitlab:labs.example.test/team/app#15",
+            "gitlab:labs.example.test/team/other#15",
+            "gitlab:elsewhere.example.test/team/app#77",
+            "github:o/app#15",
+        )
+        posts = []
+
+        def fake_gl(method, url, token, timeout, payload=None):
+            posts.append((url, payload["query"]))
+            q = payload["query"]
+            if '"team/other"' in q:
+                node = {
+                    "iid": "15", "webUrl": "https://labs.example.test/team/other/-/issues/15",
+                    "title": "Sibling 15", "state": "opened", "labels": {"nodes": []},
+                    "description": "## Acceptance\n- [ ] Sibling criterion\n",
+                }
+                return {"data": {"p0": {"issues": {"nodes": [node]}}}}, {}, ""
+            node = {
+                "iid": "15", "webUrl": "https://labs.example.test/team/app/-/issues/15",
+                "title": "Home 15", "state": "opened", "labels": {"nodes": []},
+                "description": "## Acceptance\n- [x] Home criterion\n",
+            }
+            return {"data": {"p0": {"issues": {"nodes": [node]}, "mergeRequests": {"nodes": []},
+                                    "merged": {"nodes": []}, "open": {"nodes": []}}}}, {}, ""
+
+        got = refresh_gitlab(root, NOW, fake_gl)
+        self.assertEqual({u for u, _ in posts}, {"https://labs.example.test/api/graphql"})
+        self.assertFalse(any("elsewhere.example.test" in q for _, q in posts))
+        self.assertEqual(got.errors, {})
+        self.assertEqual(sorted(got.issues), ["#15", "gitlab:labs.example.test/team/other#15"])
+        self.assertIn("Home criterion", got.issues["#15"].body)
+        self.assertIn("Sibling criterion", got.issues["gitlab:labs.example.test/team/other#15"].body)
+
+    def test_corrupt_store_db_records_kanban_error_and_preserves_last_good_issues(self) -> None:
+        root = self.store_workspace("GitHub issues; repo o/app", "github:o/app#118")
+        first = bs.refresh(root, NOW, gh=FakeGh(n118={**gh_issue(118), "body": "## Acceptance\n- [x] Kept\n"}))
+        self.assertEqual(first.errors, {})
+        self.assertIn("#118", first.issues)
+
+        (root / "store.db").write_bytes(b"corrupt sqlite header")
+        again = bs.refresh(root, self.LATER, gh=FakeGh())
+        self.assertIn("cannot read the workspace store", again.errors.get("kanban", ""))
+        self.assertEqual(again.issues, first.issues)
+        self.assertEqual(again.fetched["kanban"], NOW)
+        self.assertEqual(again.fetched["merge requests"], NOW)
+
+        cold = workspace("GitHub issues; repo o/app")
+        import shutil
+        self.addCleanup(shutil.rmtree, cold, True)
+        (cold / "daily" / f"{DAY}-tracker.md").unlink()
+        (cold / "store.db").write_bytes(b"corrupt sqlite header")
+        cold_got = bs.refresh(cold, NOW, gh=FakeGh())
+        self.assertEqual(cold_got.issues, {})
+        self.assertNotIn("kanban", cold_got.fetched)
+        self.assertIn("cannot read the workspace store", cold_got.errors.get("kanban", ""))
+
+    def test_partial_gitlab_failure_keeps_the_last_complete_snapshot(self) -> None:
+        root = self.store_workspace(
+            "GitLab issues; host https://labs.example.test; project team/app",
+            "gitlab:labs.example.test/team/app#15", "gitlab:labs.example.test/team/secret#15",
+        )
+        def answer(hidden=(), description=""):
+            fake = FakeGitLab(issues=[{**gl_issue(15), "description": description}], hidden=hidden)
+            def call(method, url, token, timeout, payload=None):
+                import copy
+                body, headers, error = fake(method, url, token, timeout, payload)
+                body = copy.deepcopy(body)
+                if '"team/secret"' in payload["query"]:
+                    for project in body.get("data", {}).values():
+                        if project:
+                            for node in project.get("issues", {}).get("nodes", []):
+                                node["webUrl"] = "https://labs.example.test/team/secret/-/issues/15"
+                return body, headers, error
+            return call
+        first = refresh_gitlab(root, NOW, answer(description="## Acceptance\n- [ ] Kept"))
+        self.assertEqual(sorted(first.issues), ["#15", "gitlab:labs.example.test/team/secret#15"])
+        partial = refresh_gitlab(root, self.LATER, answer(hidden={"team/secret"}, description="Fresh but incomplete"))
+        self.assertIn("team/secret", partial.errors.get("kanban", ""))
+        self.assertEqual(partial.issues, first.issues)
+        self.assertEqual(partial.fetched["kanban"], NOW)
+        self.assertEqual(bs.load(root / "pages"), partial)
+
+    def test_partial_github_failure_keeps_the_last_complete_snapshot(self) -> None:
+        root = self.store_workspace("GitHub issues; repo o/app", "github:o/app#118", "github:other/lib#118")
+        def answer(fail=False):
+            def gh(args, input_text=None):
+                query = args[-1]
+                data = {"rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000}}
+                if "inventory: repository" in query:
+                    data["inventory"] = {"pullRequests": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+                else:
+                    other = 'owner: "other", name: "lib"' in query
+                    if fail and other:
+                        return 1, json.dumps({"data": data, "errors": [{"message": "other/lib unavailable"}]}), ""
+                    data["r0"] = {"n118": {**gh_issue(118),
+                        "url": "https://github.com/other/lib/issues/118" if other else "https://github.com/o/app/issues/118",
+                        "body": "Other" if other else "Changed" if fail else "Home"}}
+                return 0, json.dumps({"data": data}), ""
+            return gh
+        first = bs.refresh(root, NOW, gh=answer())
+        self.assertEqual(sorted(first.issues), ["#118", "other/lib#118"])
+        partial = bs.refresh(root, self.LATER, gh=answer(True))
+        self.assertIn("other/lib unavailable", partial.errors.get("kanban", ""))
+        self.assertEqual(partial.issues, first.issues)
+        self.assertEqual(partial.fetched["kanban"], NOW)
+        self.assertEqual(bs.load(root / "pages"), partial)
+
+    def test_inaccessible_github_repository_records_error_and_preserves_cache_when_all_repos_fail(self) -> None:
+        root = self.store_workspace("GitHub issues; repo o/app", "github:o/app#118")
+        first = bs.refresh(root, NOW, gh=FakeGh(n118={**gh_issue(118), "body": "Cached body"}))
+        self.assertIn("#118", first.issues)
+
+        def missing_repo_gh(args, input_text=None):
+            body = {
+                "data": {"r0": None, "merged": {"nodes": []}, "open": {"nodes": []}},
+                "errors": [{"type": "NOT_FOUND", "path": ["r0"],
+                            "message": "Could not resolve to a Repository with the name 'o/app'."}],
+            }
+            return 1, json.dumps(body), "gh: Could not resolve to a Repository"
+
+        again = bs.refresh(root, self.LATER, gh=missing_repo_gh)
+        self.assertIn("Could not resolve to a Repository", again.errors.get("kanban", ""))
+        self.assertEqual(again.issues, first.issues)
+        self.assertEqual(again.fetched["kanban"], NOW)
 
 
 if __name__ == "__main__":

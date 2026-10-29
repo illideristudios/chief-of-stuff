@@ -440,9 +440,16 @@ def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], si
             if lose:
                 lost.add(panel)
             return None
+        if body["data"].get("p0") is None:
+            errors.setdefault(panel, _graphql_errors(body) or f"GitLab did not answer for {project}")
+            if lose:
+                lost.add(panel)
+            return None
         if message := _graphql_errors(body):
             errors.setdefault(panel, message)
-        return body["data"].get("p0") or {}
+            if lose and panel == "kanban":
+                lost.add(panel)
+        return body["data"]["p0"]
 
     def pages(project: str, name: str, iids: list[int], body: str, panel: str, lose: bool = True):
         for start in range(0, len(iids), GL_PAGE):
