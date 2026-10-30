@@ -280,7 +280,6 @@ OUTWARD_IMPORTS = frozenset({
     "dispatch_prompt→backlog_ref",
     "dispatch_prompt→settings",
     "dispatch_prompt→workspace",
-    "estimate→workspace",
     "kanban→backlog",
     "kanban→settings",
     "merge_approved→backlog",
