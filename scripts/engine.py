@@ -1130,11 +1130,23 @@ def _follow_main(root: Path) -> None:
     if supervisor.RELEASE.parent.name != "versions":
         return  # run from a checkout: there is no installed `current` to move
     try:
+        if (release_selection.selected_release(root, supervisor) != supervisor.RELEASE
+                or _pending_explicit_install(root)):
+            return  # let the selected explicit install or rollback hand off first
+
+        @contextlib.contextmanager
+        def install_lock():
+            with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+                if (release_selection.selected_release(root, supervisor) != supervisor.RELEASE
+                        or _pending_explicit_install(root)):
+                    raise supervisor.ServiceError("release selection changed during fetch")
+                yield
+
         upstream = json.loads((supervisor.RELEASE / ".claude-plugin/plugin.json").read_text()).get("repository", "")
         # Lock order is engine.lock -> supervisor.lock, as in _prepare_handoff; `current` is every workspace's.
         # The fetch runs before it, so the machine-wide lock is held only for the install.
         result = self_update.follow_main(root, supervisor.RELEASE.parent.parent, supervisor.state_dir(root) / "main-release",
-                                         upstream, lock=lambda: supervisor.lock(supervisor.data_dir() / "supervisor.lock"))
+                                         upstream, lock=install_lock)
     except supervisor.ServiceError:
         return  # another workspace or the CLI holds the lock; a later pass installs
     except Exception as exc:

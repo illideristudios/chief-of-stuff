@@ -62,6 +62,7 @@ def _installed() -> list[dict]:
 def update_plugin(current: Path, version: str) -> dict:
     """§14: bring every installed scope of the plugin to `version`; what it cannot reach is reported, never silent."""
     note = "running Claude sessions load the new plugin when they restart"
+    before = None
     try:
         market = next((m for m in json.loads(_plugin("marketplace", "list", "--json"))
                        if m.get("name") == PLUGIN.split("@")[1]), {})
@@ -74,7 +75,13 @@ def update_plugin(current: Path, version: str) -> dict:
                 _plugin("update", PLUGIN, "--scope", entry["scope"], cwd=entry.get("projectPath"))
         behind = {entry["scope"]: entry.get("version") for entry in _installed() if entry.get("version") != version}
     except (ShellError, ValueError, KeyError, TypeError, AttributeError) as exc:
-        return {"plugin": f"not updated: {exc}", "note": note}
+        try:
+            observed = _installed()
+        except (ShellError, ValueError, KeyError, TypeError, AttributeError):
+            observed = before
+        versions = (", ".join(f"{entry.get('scope', 'unknown')} at {entry.get('version', 'unknown')}"
+                              for entry in observed) or "not installed") if observed is not None else "unknown"
+        return {"plugin": f"not updated: release {version}; plugin {versions}; {exc}", "note": note}
     if not behind:
         return {"plugin": version, "note": note}
     source = market.get("path") or "no source"

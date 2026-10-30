@@ -68,6 +68,17 @@ class UpdatePluginTest(unittest.TestCase):
         result = self.update(fake)
         self.assertTrue(result["plugin"].startswith("not updated"), result)
         self.assertIn("boom", result["plugin"])
+        self.assertIn("1.0.0", result["plugin"])
+        self.assertIn("user at 0.9.0", result["plugin"])
+
+    def test_a_partial_failure_reports_the_versions_after_the_attempt(self):
+        fake = FakePlugins({"user": "0.9.0", "project": "0.9.0"}, "1.0.0", self.current,
+                           fail=("update", claude_adapter.PLUGIN, "--scope", "project"))
+        result = self.update(fake)
+        self.assertTrue(result["plugin"].startswith("not updated"))
+        self.assertIn("release 1.0.0", result["plugin"])
+        self.assertIn("user at 1.0.0", result["plugin"])
+        self.assertIn("project at 0.9.0", result["plugin"])
 
     def test_no_installed_plugin_is_said_plainly(self):
         self.assertEqual(self.update(FakePlugins({}, "1.0.0", self.current))["plugin"], "not installed")
@@ -76,6 +87,8 @@ class UpdatePluginTest(unittest.TestCase):
         with mock.patch.object(claude_adapter, "available", return_value=None):
             result = claude_adapter.update_plugin(self.current, "1.0.0")
         self.assertTrue(result["plugin"].startswith("not updated"), result)
+        self.assertIn("release 1.0.0", result["plugin"])
+        self.assertIn("unknown", result["plugin"])
 
 
 if __name__ == "__main__":

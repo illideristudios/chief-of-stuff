@@ -115,17 +115,20 @@ class EngineFollowsMainTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.base = Path(tmp.name)
 
-    def run_step(self, release, failure=None, result=None):
+    def run_step(self, release, failure=None, result=None, selected=None, pending=False):
         (release / ".claude-plugin").mkdir(parents=True, exist_ok=True)
         (release / ".claude-plugin/plugin.json").write_text(json.dumps({"repository": "https://github.com/example/tool"}))
         with mock.patch.object(self.engine.supervisor, "RELEASE", release), \
+                mock.patch.object(self.engine.release_selection, "selected_release", return_value=selected or release), \
+                mock.patch.object(self.engine, "_pending_explicit_install", return_value=pending), \
                 mock.patch.object(self.engine.supervisor, "lock") as locked, \
                 mock.patch.object(self.engine.self_update, "follow_main", side_effect=failure, return_value=result) as follow, \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             self.engine._follow_main(self.base / "ws")
             locked.assert_not_called()  # the engine holds no lock across the fetch
             if follow.called:
-                follow.call_args.kwargs["lock"]()
+                with follow.call_args.kwargs["lock"]():
+                    pass
         return follow, locked, err.getvalue()
 
     def test_a_failed_install_is_logged_and_the_loop_goes_on(self):
@@ -143,6 +146,55 @@ class EngineFollowsMainTest(unittest.TestCase):
         report = {"release": str(self.base / "share/versions/1.0.0-def"), "plugin": "behind 1.0.0: user at 0.9.0"}
         _, _, err = self.run_step(self.base / "share/versions/1.0.0-abc", result=report)
         self.assertIn("engine: installed origin/main as 1.0.0-def; plugin behind 1.0.0: user at 0.9.0", err)
+
+    def test_an_explicit_release_or_rollback_is_handed_off_before_fetching(self):
+        release = self.base / "share/versions/1.0.0-abc"
+        for chosen in (self.base / "share/versions/0.9.0-old", self.base / "plugins/cache/selected"):
+            with self.subTest(chosen=chosen):
+                follow, locked, _ = self.run_step(release, selected=chosen)
+                follow.assert_not_called()
+                locked.assert_not_called()
+
+    def test_a_pending_explicit_install_of_the_running_release_defers_self_update(self):
+        follow, locked, _ = self.run_step(self.base / "share/versions/1.0.0-abc", pending=True)
+        follow.assert_not_called()
+        locked.assert_not_called()
+
+    def test_an_explicit_install_started_during_fetch_defers_self_update(self):
+        release = self.base / "share/versions/1.0.0-abc"
+        (release / ".claude-plugin").mkdir(parents=True)
+        (release / ".claude-plugin/plugin.json").write_text(json.dumps({"repository": "https://github.com/example/tool"}))
+        install = mock.Mock()
+
+        def fetching(*args, lock, **kwargs):
+            with lock():
+                install()
+
+        with mock.patch.object(self.engine.supervisor, "RELEASE", release), \
+                mock.patch.object(self.engine.supervisor, "lock"), \
+                mock.patch.object(self.engine.release_selection, "selected_release", return_value=release), \
+                mock.patch.object(self.engine, "_pending_explicit_install", side_effect=[False, True]), \
+                mock.patch.object(self.engine.self_update, "follow_main", side_effect=fetching):
+            self.engine._follow_main(self.base / "ws")
+        install.assert_not_called()
+
+    def test_a_release_selection_changed_during_fetch_is_not_overwritten(self):
+        release = self.base / "share/versions/1.0.0-abc"
+        (release / ".claude-plugin").mkdir(parents=True)
+        (release / ".claude-plugin/plugin.json").write_text(json.dumps({"repository": "https://github.com/example/tool"}))
+        install = mock.Mock()
+
+        def fetching(*args, lock, **kwargs):
+            with lock():
+                install()
+
+        with mock.patch.object(self.engine.supervisor, "RELEASE", release), \
+                mock.patch.object(self.engine.supervisor, "lock"), \
+                mock.patch.object(self.engine.release_selection, "selected_release", side_effect=[
+                    release, self.base / "share/versions/0.9.0-old"]), \
+                mock.patch.object(self.engine.self_update, "follow_main", side_effect=fetching):
+            self.engine._follow_main(self.base / "ws")
+        install.assert_not_called()
 
     def test_an_engine_run_from_a_checkout_installs_nothing(self):
         follow, _, _ = self.run_step(self.base / "checkout")
