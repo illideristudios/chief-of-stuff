@@ -280,6 +280,8 @@ def moved_outside_engine(store, record: dict, now: str) -> str:
         heads = {record["default_branch"]: record.get("default_head", "")} if record.get("default_branch") else {}
     runtime, tree = record.get("runtime"), Path(record["tree"])
     problems, recorded = [], None
+    if not heads and record.get("launcher") == "t3":  # an adopted T3 run whose heads were lost: unknown is never safe
+        problems.append("no protected-branch heads were recorded")
     for branch, before in sorted(heads.items()):
         fetched, _ = make_worktree.git_trusted(["fetch", "-q", "origin", f"refs/heads/{branch}"], tree)
         after = branch_heads(tree, [branch])[branch]

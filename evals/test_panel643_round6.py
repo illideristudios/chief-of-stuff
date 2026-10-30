@@ -21,7 +21,7 @@ class VocabularyTest(unittest.TestCase):
         blocked = da.state_of(decisions.appended(rows, da.block(rows, rows[0].id, "retry limit reached")))
         self.assertEqual((blocked.status, da.state_of(blocked).status), ("blocked", "blocked"))
         self.assertIsNone(da.meet_action(blocked, reconcile.Dispatch(decisions.KEY, "implement", "builder", 1)).update)
-        self.assertEqual(da.restore_held(rows), [])
+        self.assertEqual(da.settle_waits(rows), [])
         with self.assertRaises(ValueError):
             da.answer(blocked, "Discard reversal")
 

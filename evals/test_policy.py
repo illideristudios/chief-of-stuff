@@ -182,8 +182,8 @@ class ApprovalTest(unittest.TestCase):
             with self.subTest(when=when):
                 refused(self, BASE + f'\n[[policy.approvals]]\ngate = "merge"\nexpires = {when}\n', "expires")
 
-    def test_an_approval_for_a_gate_no_workflow_has_is_refused(self):
-        refused(self, BASE + '\n[[policy.approvals]]\ngate = "deploy"\nexpires = 2026-10-12T00:00:00Z\n', "deploy")
+    def test_legacy_approval_names_may_outlive_workflow_gates(self):
+        self.assertEqual(parse(BASE + '\n[[policy.approvals]]\ngate = "deploy"\nexpires = 2026-10-12T00:00:00Z\n').base.approvals[0].gate, "deploy")
 
 
 class FieldTest(unittest.TestCase):
@@ -194,7 +194,7 @@ class FieldTest(unittest.TestCase):
             ('blocking_severity = "nit"', "blocking_severity"),
             ('launch = "tmux"', "launch"),
             ('architect = "yes"', "architect"),
-            ('zach_gates = ["deploy"]', "deploy"),
+            ('zach_gates = [1]', "list of names"),
             ('spend_usd = -1', "spend_usd"),
             ('time_minutes = "1h"', "time_minutes"),
             ('colour = "red"', "colour"),

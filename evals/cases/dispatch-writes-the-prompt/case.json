@@ -11,7 +11,7 @@
       "notes/.keep": ""
     }
   },
-  "description": "The spawned session comes up holding its assignment: the task, the paths it owns, and a header it can neither be talked out of nor have withheld. The prompt is not typed into the launch \u2014 the script reads it back from the two rows the coordinator wrote.",
+  "description": "The spawned session comes up holding its assignment: the task and a header it can neither be talked out of nor have withheld. The prompt is not typed into the launch \u2014 the script reads it back from the row the coordinator wrote.",
   "turns": [
     {
       "prompt": "Start the security audit.",
@@ -90,12 +90,6 @@
           "type": "file_matches",
           "glob": "trees/*/.chief-of-stuff/dispatch.md",
           "pattern": "(?m)^Workspace: /"
-        },
-        {
-          "name": "the assignment names the paths the task owns",
-          "type": "file_matches",
-          "glob": "trees/*/.chief-of-stuff/dispatch.md",
-          "pattern": "(?m)^Owns: [^\\n]*src/a/"
         },
         {
           "name": "the assignment says it is not authority",

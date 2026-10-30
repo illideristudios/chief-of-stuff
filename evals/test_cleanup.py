@@ -82,7 +82,7 @@ class CleanupTest(unittest.TestCase):
     def finish(self, name: str, state: str = "closed") -> None:
         key = f"{KEY}-{name}"
         self.store.upsert_item(key, forge_state=state)
-        self.store.set_ownership(key, str(self.trees / name))
+        self.store.set_tree(key, str(self.trees / name))
 
     def run_cleanup(self, *flags: str) -> tuple[int, str]:
         out = io.StringIO()
@@ -175,7 +175,7 @@ class CleanupTest(unittest.TestCase):
             with self.subTest(during_removal=during_removal):
                 root = self.repository_workspace(f"workspace-{during_removal}")
                 tree = root / "trees" / "done"
-                self.store.set_ownership(f"{KEY}-done", str(tree))
+                self.store.set_tree(f"{KEY}-done", str(tree))
                 original = (tree / ".git").read_text()
                 original_admin = cleanup.git_view.locate(tree).gitdir
                 decoy_root = self.root / f"decoy-{during_removal}"
@@ -219,7 +219,7 @@ class CleanupTest(unittest.TestCase):
         root = self.repository_workspace("workspace")
         tree = root / "trees" / "done"
         admin = cleanup.git_view.locate(tree).gitdir
-        self.store.set_ownership(f"{KEY}-done", str(tree))
+        self.store.set_tree(f"{KEY}-done", str(tree))
         with redirect_stdout(io.StringIO()) as out:
             code = cleanup.main(["--root", str(root), "--store", str(self.db), "--remove"])
         self.assertEqual(code, 0, out.getvalue())
@@ -872,7 +872,7 @@ class CleanupTest(unittest.TestCase):
             calls += 1
             if calls == 2:  # the last container check, while cleanup holds the tree lock
                 self.store.upsert_item(key, forge_state="open")
-                self.store.set_ownership(key, "trees/done/new.txt")
+                self.store.set_tree(key, "trees/done/new.txt")
             return []
 
         with mock.patch.object(cleanup, "containers", side_effect=mounts):
