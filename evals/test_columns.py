@@ -149,6 +149,16 @@ class Adapter(unittest.TestCase):
         self.assertNotIn("pr", [c.name for c in cols])
         self.assertEqual([c.name for c in next(c for c in cols if c.name == "review").cards], ["Open the PR"])
 
+    def test_a_done_task_leaves_every_stage_column_but_main(self) -> None:
+        # Done means done: a finished task (a done row, or a closed issue from the store) is in no stage column;
+        # only `main` holds finished work.
+        tasks = [rb.Task("x", "w", state, "", "", "", name=name, lane="build", stage=stage)
+                 for name, state, stage in (("Shipped", "done", "implement"), ("Closed", "done", "review"),
+                                            ("Working", "open", "implement"), ("Landed", "done", "main"))]
+        cols = rb.build_columns(tasks, self.LANES)
+        self.assertEqual({c.name: [k.name for k in c.cards] for c in cols},
+                         {"implement": ["Working"], "review": [], "triage": [], "merge": [], "main": ["Landed"]})
+
     def test_a_card_is_the_task_in_tracker_words(self) -> None:
         # The issue ref opens its task page by number alone (#209), with no sources to know it by.
         card = self.build()[0].cards[0]
