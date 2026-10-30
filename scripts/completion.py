@@ -54,6 +54,29 @@ def recovery(candidates: Sequence[Candidate]) -> Recovery | Conflict | None:
     return Recovery(safe[0]) if safe else None
 
 
+def _candidate_labels(candidates: Sequence[Candidate]) -> tuple[str, ...]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate.branch] = counts.get(candidate.branch, 0) + 1
+    return tuple(f"{c.branch}:{c.path or c.head}" if counts[c.branch] > 1 else c.branch for c in candidates)
+
+
+def conflict_options(conflict: Conflict) -> tuple[str, ...]:
+    """Actionable options for a recovery conflict: each safe survivor or abort, never an indefinite hold."""
+    return (*_candidate_labels(conflict.candidates), "abort")
+
+
+def selected_survivor(verdict: Recovery | Conflict | None, choice: str = "") -> Candidate | None:
+    """Resolve the survivor to reuse, or None when aborting or starting fresh."""
+    if isinstance(verdict, Recovery):
+        return verdict.candidate
+    if isinstance(verdict, Conflict):
+        for label, candidate in zip(_candidate_labels(verdict.candidates), verdict.candidates):
+            if choice and choice == label:
+                return candidate
+    return None
+
+
 def done_on_main(on_main: bool | None, suite_on_main: bool | None) -> str | None:
     """None only when both facts are true. Unknown is not landed."""
     if on_main is not True:

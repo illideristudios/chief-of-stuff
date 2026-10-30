@@ -55,5 +55,6 @@
         }
       ]
     }
-  ]
+  ],
+  "superseded_by": "autonomy-interactive-dispatch"
 }
