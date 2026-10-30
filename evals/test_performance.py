@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -41,6 +42,15 @@ def seg(**fields: object) -> SimpleNamespace:
 
 
 class PerformanceTableTest(unittest.TestCase):
+    def test_failed_start_is_attributed_to_its_host_model_and_effort(self) -> None:
+        rows = performance.table([
+            seg(runtime="claude", model="opus", effort="high", ended_at="2026-10-09T10:01:00+00:00", outcome="done"),
+            seg(runtime="cursor", model="composer-2.5", effort="medium", attempt=2,
+                ended_at="2026-10-09T10:00:00+00:00", outcome="failed"),
+        ], since=date(2026, 10, 9), until=date(2026, 10, 9), by="day", zone=UTC)
+        self.assertEqual([(r.runtime, r.model, r.effort, r.runs, r.completed, r.median_minutes) for r in rows],
+                         [("claude", "opus", "high", 1, 1, 1), ("cursor", "composer-2.5", "medium", 1, 0, 0)])
+
     def test_counts_runs_completed_human_review_and_relaunched_per_day_and_key(self) -> None:
         rows = performance.table([
             seg(runtime="claude", model="opus", effort="high", agent_type="implementer",
@@ -144,6 +154,28 @@ class PerformanceReportTest(unittest.TestCase):
         store.command.upgrade(cfg, "0001")
         with redirect_stdout(io.StringIO()):
             self.assertEqual(performance_report.main(["--root", str(old), "--since", "2026-10-09"]), 0)
+
+    def test_raw_json_keeps_each_attempt_and_filters_in_the_workspace_zone(self) -> None:
+        self.db.record_segment(KEY, "implement", 1, "2026-10-09T09:00:00+00:00", workflow="delivery")
+        self.db.record_segment(KEY, "implement", 2, "2026-10-10T09:00:00+00:00", outcome="failed")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = performance_report.main(["--root", str(self.root), "--since", "2026-10-09",
+                                            "--until", "2026-10-09", "--raw"])
+        self.assertEqual(code, 0)
+        rows = json.loads(buf.getvalue())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["issue_key"], rows[0]["attempt"], rows[0]["workflow"],
+                          rows[0]["outcome"], rows[0]["minutes"]), (KEY, 1, "delivery", "done", 25))
+        self.assertNotIn("success", rows[0])
+
+    def test_report_table_includes_workflow(self) -> None:
+        self.db.record_segment(KEY, "implement", 1, "2026-10-09T09:00:00+00:00", workflow="delivery")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            performance_report.main(["--root", str(self.root), "--since", "2026-10-09"])
+        self.assertIn("workflow", buf.getvalue())
+        self.assertIn("delivery", buf.getvalue())
 
     def test_the_router_runs_it_as_performance(self) -> None:
         sys.path.insert(0, str(ROOT))

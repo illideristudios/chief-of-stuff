@@ -101,7 +101,7 @@ class MCPTest(unittest.TestCase):
                 async with ClientSession(read, write, read_timeout_seconds=10) as client:
                     await client.initialize()
                     tools = await client.list_tools()
-                    self.assertEqual({t.name for t in tools.tools}, {"report", "ask"})
+                    self.assertEqual({t.name for t in tools.tools}, {"report", "ask", "decisions"})
                     for tool in tools.tools:
                         self.assertNotIn("issue_key", tool.input_schema["properties"])
                     report = await client.call_tool("report", {"outcome": "done", "summary": "over stdio",
@@ -123,6 +123,35 @@ class MCPTest(unittest.TestCase):
         self.assertEqual(self.db.asks(KEY)[0].question, "stdio question")
 
 
+class NoScopeProposalTest(unittest.TestCase):
+    """#1039 (C29): report takes no file ownership, so no plan run proposes a scope."""
+
+    def tools(self, stage):
+        from datetime import datetime, timezone
+        import engine_mcp
+        import guard_binding
+        env = {"CHIEF_ISSUE_KEY": KEY, "CHIEF_STAGE": stage, "CHIEF_ATTEMPT": "1", "CHIEF_SESSION_ID": "s",
+               "CHIEF_ROOT": str(self.root), "CHIEF_LAUNCHED_AT": datetime.now(timezone.utc).isoformat(),
+               "CHIEF_PYTHON": sys.executable}
+        return engine_mcp.EngineTools(guard_binding.Binding.from_env(env), self.db)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        store.migrate(self.root / "store.db")
+        self.db = store.Store(self.root / "store.db")
+        self.addCleanup(self.db.engine.dispose)
+        self.db.upsert_item(KEY, title="A widget", stage="plan")
+
+    def test_a_plan_report_takes_no_file_ownership_and_keeps_no_proposal(self):
+        with self.assertRaises(TypeError):
+            self.tools("plan").report("done", "Planned", file_ownership=[{"path": "src/widget.py", "mode": "write"}])
+        self.tools("plan").report("done", "Planned")
+        self.assertEqual([r.summary for r in self.db.reports(KEY)], ["Planned"])
+        self.assertNotIn("scope_proposal", self.db.resume(KEY) or {})
+
+
 class ChannelMigrationTest(unittest.TestCase):
     def test_upgrade_preserves_existing_store_and_adds_worker_channel(self):
         from alembic import command
@@ -136,7 +165,10 @@ class ChannelMigrationTest(unittest.TestCase):
             db = store.Store(path)
             try:
                 db.upsert_item(KEY, title="Before upgrade", stage="review")
-                db.record_segment(KEY, "review", 1, "before", runtime="claude")
+                # Seed the historical schema without asking today's ORM to write newer columns.
+                with db.engine.begin() as conn:
+                    conn.exec_driver_sql("INSERT INTO segment (issue_key, stage, attempt, started_at, runtime) "
+                                         "VALUES (?, 'review', 1, 'before', 'claude')", (KEY,))
                 store.migrate(path)
                 self.assertEqual(db.items()[0].title, "Before upgrade")
                 self.assertEqual(db.segments(KEY)[0].runtime, "claude")

@@ -70,7 +70,7 @@ class OneShotClaimsTest(Workspace):
         self.assertEqual((claim.owner, claim.live), ("Unsaved work", True))
 
     def test_a_dead_launcher_claims_nothing(self) -> None:
-        """Its File ownership row, keyed on the task, is what still speaks for the tree."""
+        """Its started line, keyed on the task, is what still speaks for the tree."""
         self.launcher(dead_pid())
         self.assertEqual(tree_claims.one_shot_claims(self.root / "trees", process_status.running_trees), {})
 

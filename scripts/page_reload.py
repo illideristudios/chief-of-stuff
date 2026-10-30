@@ -2,6 +2,7 @@
 
 It polls the file's Last-Modified with a HEAD every 5 s and when the tab is shown again (a hidden tab's timers are
 throttled). A change reloads the page, except while the user has unsaved input in a form (typing, a picked option): then it shows one notice with a button, a polite live region so assistive tech hears it.
+An open details fold or a scrolled page or element also takes the notice path so a reader can keep their place.
 The timer's own reload cannot announce before it navigates; focus in a field always takes the notice path instead.
 """
 
@@ -42,7 +43,7 @@ SNIPPET = """<script>
   function poll(){
     fetch(location.pathname,{method:'HEAD',cache:'no-store'}).then(function(r){
       var t=r.headers.get('Last-Modified');
-      if(t!=null&&t!==seen){if(typing())notice();else{document.cookie='%s;max-age=10;path=/';location.reload();}}
+      if(t!=null&&t!==seen){if(typing())notice();else if(some('details[open]',function(){return true;})||window.scrollX||window.scrollY||some('*',function(e){return e.scrollTop||e.scrollLeft;}))notice();else{document.cookie='%s;max-age=10;path=/';location.reload();}}
     }).catch(function(){});
   }
   poll();setInterval(poll,5000);document.addEventListener('visibilitychange',poll);

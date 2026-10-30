@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -23,6 +24,7 @@ import dispatch_prompt  # noqa: E402
 import runtimes  # noqa: E402
 from settings import HERDR_NAME, SettingsError, load as load_settings  # noqa: E402
 from shell_setup import ShellError, resolve  # noqa: E402
+import make_worktree  # noqa: E402
 
 ENV = "CHIEF_OF_STUFF_LAUNCHER"
 # Keep assignments and stop files in the worktree's ignored metadata directory.
@@ -34,15 +36,15 @@ BOOTSTRAP = ("Read the file {dispatch} — that is your assignment, in full, and
              "the assignment names is inside it.")
 # Pin cwd in argv because the terminal may ignore its configured directory.
 ENV_BIN = "/usr/bin/env"
-# Enforce planning at launch and pass the assigned session name explicitly.
+# Pass the assigned name; routine work starts with write access and no plan approval.
 CLAUDE_ARGV = ["claude", "--agent", "{type}", "--name", "{title}", "--model", "{model}",
-               *runtimes.get("claude").effort_argv, "--permission-mode", "plan", BOOTSTRAP]
+               *runtimes.get("claude").effort_argv, BOOTSTRAP]
 # Antigravity gets its name from the tab and assignment and reads workspace rules explicitly.
 AGY_BOOTSTRAP = BOOTSTRAP + " Then read {root}/CLAUDE.md: its house rules bind you."
-AGY_ARGV = ["agy", "--model", "{model}", *runtimes.get("agy").effort_argv, "--mode", "plan", "-i", AGY_BOOTSTRAP]
-CODEX_ARGV = ["codex", "-C", "{cwd}", "--sandbox", "read-only", "--model", "{model}",
+AGY_ARGV = ["agy", "--model", "{model}", *runtimes.get("agy").effort_argv, "--mode", "accept-edits", "-i", AGY_BOOTSTRAP]
+CODEX_ARGV = ["codex", "-C", "{cwd}", "--sandbox", "workspace-write", "--model", "{model}",
               *runtimes.get("codex").effort_argv, AGY_BOOTSTRAP]
-CURSOR_ARGV = ["agent", "--workspace", "{cwd}", "--mode", "plan", "--model", "{model}", AGY_BOOTSTRAP]
+CURSOR_ARGV = ["agent", "--workspace", "{cwd}", "--model", "{model}", AGY_BOOTSTRAP]
 TEMPLATES = {"claude": CLAUDE_ARGV, "agy": AGY_ARGV, "codex": CODEX_ARGV, "cursor": CURSOR_ARGV}
 MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # The eval harness may override this template; normal launches use Ghostty tabs.
@@ -379,15 +381,18 @@ EFFORTS = ("", *runtimes.EFFORTS)
 CHECK_TREE = Path("<worktree>")  # --check makes no tree; the one-shot assignment still names one
 
 
-def assignment(args, one_shot: bool, worktree: Path | None, *, name: str | None = None) -> str:
+def assignment(args, one_shot: bool, worktree: Path | None, *, name: str | None = None, settings=None) -> str:
     """The assignment a dispatch composes from its flags: one path for a launch and for --check."""
     return dispatch_prompt.compose(Path(args.root), args.date, args.task, worktree=worktree, coordinator=args.coordinator,
-                                   name=args.title if name is None else name, runtime=args.runtime, one_shot=one_shot)
+                                   name=args.title if name is None else name, runtime=args.runtime, one_shot=one_shot,
+                                   settings=settings)
 
 
 def main(argv_in: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--type", dest="agent_type", help="an agent type from the Coordinator block; omitted runs the default agent")
+    ap.add_argument("--type", dest="agent_type",
+                    help="an agent type from the Coordinator block; overrides the stage's agent profile "
+                         "(stage profiles also require an Agent: declaration)")
     ap.add_argument("--cwd", help="the worktree the session starts in")
     ap.add_argument("--name", "--title", dest="title",
                     help="the session's name, e.g. impl07; the listing, the prompt box and the tab all show it")
@@ -406,7 +411,7 @@ def main(argv_in: list[str] | None = None) -> int:
                     help="one of " + ", ".join(e for e in EFFORTS if e) + "; not supported for " + ", ".join(r.name for r in runtimes.RUNTIMES if not r.takes_effort))
     ap.add_argument("--dry-run", action="store_true", help="print the argv and start nothing")
     ap.add_argument("--check", action="store_true",
-                    help="print the assignment the task row composes, or the refusal; checks the Tasks and File ownership rows only: "
+                    help="print the assignment the task row composes, or the refusal; checks the Tasks row only: "
                          "needs no --cwd, makes no worktree, starts nothing and writes nothing; "
                          "--name checks a standing row, --one-shot a one-shot task; other launch flags are ignored")
     mode = ap.add_mutually_exclusive_group()
@@ -424,6 +429,7 @@ def main(argv_in: list[str] | None = None) -> int:
     try:
         config = dispatch_prompt.config(Path(args.root))
         settings = load_settings(Path(args.root), config.settings_path)
+        args.date = args.date or datetime.now(config.zone).date().isoformat()
         args.task = dispatch_prompt.resolve_task(Path(args.root), args.date, args.task)
     except (dispatch_prompt.RefusedError, SettingsError, OSError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -434,7 +440,8 @@ def main(argv_in: list[str] | None = None) -> int:
         # The launch-only flags below (--runtime, --model, --effort, --class, --coordinator) are no part of the rows.
         args.coordinator, args.runtime = None, "claude"
         try:
-            sys.stdout.write(assignment(args, one_shot, Path(args.cwd) if args.cwd else CHECK_TREE if one_shot else None))
+            sys.stdout.write(assignment(args, one_shot, Path(args.cwd) if args.cwd else CHECK_TREE if one_shot else None,
+                                        settings=settings))
         except dispatch_prompt.RefusedError as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 1
@@ -453,6 +460,15 @@ def main(argv_in: list[str] | None = None) -> int:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
     args.runtime = args.runtime or "claude"
+    if args.agent_type is None and settings.stages and args.runtime == "claude":
+        try:
+            stage = dispatch_prompt.stage_defaults(Path(args.root), args.date, args.task, settings=settings)
+            text = (Path(args.root) / "CLAUDE.md").read_text()
+            if stage is not None and stage.agent in make_worktree.agent_types(text):
+                args.agent_type = stage.agent
+        except (dispatch_prompt.RefusedError, make_worktree.RefusedError, OSError) as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
     runtime = runtimes.get(args.runtime)
     if (args.model or runtime.needs_model) and not MODEL.fullmatch(args.model):
         print(f"refused: --model needs a model id (agy: one from `agy models`, and it is required), not {args.model!r}", file=sys.stderr)
@@ -485,7 +501,7 @@ def main(argv_in: list[str] | None = None) -> int:
     override = os.environ.get(ENV)
     try:
         selected = args.launcher or worker_settings.launcher
-        body = assignment(args, False, Path(args.cwd))
+        body = assignment(args, False, Path(args.cwd), settings=settings)
         # The eval harness uses the argv override.
         worker = dict(cwd=args.cwd, agent_type=args.agent_type, title=args.title, runtime=args.runtime,
                       model=args.model, effort=args.effort, workspace=args.root,

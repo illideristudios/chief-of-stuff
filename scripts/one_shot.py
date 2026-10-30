@@ -19,17 +19,17 @@ import forge
 import git_trees
 import git_view
 import kanban
-import ownership
 import runtimes
 import tracker_write
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode as toon_encode
 from md import cells as _cells, is_separator as _is_separator
+from reconcile import suite_holds
 from model_port import quota_reset
 from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
 from tracker import parse_tracker
-from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
+from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, started_trees, timed_out_line
 from workspace import settings_path, worktrees_dir
 from settings import load as load_settings
 from shell_setup import clean_env, login_argv, resolve
@@ -69,26 +69,29 @@ def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type:
     return [argv[0], *lead, *argv[1:], *flags, *tail, prompt]
 
 
-def worker_result(path: Path, exit_code: int) -> tuple[str, str, str]:
-    """Do not infer success from the CLI exit code or a free-form final response."""
+def worker_result(path: Path, exit_code: int) -> tuple[str, str, str, dict[str, int | None]]:
+    """Return (status, reason, changes, counts); never infer success from the CLI exit code or free-form final response."""
+    counts = dict.fromkeys(dispatch_prompt.SUITE_KEYS)
     try:
         raw = path.read_text()
     except OSError as exc:
-        return "human_review", f"worker did not write a valid TOON result ({exc}); exit {exit_code}", ""
+        return "human_review", f"worker did not write a valid TOON result ({exc}); exit {exit_code}", "", counts
     try:
         data = toon_decode(raw)
     except (ToonDecodeError, ValueError, TypeError) as exc:
         try:  # some workers write JSON instead of TOON (#154); same fields either way
             data = json.loads(raw)
         except ValueError:
-            return "human_review", f"worker wrote an unreadable TOON result ({exc}); exit {exit_code}: {_brief(raw)}", ""
+            return "human_review", f"worker wrote an unreadable TOON result ({exc}); exit {exit_code}: {_brief(raw)}", "", counts
+    if isinstance(data, dict):
+        counts = dispatch_prompt.suite_counts(data)
     if not isinstance(data, dict) or data.get("status") not in ("done", "human_review", "relaunch") or any(
         not isinstance(data.get(k), str) or not data[k].strip() for k in ("reason", "changes")
     ):
-        return "human_review", f"worker result is incomplete or invalid; exit {exit_code}", ""
+        return "human_review", f"worker result is incomplete or invalid; exit {exit_code}", "", counts
     if exit_code:
-        return "human_review", f"worker exited {exit_code}: {data['reason']}", data["changes"]
-    return data["status"], data["reason"], data["changes"]
+        return "human_review", f"worker exited {exit_code}: {data['reason']}", data["changes"], counts
+    return data["status"], data["reason"], data["changes"], counts
 
 
 QUOTA_STOP = "quota stop: "
@@ -221,7 +224,7 @@ def _carried(name: str) -> re.Pattern:
 
 
 def _tree_note(root: Path, cwd: Path, expected_common: Path | None = None) -> str:
-    """How the File ownership row names the tree: relative to the Worktrees dir, as audit reads it."""
+    """How the Log's started line names the tree: relative to the Worktrees dir, as audit reads it."""
     claude_md = (root / "CLAUDE.md").read_text()
     base = (root / worktrees_dir(claude_md)).resolve()
     if expected_common is None:
@@ -242,41 +245,21 @@ def _tree_note(root: Path, cwd: Path, expected_common: Path | None = None) -> st
     else:
         branch = out.stdout.strip()
     if any(c in tree + branch for c in "|`()\n"):
-        raise ValueError(f"tree {tree!r} on {branch!r} cannot be written into a File ownership row")
+        raise ValueError(f"tree {tree!r} on {branch!r} cannot be written into the Log's started line")
     return f"worktree `{tree}` ({branch or 'detached'})"
 
 
 def record_launch(path: Path, task: str, name: str, tree: str, runtime: str, model: str, at: str,
                   effort: str = "") -> None:
-    """Before the worker runs: the row is the worker's and running, File ownership names its tree, and the Log says so."""
+    """Before the worker runs: the row is the worker's and running, and the Log's started line names its tree."""
     if "|" in name or "\n" in name:
         raise ValueError("worker name cannot be written as a tracker owner")
 
     def change(text: str) -> str:
         lines = text.splitlines(keepends=True)
         i = _task_line(lines, task)
-        dispatch_prompt.refuse_overlap(text, task)  # under the lock, so two launches that share a path cannot both pass
         lines[i] = _set_owner_state(lines[i], re.compile(r"\|\s*unassigned\s*\|\s*open\s*\|", re.I),
                                     f"| {name} | running {at} |", "task owner/state is not an unassigned open row")
-        keys = dispatch_prompt.task_keys(task, dispatch_prompt.task_name(text, task))
-        section = False
-        owned = None
-        for j, line in enumerate(lines):
-            if line.startswith("## "):
-                section = line.rstrip() == ownership.HEADING
-            elif section and any(row.context in keys for row in ownership.parse(line)):
-                owned = j
-                break
-        if owned is None:
-            raise ValueError(f"no File ownership row for {task!r}")
-        body = lines[owned].rstrip("\n")
-        if body.lstrip().startswith("|"):
-            if len(_cells(body)) != 2:
-                raise ValueError("the File ownership row is not a two-cell `| context | paths |` row")
-            cut = body.rstrip().rstrip("|").rstrip()
-            lines[owned] = f"{cut}; {tree} |\n"
-        else:
-            lines[owned] = f"{body.rstrip()}; {tree}\n"
         return tracker_write.append_log("".join(lines), started_line(at, name, runtime, model, tree, task, effort), create=True)
 
     tracker_write.edit(path, change)
@@ -346,14 +329,17 @@ def _launch_row_running(launch: Path, task: str, name: str) -> bool:
 
 
 def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: int,
-              before_head: str | None = None, read_only: bool = False, runtime: str = "", model: str = "",
+              before_head: str | None = None, runtime: str = "", model: str = "",
               *, adopted: bool = False, expected_common: Path | None = None) -> dict:
+    """Reconcile a worker run against its launch day, task and tree; git violations precede suite gating; return a report with counts and evidence."""
     cfg = dispatch_prompt.config(root)
     settings = load_settings(root, cfg.settings_path)
     if expected_common is None:
         commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
         expected_common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
-    status, reason, changes = worker_result(cwd / RESULT, exit_code)
+    status, reason, changes, counts = worker_result(cwd / RESULT, exit_code)
+    suite = "Suite: " + ", ".join(f"{key}={value if value is not None else 'missing or invalid'}"
+                                  for key, value in counts.items())
     actual = changed_files(cwd, expected_common=expected_common)
     commits = committed_changes(cwd, before_head, expected_common=expected_common)
     # The result lands on the day the run ends, falling back to the launch day's (#93).
@@ -366,13 +352,12 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         # the same row, so the run lands on it. The launch day's row tells the twin from a changed row.
         carried = launch != end and _launch_row_running(launch, task, name)
         path = end
-    if status == "done" and read_only and (actual or commits != NO_COMMITS):
-        # A task that owns nothing changed something: whatever the worker wrote, someone looks (#57).
-        left = "\n".join(x for x in (actual, commits) if x and x != NO_COMMITS)
-        status, reason = "human_review", f"read-only task left changes: {left}; worker said: {reason}"
     if status == "done" and actual:
         status = "human_review"
         reason = f"worker reported completion but the worktree is not clean: {actual}"
+    # Git/worktree violations take precedence over the suite gate.
+    if status == "done" and suite_holds(counts, require_green=settings.workers.require_green_tests):
+        status, reason = "human_review", f"suite is not green; {suite}; worker said: {reason}"
     quota = ""
     if status == "human_review" and not changes and not actual and commits == NO_COMMITS:
         # No valid result from an unchanged tree: a quota stop returns it to ready rather than holding it (#422).
@@ -394,8 +379,13 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 status, reason = "human_review", f"quota stop repeated: {quota[len(QUOTA_STOP):]}"
         elif any(marker in line and not line.split(marker, 1)[1].startswith(QUOTA_STOP) for line in log):
             status, reason = "human_review", f"already relaunched once today and stopped again: {reason}"
-    summary = (changes + f"\nCommits from this run:\n{commits}" +
-               (f"\nWorking tree:\n{actual}" if actual else "\nWorking tree clean"))
+    # Keep launcher evidence ahead of worker prose and reserve room for each part.
+    evidence = (f"{suite}\nCommits from this run:\n{commits[:FIELD_MAX // 4]}" +
+                (f"\nWorking tree:\n{actual[:FIELD_MAX // 4]}" if actual else "\nWorking tree clean") + "\n")
+    summary = evidence + changes[:FIELD_MAX - len(evidence)]
+    # The tracker keeps only 500 characters: its git excerpts must leave room for both facts.
+    log_summary = (f"{suite}; Commits from this run: {_brief(commits)[:100]}; " +
+                   (f"Working tree: {_brief(actual)[:100]}" if actual else "Working tree clean") + f"; {changes}")
     rows = [row for row in parse_tracker(path.read_text()).tasks if row.item.strip() == task]
     row = rows[0] if len(rows) == 1 else None
     errors = []
@@ -404,7 +394,8 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
             row.kind != "running" and not (carried and row.kind == "open")):
         report = {"status": "human_review", "task": task, "worker": name, "runtime_exit": exit_code,
                   "reason": "task row changed during the one-shot run; reconcile it manually",
-                  "changes": summary, "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
+                  "changes": summary, **counts,
+                  "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
         return write_report(root, cwd, report)
     if adopted:
         # #99: the launcher died before reconciling this run; the report, the Log line and any
@@ -429,12 +420,12 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
             if not commented.done:
                 errors.append(f"issue comment: {commented.error}")
     try:
-        update_tracker(path, task, name, cfg.user, status, reason, summary,
+        update_tracker(path, task, name, cfg.user, status, reason, log_summary,
                        tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open")
     except (OSError, ValueError) as exc:
         errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
     report = {"status": status, "task": task, "worker": name, "runtime_exit": exit_code,
-              "reason": reason, "changes": summary, "errors": errors}
+              "reason": reason, "changes": summary, **counts, "errors": errors}
     return write_report(root, cwd, report)
 
 
@@ -496,9 +487,9 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
         timeout_minutes: int = 60) -> int:
     cfg = dispatch_prompt.config(root)
     chosen_day = day or datetime.now(cfg.zone).date().isoformat()
-    body = dispatch_prompt.compose(root, chosen_day, task, worktree=cwd, name=name,
-                                   runtime=runtime, one_shot=True)
     settings = load_settings(root, cfg.settings_path)
+    body = dispatch_prompt.compose(root, chosen_day, task, worktree=cwd, name=name,
+                                   runtime=runtime, one_shot=True, settings=settings)
     workers = settings.workers
     commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
     common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
@@ -563,7 +554,7 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
                 (cwd / RESULT).unlink(missing_ok=True)
             exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2)
     report = reconcile(root, chosen_day, task, name, cwd, exit_code, before_head, runtime=runtime, model=model,
-                       read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common)  # held to what it was told
+                       expected_common=expected_common)
     print(toon_encode(report))
     return 0 if report["status"] == "done" and not report["errors"] else 1
 
@@ -611,8 +602,7 @@ ADOPT_LOOKBACK = 7  # days of trackers one adoption sweep scans for a dead run's
 
 def _running_row(root: Path, cfg, task: str, cwd: Path, days: list[str]) -> tuple[str, str] | None:
     """The day and worker name of `task`'s running row in the latest of `days` whose tracker holds one
-    and whose File ownership names this tree; None when no recent tracker says running here (#99)."""
-    tree = f"worktree `{cwd.resolve().name}`"
+    and whose Log's last started line for it names this tree; None when no recent tracker says running here (#99)."""
     for day in days:  # latest first
         try:
             text = (root / cfg.tracker_path(day)).read_text()
@@ -621,8 +611,7 @@ def _running_row(root: Path, cfg, task: str, cwd: Path, days: list[str]) -> tupl
         rows = [row for row in parse_tracker(text).tasks if row.item.strip() == task]
         if len(rows) != 1 or rows[0].kind != "running" or not rows[0].owner.strip():
             continue
-        owned = ownership.cell(text, dispatch_prompt.task_keys(task, dispatch_prompt.task_name(text, task)))
-        if owned is None or tree not in owned:
+        if started_trees(text).get(task) != cwd.resolve().name:
             continue  # the row's running work lives in some other tree
         return day, rows[0].owner.strip()
     return None
@@ -651,10 +640,6 @@ def adopt(root: Path, day: str | None = None) -> list[dict]:
         if found is None:
             continue
         row_day, name = found
-        stale = cwd / dispatch_prompt.DISPATCH_FILE
-        body = stale.read_text() if stale.is_file() else ""
-        # The dispatch is the launcher's own writing, so its Read-only line is trusted (#57).
-        adopted.append(reconcile(root, row_day, task, name, cwd, 0,
-                                 read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
+        adopted.append(reconcile(root, row_day, task, name, cwd, 0, adopted=True,
                                  expected_common=commons.get(cwd.resolve())))
     return adopted

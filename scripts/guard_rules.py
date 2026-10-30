@@ -13,8 +13,15 @@ def stop_allowed(reports, launched_at: datetime) -> bool:
 
 
 def permission_ask(event: dict) -> tuple[str, str]:
-    context = json.dumps({"tool_name": event.get("tool_name"), "tool_input": event.get("tool_input")})
+    # #890: the worktree is kept, so the engine can judge the ask again by the same rule.
+    context = json.dumps({"tool_name": event.get("tool_name"), "tool_input": event.get("tool_input"), "cwd": event.get("cwd")})
     return f"Permission requested for {event.get('tool_name', 'tool')}", context
+
+
+def denial_binds(decided_by: str | None, ask, binding) -> bool:
+    """#958: a split or an unavailable trio (the engine's own "guard" deny, or no decision row) and a reversal stop just
+    the attempt that got them; a trio verdict or a person's deny binds every attempt."""
+    return decided_by not in (None, "", "guard") or (ask.stage, ask.attempt) == (binding.stage, binding.attempt)
 
 
 def resume_state(binding, item, asks, reports) -> dict:

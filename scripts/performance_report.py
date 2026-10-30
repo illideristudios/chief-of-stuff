@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
 
-from performance import table
-from store import Store, migrate
+from performance import records, table
+import store_access
 from workspace import ConfigError, read_config
 
 
@@ -17,10 +19,10 @@ def _cell(value: object) -> str:
 
 
 def _print_table(rows: list) -> None:
-    headers = ("period", "runtime", "model", "effort", "agent_type",
+    headers = ("period", "runtime", "model", "effort", "agent_type", "workflow",
                "runs", "completed", "human_review", "relaunched", "median_minutes")
     cells = [headers] + [
-        (_cell(r.period), _cell(r.runtime), _cell(r.model), _cell(r.effort), _cell(r.agent_type),
+        (_cell(r.period), _cell(r.runtime), _cell(r.model), _cell(r.effort), _cell(r.agent_type), _cell(r.workflow),
          _cell(r.runs), _cell(r.completed), _cell(r.human_review), _cell(r.relaunched),
          _cell(r.median_minutes))
         for r in rows
@@ -36,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--since", required=True, metavar="DATE", help="inclusive YYYY-MM-DD in the workspace zone")
     ap.add_argument("--until", metavar="DATE", help="inclusive YYYY-MM-DD; default today in the workspace zone")
     ap.add_argument("--by", choices=("day", "week"), default="day")
+    ap.add_argument("--raw", action="store_true", help="JSON attempt records, preserving outcomes and individual durations")
     args = ap.parse_args(argv)
     root = args.root.resolve()
     try:
@@ -49,10 +52,14 @@ def main(argv: list[str] | None = None) -> int:
     if not path.is_file():
         print(f"performance: no store at {path}", file=sys.stderr)
         return 2
-    migrate(path)  # a no-op on a current store; brings an older one up before the query
-    db = Store(path)
+    db = store_access.migrated_store(root)
     try:
-        _print_table(table(db.segments(), since=since, until=until, by=args.by, zone=cfg.zone))
+        segments = db.segments()
+        if args.raw:
+            print(json.dumps([asdict(row) for row in records(segments)
+                              if since <= datetime.fromisoformat(row.started_at).astimezone(cfg.zone).date() <= until]))
+        else:
+            _print_table(table(segments, since=since, until=until, by=args.by, zone=cfg.zone))
     finally:
         db.engine.dispose()
     return 0

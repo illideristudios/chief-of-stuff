@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 import tomllib
 from datetime import date
@@ -15,11 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backlog  # noqa: E402
 from forge import project_option_ids  # noqa: E402
 import issue_gate  # noqa: E402
+from shell_setup import clean_env  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
-from workspace import ConfigError, parse_coordinator
+from workspace import WORKSPACE_FILES, ConfigError, parse_coordinator
 from settings import (Kanban, SettingsError, kanban_from_table, load as load_settings, load_policy,
-                      unmapped_stages, workflow_stages)
+                      unmapped_stages, workflow_stages, workspace_policy)
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -37,6 +39,38 @@ def relative_dir(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", value):
         raise InitError(f"directory {value!r} contains unsupported characters")
     return value.rstrip("/") + "/"
+
+
+# What the engine writes under a workspace root once it runs, beside init's own files (#870).
+ENGINE_STATE = (".chief-of-stuff/", "store.db", "store.db-wal", "store.db-shm")
+
+
+def ignore_in_git(root: Path, names: list[str], dry: bool) -> str:
+    """#870 (Zach, 2026-10-18: "the init files should be gitignored in any repo"): add each name under `root` to its
+    repository's info/exclude, which git honours with no tracked change; "" outside a work tree or when all are there."""
+    def read(*args: str) -> str:
+        # Two path reads need no credentials, so git runs without the write env's (CodeQL: nothing secret reaches print).
+        try:
+            done = subprocess.run(["git", "-C", str(root), *args], env=clean_env(), capture_output=True, text=True,
+                                  timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return done.stdout.strip() if done.returncode == 0 else ""
+    top, path = read("rev-parse", "--show-toplevel"), read("rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
+    if not top or not path:
+        return ""
+    prefix = root.resolve().relative_to(Path(top).resolve()).as_posix()
+    entries = ["/" + (f"{prefix}/" if prefix != "." else "") + name for name in names]
+    exclude = Path(path)
+    lines = exclude.read_text().splitlines() if exclude.exists() else []
+    new = [entry for entry in dict.fromkeys(entries) if entry not in lines]
+    if not new:
+        return ""
+    if dry:
+        return f"would ignore in {exclude}: {', '.join(new)}"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("\n".join([*lines, *new]) + "\n")
+    return f"ignored in {exclude}: {', '.join(new)}"
 
 
 def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: str,
@@ -60,7 +94,7 @@ def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: st
     lines = ["## Coordinator", "", f"- User: {user.strip()}", f"- Daily log dir: `{daily_dir}`",
              f"- Tracker: `{daily_dir}<date>-tracker.md`", f"- Timezone: {timezone}",
              "- Calendars: none", "- Deadlines: none", f"- Worktrees: `{worktrees}`",
-             "- Settings: `chief-of-stuff.toml`"]
+             f"- Settings: `{WORKSPACE_FILES['settings'].name}`"]
     if board_port is not None:
         lines.append(f"- Board: Pages; URL http://127.0.0.1:{board_port}/; dir `pages/`")
     if backlog:
@@ -95,11 +129,11 @@ def settings_text(launcher: str, mode: str = "interactive") -> str:
     return text
 
 
-def _require_engine_ready(config) -> None:
+def _require_engine_ready(config, root: Path) -> None:
     """Preserved settings must already carry a complete shipped workflow map; init does not rewrite them."""
     if config.kanban is None:
         raise InitError("existing settings need [kanban] with the shipped workflow map before the engine can start")
-    unmapped = unmapped_stages(config.kanban, load_policy())
+    unmapped = unmapped_stages(config.kanban, workspace_policy(root, config.policy_overlay))
     if unmapped:
         raise InitError(f"existing settings [kanban.map] has no label for workflow stage {', '.join(unmapped)}")
 
@@ -186,11 +220,11 @@ def main(argv: list[str] | None = None) -> int:
         block = coordinator_block(user=args.user, timezone=args.timezone, daily_dir=args.daily_dir,
                                   worktrees=args.worktrees, agents=args.agent, board_port=args.board_port,
                                   backlog=backlog_spec)
-        claude = root / "CLAUDE.md"
+        claude = root / WORKSPACE_FILES["config"].name
         existing = claude.read_text() if claude.exists() else ""
         if COORDINATOR.search(existing):
             raise InitError(f"{claude} already has a ## Coordinator block")
-        settings = root / "chief-of-stuff.toml"
+        settings = root / WORKSPACE_FILES["settings"].name
         guidance = guidance_destination(root)
         board = None
         if settings.exists():
@@ -200,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
                 existing_settings = load_settings(root, settings.name)
             except SettingsError as exc:
                 raise InitError(f"existing settings are invalid: {exc}") from None
-            _require_engine_ready(existing_settings)
+            _require_engine_ready(existing_settings, root)
             board = existing_settings.kanban
         new_settings = settings_text(args.launcher, args.worker_mode)
         if board is None:  # a fresh settings file provisions what its own template names
@@ -210,7 +244,12 @@ def main(argv: list[str] | None = None) -> int:
                  backlog.Backlog(args.gitlab_host, args.gitlab_project, args.gitlab_token_env)
                  if args.gitlab_host else None)
         label_out, label_err = provision_kanban(forge, board, args.dry_run)
+        # A tracked CLAUDE.md cannot be ignored, so it is listed only when init creates it.
+        ignored = [settings.name, guidance.relative_to(root).as_posix(), relative_dir(args.daily_dir),
+                   relative_dir(args.worktrees), *ENGINE_STATE, *([] if claude.exists() else [claude.name])]
         if args.dry_run:
+            if note := ignore_in_git(root, ignored, dry=True):
+                print(note)
             print(f"would {'append to' if claude.exists() else 'create'}: {claude}\n{block}")
             print(f"would {'keep existing' if settings.exists() else 'create'}: {settings}")
             if not settings.exists():
@@ -228,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
             with claude.open("x") as fh:
                 fh.write("# Workspace\n\n" + block)
         install_guidance(root)
+        if note := ignore_in_git(root, ignored, dry=False):
+            print(note)
         if label_out:
             print(label_out)
         if label_err:

@@ -25,10 +25,14 @@ class GuardTest(unittest.TestCase):
         self.db = store.Store(self.root / "store.db")
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, title="Implement a widget", stage="implement")
+        global_git = self.root / "global.gitconfig"
+        global_git.write_text("")
+        # An empty global file, so a developer-global core.hooksPath cannot flip the suite (#893).
         self.env = {**os.environ, "CHIEF_ISSUE_KEY": KEY, "CHIEF_STAGE": "implement",
                     "CHIEF_ATTEMPT": "2", "CHIEF_SESSION_ID": "session-two", "CHIEF_ROOT": str(self.root),
                     "CHIEF_LAUNCHED_AT": datetime.now(timezone.utc).isoformat(),
-                    "CHIEF_PYTHON": sys.executable, "CHIEF_PROTECTED_BRANCHES": '["main", "master", "develop", "release"]'}
+                    "CHIEF_PYTHON": sys.executable, "CHIEF_PROTECTED_BRANCHES": '["main", "master", "develop", "release"]',
+                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(global_git)}
 
     def hook(self, event, **fields):
         proc = subprocess.run([sys.executable, str(ROOT / "scripts/worker_guard.py"), event],
@@ -134,15 +138,210 @@ class GuardTest(unittest.TestCase):
     def test_unrelated_tools_are_ignored(self):
         self.assertEqual(self.hook("PreToolUse", tool_name="Read", tool_input={"file_path": "README.md"}), {})
 
-    def test_permission_is_an_ask_and_never_an_approval(self):
-        result = self.hook("PermissionRequest", tool_name="Bash", tool_input={"command": "touch /outside/file"})
-        self.assertEqual(result["hookSpecificOutput"]["decision"]["behavior"], "deny")
+    def permission(self, tool="Bash", *, cwd=None, **given):
+        result = self.hook("PermissionRequest", tool_name=tool, tool_input=given,
+                           cwd=str(self.root if cwd is None else cwd))
+        return result["hookSpecificOutput"]["decision"]
+
+    def repo(self):
+        repo = str(self.root.resolve())
+        subprocess.run(["git", "init", "-q", repo], check=True, env=self.env)
+        return repo
+
+    def test_an_unjudgeable_permission_is_an_ask_the_trio_is_consulted_on_first(self):
+        # #874, then the #750 ruling (rule 11: it names the separate permission decision wrong): an outside write is an
+        # allow/deny ask that the engine's trio consult answers before any owner sees it; never an approval.
+        decision = self.permission(command="touch /outside/file")
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn("trio", decision["message"])
+        self.assertEqual(self.db.decisions(KEY), [])
+        ask, = self.db.asks(KEY)
+        self.assertEqual((ask.stage, ask.attempt, ask.session_id, ask.answer, ask.options),
+                         ("implement", 2, "session-two", None, ["allow", "deny"]))
+        self.assertIn("touch /outside/file", ask.context)
+        self.assertIn("not a known read-only command", ask.context)  # #874's why travels with the ask
+
+    def test_a_permission_the_trio_allowed_is_granted_when_the_worker_asks_again(self):
+        # The hook denies at once and records an ask; the trio answers later. The resumed worker's retry must get that
+        # answer, or every approval is lost and a fresh ask is recorded each time.
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        self.db.answer_ask(KEY, ask.id, "allow")
+        self.assertEqual(self.permission(command="touch /outside/file"), {"behavior": "allow"})
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+
+    def test_a_permission_the_trio_denied_stays_denied_without_a_new_ask(self):
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        self.db.answer_ask(KEY, ask.id, "deny")
+        decision = self.permission(command="touch /outside/file")
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn(f"ask {ask.id}", decision["message"])
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+
+    def denied_ask(self, decided_by, *, row=True):
+        """A permission ask answered deny on attempt 2, with the linked decision the engine writes (when it writes one)."""
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        self.db.answer_ask(KEY, ask.id, "deny")
+        if row:
+            self.db.add_decision(KEY, "ask", ask.question, "deny", decided_by,
+                                 {"decision": {"instance": f"ask-{ask.id}", "context": ask.context, "options": ask.options}})
+        return ask
+
+    def asked_again_only_next_attempt(self):
+        self.assertEqual(self.permission(command="touch /outside/file")["behavior"], "deny")
+        self.assertEqual(len(self.db.asks(KEY)), 1)  # same attempt: stop, no second ask
+        self.env["CHIEF_ATTEMPT"] = "3"
+        self.assertEqual(self.permission(command="touch /outside/file")["behavior"], "deny")
+        _, second = self.db.asks(KEY)
+        self.assertEqual((second.attempt, second.answer), (3, None))
+
+    def test_a_split_deny_binds_only_the_attempt_that_received_it(self):
+        # #958: a split trio is asked again on the next attempt, not denied until a person reverses it.
+        self.denied_ask("guard")
+        self.asked_again_only_next_attempt()
+
+    def test_an_unavailable_trio_deny_with_no_decision_row_binds_only_its_attempt(self):
+        self.denied_ask("guard", row=False)
+        self.asked_again_only_next_attempt()
+
+    def test_a_trio_or_person_deny_stays_denied_on_the_next_attempt(self):
+        ask = self.denied_ask("trio")
+        self.env["CHIEF_ATTEMPT"] = "3"
+        decision = self.permission(command="touch /outside/file")
+        self.assertIn(f"ask {ask.id}", decision["message"])
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+
+    def test_a_deny_a_person_gave_stays_denied_on_the_next_attempt(self):
+        self.denied_ask("zach")
+        self.env["CHIEF_ATTEMPT"] = "3"
+        self.permission(command="touch /outside/file")
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+
+    def test_a_person_reversing_a_trio_deny_lets_the_next_attempt_ask_again(self):
+        ask = self.denied_ask("trio")
+        self.db.add_decision(KEY, "ask", ask.question, None, "",
+                             {"reversed": True, "recommendation": "deny",
+                              "decision": {"instance": f"ask-{ask.id}", "context": ask.context, "options": ask.options}})
+        self.env["CHIEF_ATTEMPT"] = "3"
+        self.permission(command="touch /outside/file")
+        self.assertEqual(len(self.db.asks(KEY)), 2)
+
+    def test_a_repeat_of_a_pending_ask_waits_on_it_and_a_different_request_asks_anew(self):
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        decision = self.permission(command="touch /outside/file")
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn(f"ask {ask.id}", decision["message"])
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+        self.permission(command="touch /outside/other")
+        self.assertEqual(len(self.db.asks(KEY)), 2)
+
+    def test_the_143_read_is_allowed_without_anyone(self):
+        command = ('rtk ls && git log --oneline -3 && rtk ls docs 2>/dev/null | head -50 && grep -rln "implement" '
+                   '--include=*.py --include=*.go --include=*.rs --include=*.ts . 2>/dev/null | grep -v _vendor | head -40')
+        self.assertEqual(self.permission(command=command), {"behavior": "allow"})
+        self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
+    def test_routine_reads_and_own_tree_git_writes_are_allowed_without_anyone(self):
+        # #890: the shapes the engines' workers actually asked about (names invented), each now judged by rule.
+        commands = (
+            "git add docs/plans/issue-7.md && git commit -q -m \"docs: plan the widget for issue 7\"",
+            "git commit -m \"Plan the widget page for #7\" -m \"Co-Authored-By: A Model <noreply@example.test>\"",
+            "git add PLAN-7.md",
+            "git ls-files; rtk read GOAL.md; sed -n 1,135p DESIGN.md",
+            "sed -n 1,130p DESIGN.md; echo ------; sed -n 440,480p DESIGN.md; rtk grep -n -i \"widget\" DESIGN.md",
+            "git branch -a | head -30; git worktree list; which python3 ffmpeg node 2>&1",
+            "find . -path ./node_modules -prune -o -path ./.git -prune -o -type f -print | grep -v '/obj/' | head -100",
+            "grep -rIl --exclude-dir=node_modules --exclude-dir=.git widget . | head",
+            "git switch -c widget-7",
+            "sed -n '10p;20,30p' notes.md",  # a `$` never reaches the sed rule: the gate's tokenizer refuses it first
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command=command), {"behavior": "allow"})
+        self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
+    def test_commit_is_allowed_when_hooks_are_unset_or_outside_the_worktree(self):
+        # #893: no core.hooksPath, and one that resolves outside the tree, stay auto-allowed. Default .git/hooks is not
+        # consulted: the worker cannot write .git.
+        repo = self.repo()
+        self.assertEqual(self.permission(command="git commit -m x", cwd=repo), {"behavior": "allow"})
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        subprocess.run(["git", "-C", repo, "config", "core.hooksPath", outside.name], check=True, env=self.env)
+        self.assertEqual(self.permission(command="git commit -m x", cwd=repo), {"behavior": "allow"})
+        self.assertEqual(self.db.asks(KEY), [])
+
+    def test_commit_with_hooks_inside_the_worktree_goes_to_the_trio(self):
+        # #893: a husky-style hooks path is a directory the worker may already write, so commit would run that code.
+        from guard_commands import inside
+        repo = self.repo()
+        subprocess.run(["git", "-C", repo, "config", "core.hooksPath", ".husky"], check=True, env=self.env)
+        for command in ("git commit -m x", "git add f && git commit -m x"):
+            with self.subTest(command=command):
+                self.assertNotEqual(self.permission(command=command, cwd=repo)["behavior"], "allow")
         asks = self.db.asks(KEY)
-        self.assertEqual(len(asks), 1)
-        self.assertEqual((asks[0].stage, asks[0].attempt, asks[0].session_id, asks[0].answer),
-                         ("implement", 2, "session-two", None))
-        self.assertIn("touch /outside/file", asks[0].context)
-        self.assertNotIn("ask tool", json.dumps(result))  # already recorded; a second ask would duplicate it
+        self.assertEqual(len(asks), 2)
+        for ask in asks:
+            self.assertEqual(ask.question, "Permission requested for Bash")
+            recorded = json.loads(ask.context)
+            self.assertEqual(recorded["kind"], "permission")
+            self.assertEqual(recorded["hooks_root"], repo)
+            self.assertTrue(inside(recorded["hooks_path"], recorded["hooks_root"]))
+
+    def test_sed_scripts_that_write_or_run_and_history_rewrites_are_not_auto_allowed(self):
+        for command in ("sed -n '1p;w /tmp/x' notes.md", "sed -n 'e touch x' notes.md", "sed -n '1r /etc/hosts' a",
+                        "sed -i -n 1p notes.md", "git commit --amend -m x", "git commit --no-verify -m x",
+                        "git commit -qn -m x", "git -C ../other add x", "git -c core.hooksPath=x commit -m x",
+                        "git checkout -b x origin/main", "git worktree add ../x", "cat ../sibling/secret"):
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command=command)["behavior"], "deny")
+        self.assertTrue(all(ask.answer is None for ask in self.db.asks(KEY)))  # each waits for the trio, not allowed
+
+    def test_an_ask_records_the_worktree_so_the_engine_can_judge_it_again(self):
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        self.assertEqual(json.loads(ask.context)["cwd"], str(self.root))
+
+    def test_a_merge_chained_after_a_read_is_denied_with_the_reason(self):
+        decision = self.permission(command="git status && gh pr merge 12 --merge")
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn("engine owns merges", decision["message"])
+        self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
+    def test_unparseable_commands_and_secret_reads_go_to_the_trio(self):
+        for command in ("cat $(whoami)", "cat ~/.ssh/id_ed25519", "echo x > /etc/hosts", "rm -rf build",
+                        "sed 'e touch /tmp/x' notes.txt", "rg --pre ./run pattern .", "find . -exec rm {} +"):
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command=command)["behavior"], "deny")
+        self.assertEqual((len(self.db.asks(KEY)), self.db.decisions(KEY)), (7, []))
+
+    def test_the_audits_four_holes_never_auto_allow(self):
+        # Architect audit on #875: each of these runs a program or reaches outside while looking like a read.
+        holes = {
+            "assignment prefix": "GIT_EXTERNAL_DIFF=./x git diff",
+            "pager prefix": "GH_PAGER=./x gh pr view 1",
+            "git executes": "git log --ext-diff",
+            "git textconv": "git diff --textconv",
+            "brace expansion": "cat {.,/etc}/passwd",
+            "redirect into .git": "ls > .git/config",
+        }
+        for hole, command in holes.items():
+            with self.subTest(hole=hole):
+                self.assertEqual(self.permission(command=command)["behavior"], "deny")
+        self.assertEqual(self.permission("Write", file_path=".git/hooks/pre-commit")["behavior"], "deny")
+        self.assertEqual(self.permission("Read", file_path=".git/HEAD"), {"behavior": "allow"})  # reading .git is fine
+        self.assertEqual((len(self.db.asks(KEY)), self.db.decisions(KEY)), (7, []))  # each hole is an ask, never an allow
+
+    def test_reads_and_edits_are_allowed_inside_the_worktree_only(self):
+        self.assertEqual(self.permission("Read", file_path=str(self.root / "README.md")), {"behavior": "allow"})
+        self.assertEqual(self.permission("Edit", file_path="scripts/x.py"), {"behavior": "allow"})
+        self.assertEqual(self.permission("Read", file_path="/Users/someone/.ssh/id_ed25519")["behavior"], "deny")
+        self.assertEqual(self.permission("Write", file_path="/etc/hosts")["behavior"], "deny")
+        self.assertEqual(self.permission("WebFetch", url="https://example.com")["behavior"], "deny")
+        self.assertEqual((len(self.db.asks(KEY)), len(self.db.decisions(KEY))), (3, 0))
 
     def test_stop_requires_this_exact_run_report_and_cannot_loop(self):
         self.assertEqual(self.hook("Stop")["decision"], "block")
