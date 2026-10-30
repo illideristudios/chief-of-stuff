@@ -40,7 +40,7 @@ class Approval:
 class Policy:
     blocking_severity: str = "minor"  # a finding at or above it blocks merge; minor is "burn down to no open findings"
     architect: bool = False  # the architect is consulted where this holds
-    retry_limit: int = 3  # fix rounds before an unrecoverable-failure ping (the owner, 2026-10-11)
+    retry_limit: int = 3  # launcher-hold release failures before escalation
     launch: str = "adapter"  # a worker runs through the model adapter, or as a full Claude Code session
     trio: tuple[str, ...] = ()  # the decision trio when no topic tag maps to one (decision 5a)
     trios: dict[str, tuple[str, ...]] = field(default_factory=dict)  # decision topic tag -> three personas

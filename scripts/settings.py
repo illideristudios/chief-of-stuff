@@ -116,6 +116,7 @@ class Workers:
     teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
     stall: Stall = field(default_factory=Stall)
     failure_limit: int = 2
+    fix_round_limit: int = 3
 
 
 @dataclass(frozen=True)
@@ -351,6 +352,9 @@ def _workers(table) -> Workers:
     failure_limit = table.get("failure_limit", Workers.failure_limit)
     if type(failure_limit) is not int or failure_limit < 1:
         raise SettingsError("[workers] failure_limit must be a positive whole number")
+    fix_round_limit = table.get("fix_round_limit", Workers.fix_round_limit)
+    if type(fix_round_limit) is not int or fix_round_limit < 1:
+        raise SettingsError("[workers] fix_round_limit must be a positive whole number")
     launcher = table.get("launcher", "ghostty")
     if launcher not in ("ghostty", "tmux", "herdr"):
         raise SettingsError("[workers] launcher must be `ghostty`, `tmux` or `herdr`")
@@ -396,7 +400,7 @@ def _workers(table) -> Workers:
         commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
                    claude_as_profile=profile, worker_launcher=worker_launcher, require_green_tests=green, rules=tuple(rules),
-                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit, **commands)
+                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit, fix_round_limit=fix_round_limit, **commands)
 
 
 def _repos(table) -> dict[str, str]:

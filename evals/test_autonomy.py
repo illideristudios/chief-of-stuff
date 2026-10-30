@@ -22,10 +22,10 @@ from evals.test_reconcile import Item, Segment, NOW, KEY, policies
 
 
 class AutonomyTest(unittest.TestCase):
-    def plan(self, history=(), *, stage="implement", findings=None, configured=None):
+    def plan(self, history=(), *, stage="implement", findings=None, configured=None, **kwargs):
         p = configured or policies()
         return reconcile.plan([Item(stage=stage, merge_state="ready")], {KEY: history}, p, {}, 1, NOW,
-                              {KEY: findings or {}})
+                              {KEY: findings or {}}, **kwargs)
 
     def test_legacy_stage_gates_do_not_ask_even_without_standing_approval(self):
         p = policies()
@@ -89,7 +89,22 @@ class AutonomyTest(unittest.TestCase):
                 history.append(Segment("implement", i + 1, NOW - timedelta(minutes=19-i*2), NOW - timedelta(minutes=18-i*2)))
         action, = self.plan(history, stage="review", findings={"minor": 1})
         self.assertIsInstance(action, reconcile.Escalate)
-        self.assertIn("three fix rounds", action.reason)
+        self.assertIn("3 fix rounds", action.reason)
+
+    def test_configured_fix_round_limit_parks_only_after_that_many_completed_fixes(self):
+        history = []
+        for i in range(3):
+            history.append(Segment("review", i + 1, NOW - timedelta(minutes=20-i*2), NOW - timedelta(minutes=19-i*2)))
+            if i < 2:
+                history.append(Segment("implement", i + 1, NOW - timedelta(minutes=19-i*2), NOW - timedelta(minutes=18-i*2)))
+        for limit in (1, 2, 4):
+            with self.subTest(limit=limit):
+                action, = self.plan(history, stage="review", findings={"minor": 1}, fix_round_limit=limit)
+                if limit <= 2:
+                    self.assertIsInstance(action, reconcile.Escalate)
+                    self.assertIn(f"{limit} fix rounds", action.reason)
+                else:
+                    self.assertIsInstance(action, reconcile.Dispatch)
 
     def test_legacy_merge_owner_modes_normalize_to_coordinator_without_an_approver(self):
         with tempfile.TemporaryDirectory() as temp:

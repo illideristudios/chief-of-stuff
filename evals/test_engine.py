@@ -116,6 +116,21 @@ class FakeForge:
 
 
 class EngineTest(unittest.TestCase):
+    def test_workspace_fix_round_limit_reaches_the_planner(self):
+        self.forge.rows[0]["stage"] = "review"
+        self.db.sync_from_forge(self.forge.snapshots())
+        for i in range(3):
+            start = NOW - timedelta(minutes=20-i*2)
+            end = start + timedelta(minutes=1)
+            self.db.record_segment(KEY, "review", i + 1, start.isoformat(), end.isoformat(), "done")
+            if i < 2:
+                self.db.record_segment(KEY, "implement", i + 1, end.isoformat(),
+                                       (end + timedelta(minutes=1)).isoformat(), "done")
+        review_report(self.db, KEY, attempt=3, counts={"minor": 1})
+        actions = self.run_pass(workers=replace(engine.settings.Workers(), fix_round_limit=2))
+        self.assertIsInstance(actions[0], reconcile.Escalate)
+        self.assertIn("2 fix rounds", self.db.resume(KEY)["park"]["reason"])
+
     def test_legacy_suite_hold_becomes_a_failed_attempt_for_automatic_retry(self):
         self.db.upsert_item(KEY, stage="implement", human_review=True)
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "human_review")
@@ -201,7 +216,7 @@ class EngineTest(unittest.TestCase):
 
     def run_pass(self, **kwargs):
         return engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
-                               trees=self.trees, launch=self.launch, workers=engine.settings.Workers(),
+                               trees=self.trees, launch=self.launch, workers=kwargs.pop("workers", engine.settings.Workers()),
                                clock=lambda: self.now, **kwargs)
 
     def finish(self, stage, attempt=1, outcome="done"):

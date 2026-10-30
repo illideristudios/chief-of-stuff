@@ -87,6 +87,8 @@ require_green_tests = true # optional: hold one-shot and engine completions with
 rules = ["Never skip or weaken tests."] # optional: standing rules for every one-shot and engine worker
 ```
 
+`[workers] fix_round_limit = 3` sets how many completed fix rounds with findings still open park an issue. It must be a positive whole number and defaults to 3. Each fix returns to review before the limit is checked. This is independent of `[workers] failure_limit` (failed attempts) and policy `retry_limit` (launcher-hold release failures).
+
 The engine's stall threshold is configurable:
 
 ```toml

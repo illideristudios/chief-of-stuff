@@ -252,7 +252,7 @@ def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
     return any(counts.get(severity, 0) > 0 for severity in blocking)
 
 
-def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], policies: Policies, room: str | None) -> Action:
+def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], policies: Policies, room: str | None, fix_round_limit: int) -> Action:
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
     # Completed rework is separate from failed work: review each fix, then park if findings persist.
     first_review = min((_time(s.ended_at) for s in history if s.stage == "review"
@@ -263,15 +263,15 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
         completed = max((s.attempt for s in history if s.stage == stage and s.ended_at), default=initial)
         fixes = completed - initial - sum(s.stage == stage and s.outcome in RETRYABLE
                                           and s.started_at and _time(s.started_at) >= first_review for s in history)
-        if fixes >= 3:
-            return Escalate(key, "park: three fix rounds ended with findings still open", stage=stage)
+        if fixes >= fix_round_limit:
+            return Escalate(key, f"park: {fix_round_limit} fix rounds ended with findings still open", stage=stage)
     return Review(key, attempt) if stage == "review" else Dispatch(key, stage, policies.stages[stage].persona, attempt)
 
 
 def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], policies: Policies,
            room: str | None, now: datetime, counts: Mapping[str, int] | None, edges: Sequence[Edge],
            decisions: Sequence[Decision],
-           latest_segment: Segment | None = None, architect_review: ArchitectReview | None = None) -> Action:
+           latest_segment: Segment | None, architect_review: ArchitectReview | None, fix_round_limit: int) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if decision_escalation.pending_decisions(decisions, tuple(e.gate for e in workflow.edges if e.gate), history, workflow.start):
@@ -287,7 +287,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         # Work that ended after the review started was not all reviewed, even if it started first.
         if review is None or any(s.stage not in unreviewed
                                  and _time(s.ended_at) > _time(review.started_at) for s in completed):
-            return _work(key, "review", workflow, history, policies, room)
+            return _work(key, "review", workflow, history, policies, room, fix_round_limit)
     elif item.review_state != "approved":
         return Wait(key, "review has not run")
     # A workflow with no review stage never produces a worker report, so unknown counts cannot arrive.
@@ -302,7 +302,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         verdict = architect_review.verdict if architect_review else ""
         if verdict == "CHANGES":
             edge = _next(workflow, "review", True)
-            return (_work(key, edge.target, workflow, history, policies, room) if edge else
+            return (_work(key, edge.target, workflow, history, policies, room, fix_round_limit) if edge else
                     Wait(key, "architect changes requested; no unique fix edge"))
         if verdict != "APPROVED":
             return Wait(key, "architect consultation is required")
@@ -409,7 +409,7 @@ def _stalled(item: WorkItem, segment: Segment, facts: Facts, now: datetime,
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
           decisions: Sequence[Decision], launcher_hold: Mapping[str, object], facts: Facts | None = None,
-          architect_review: ArchitectReview | None = None) -> Action | None:
+          architect_review: ArchitectReview | None = None, fix_round_limit: int = 3) -> Action | None:
     key = item.issue_key
     workflow = policies.workflow_for(issue_type)
     if item.forge_state == "closed" and item.merge_state == "merged" and facts is not None:
@@ -428,7 +428,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if stage not in stages:
         return Wait(key, "human review" if item.human_review else "stage is outside the workflow")
     if decision_escalation.open_reversal(decisions, history, workflow.start):
-        return _work(key, workflow.start, workflow, history, policies, room)
+        return _work(key, workflow.start, workflow, history, policies, room, fix_round_limit)
     # An architect segment is an out-of-band consultation unless the workflow names architect as a stage.
     completed = tuple(s for s in history if s.started_at and s.ended_at and (s.stage != "architect" or "architect" in stages)
                       and (stage != "merge" or s.stage != "merge"))
@@ -443,7 +443,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
                 and latest.outcome == "failed"):
             if launcher_hold.get("release_failures", 0) > _policy(policies, stage, room).retry_limit:
                 return Escalate(key, f"hold release retry limit reached for {stage}")
-            return _work(key, stage, workflow, history, policies, room)
+            return _work(key, stage, workflow, history, policies, room, fix_round_limit)
         return Wait(key, "human review")
     return_edge = None
     if latest and latest.stage == "review":
@@ -458,10 +458,10 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if stage == "merge":
         incoming = ((return_edge,) if return_edge else
                     tuple(e for e in workflow.edges if e.target == stage and latest and e.source == latest.stage))
-        return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions, latest, architect_review)
+        return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions, latest, architect_review, fix_round_limit)
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
-        return _work(key, stage, workflow, history, policies, room)
+        return _work(key, stage, workflow, history, policies, room, fix_round_limit)
     accepted = False
     if stage == "implement" and latest.outcome == "human_review":
         if facts is not None and key in facts.suite_holds:
@@ -473,7 +473,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
             return Wait(key, "implementation request evidence is unknown")
         accepted = product is True
     if latest.outcome != "done" and not accepted:
-        return _work(key, stage, workflow, history, policies, room)
+        return _work(key, stage, workflow, history, policies, room, fix_round_limit)
     blocking = False
     if stage == "review":
         if counts is None:
@@ -483,8 +483,8 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if edge is None:
         return Wait(key, "no unique workflow edge")
     if edge.target == "merge":
-        return _merge(item, workflow, history, policies, room, now, counts, (edge,), decisions, latest, architect_review)
-    action = _work(key, edge.target, workflow, history, policies, room)
+        return _merge(item, workflow, history, policies, room, now, counts, (edge,), decisions, latest, architect_review, fix_round_limit)
+    action = _work(key, edge.target, workflow, history, policies, room, fix_round_limit)
     if isinstance(action, Escalate):
         return action
     return action
@@ -549,6 +549,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          pending_stages: Mapping[str, Mapping] | None = None,
          architect_reviews: Mapping[str, ArchitectReview] | None = None,
          failure_limit: int = 2,
+         fix_round_limit: int = 3,
          failure_acknowledged: Mapping[str, Sequence[str]] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
@@ -565,6 +566,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         raise ValueError("free_slots must be a non-negative integer")
     if type(failure_limit) is not int or failure_limit < 1:
         raise ValueError("failure_limit must be a positive integer")
+    if type(fix_round_limit) is not int or fix_round_limit < 1:
+        raise ValueError("fix_round_limit must be a positive integer")
     actions = []
     for item in sorted(items, key=lambda item: _order(item, created_at or {})):
         history = segments.get(item.issue_key, ())
@@ -592,13 +595,13 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
                 action = Wait(item.issue_key, "stage is outside the workflow")
             else:
                 action = _work(item.issue_key, intent.rerouted_to, policies.workflow_for(issue_types.get(item.issue_key)),
-                               history, policies, room)
+                               history, policies, room, fix_round_limit)
         else:
             action = _item(item, history, policies, issue_types.get(item.issue_key),
                            room, now, open_findings.get(item.issue_key),
                            item_decisions,
                            (launcher_holds or {}).get(item.issue_key, {}), facts,
-                           (architect_reviews or {}).get(item.issue_key))
+                           (architect_reviews or {}).get(item.issue_key), fix_round_limit)
         if facts is not None and action is not None:
             action = _with_facts(action, item, facts)
         if isinstance(action, Merge) and (pending_asks or {}).get(item.issue_key):

@@ -181,7 +181,7 @@ class ReconcileTest(unittest.TestCase):
                 start += timedelta(minutes=1)
                 history.append(Segment("review", round + 1, started_at=start, ended_at=start + timedelta(seconds=30)))
             self.assertEqual(self.plan(item, history, {"minor": 1}),
-                             [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open")])
+                             [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open")])
 
     def test_review_target_gets_initial_work_before_any_completed_review(self):
         self.p = replace(self.p, base=policy.Policy(retry_limit=0))
@@ -244,7 +244,7 @@ class ReconcileTest(unittest.TestCase):
             for order in (history, history[::-1]):
                 with self.subTest(stage=stage, history=order):
                     self.assertEqual(self.plan(replace(item, stage=stage), order, {"minor": 1}),
-                                     [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open")])
+                                     [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open")])
 
     def test_separate_fix_stage_loops_to_review_until_its_retry_limit(self):
         self.p.stages["fix"] = policy.Place("fix", "builder")
@@ -259,7 +259,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(item, [Segment("review", started_at=NOW - timedelta(hours=4),
                                            ended_at=NOW - timedelta(hours=3)),
                                    Segment("fix", 3), Segment("review", 3, started_at=NOW)],
-                                   {"minor": 1}), [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open")])
+                                   {"minor": 1}), [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open")])
 
     def test_shipped_workflow_reviews_all_three_fix_rounds_before_escalating(self):
         path = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"
@@ -278,7 +278,7 @@ class ReconcileTest(unittest.TestCase):
                 start += timedelta(minutes=1)
                 history.append(Segment("review", attempt + 1, started_at=start, ended_at=start + timedelta(seconds=30)))
         self.assertEqual(self.plan(item, history, {"minor": 1}),
-                         [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open")])
+                         [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open")])
         history.append(Segment("architect", started_at=history[-1].started_at, ended_at=NOW))
         self.assertEqual(self.plan(item, history, {}, architect_reviews={KEY: reconcile.ArchitectReview(
             HEAD, (f"Architect: APPROVED {HEAD}",))}), [reconcile.Merge(KEY)])
@@ -295,13 +295,13 @@ class ReconcileTest(unittest.TestCase):
                                         ended_at=NOW - timedelta(hours=3)),
                                 Segment("repair", attempts)] if attempts else []) + [Segment("review", started_at=NOW)]
                     expected = (reconcile.Dispatch(KEY, "repair", "builder", attempts + 1) if attempts < 3
-                                else reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open"))
+                                else reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open"))
                     self.assertEqual(self.plan(replace(Item(), stage=stage), history, {"minor": 1}), [expected])
         self.assertEqual(self.plan(replace(Item(), stage="repair"),
                                    [Segment("review", started_at=NOW - timedelta(hours=4),
                                             ended_at=NOW - timedelta(hours=3)),
                                     Segment("repair", 3, outcome="failed")]),
-                         [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open")])
+                         [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open")])
         self.assertEqual(self.plan(replace(Item(), stage="repair"), [Segment("repair", 3)]),
                          [reconcile.Review(KEY, 1)])
 

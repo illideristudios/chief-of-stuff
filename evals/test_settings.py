@@ -152,6 +152,13 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaises(st.SettingsError):
             st.load(self.root, self.write('[workflow]\ndelivery = "direct"\n'))
 
+    def test_fix_round_limit_defaults_to_three_and_is_a_positive_whole_number(self):
+        self.assertEqual(st.load(self.root, None).workers.fix_round_limit, 3)
+        self.assertEqual(st.load(self.root, self.write('[workers]\nfix_round_limit = 5\n')).workers.fix_round_limit, 5)
+        for bad in ("0", "-1", "2.5", '"3"', "true"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(st.SettingsError, "fix_round_limit"):
+                st.load(self.root, self.write(f"[workers]\nfix_round_limit = {bad}\n"))
+
     def test_worker_cap_is_absent_or_a_positive_whole_number(self):
         self.assertIsNone(st.load(self.root, None).workers.max_concurrency)
         self.assertEqual(st.load(self.root, self.write('[workers]\nmax_concurrency = 3\n')).workers.max_concurrency, 3)

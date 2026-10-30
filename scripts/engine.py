@@ -882,7 +882,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     def plan():
         return reconcile.plan(items, policies=policies, free_slots=free_slots, now=now,
-                              failure_limit=workers.failure_limit, facts=facts, **inputs)
+                              failure_limit=workers.failure_limit, fix_round_limit=workers.fix_round_limit, facts=facts, **inputs)
 
     actions = plan()
     if reviews := engine_merge.consultations(forge, store, actions, at):
@@ -987,7 +987,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                         trio_gate.record(store, key, rev)
             elif isinstance(action, reconcile.Merge):
                 if engine_merge.execute(action, forge, store, at, policies=policies,
-                                        inputs={**_planning_inputs(store, [by_key[key]]), "failure_limit": workers.failure_limit}):
+                                        inputs={**_planning_inputs(store, [by_key[key]]), "failure_limit": workers.failure_limit,
+                                                "fix_round_limit": workers.fix_round_limit}):
                     stage = "merge"
             elif isinstance(action, reconcile.Close):
                 worker.teardown_once(store, root, key, action.stage, action.attempt, teardown_command, at)
