@@ -23,6 +23,7 @@ from shell_setup import clean_env  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import WORKSPACE_FILES, ConfigError, parse_coordinator
+from policy import PolicyError
 from settings import (Kanban, SettingsError, kanban_from_table, load as load_settings, load_policy,
                       unmapped_stages, workflow_stages, workspace_policy)
 
@@ -136,7 +137,11 @@ def _require_engine_ready(config, root: Path) -> None:
     """Preserved settings must already carry a complete shipped workflow map; init does not rewrite them."""
     if config.kanban is None:
         raise InitError("existing settings need [kanban] with the shipped workflow map before the engine can start")
-    unmapped = unmapped_stages(config.kanban, workspace_policy(root, config.policy_overlay))
+    try:
+        policies = workspace_policy(root, config.policy_overlay)
+    except PolicyError as exc:
+        raise InitError(f"existing settings are invalid: {exc}") from None
+    unmapped = unmapped_stages(config.kanban, policies)
     if unmapped:
         raise InitError(f"existing settings [kanban.map] has no label for workflow stage {', '.join(unmapped)}")
 
