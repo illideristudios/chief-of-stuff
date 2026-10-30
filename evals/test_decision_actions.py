@@ -59,7 +59,7 @@ class RestartSupersession(unittest.TestCase):
 class StandingApproval(unittest.TestCase):
     def test_a_passed_gate_no_longer_waits_on_the_owner(self):
         rows = [hold()]
-        self.assertEqual(len(decision_escalation.owner_waits(rows, [seg("implement", 1, 0)], [])), 1)
+        self.assertEqual(len(decision_escalation.owner_waits(rows, [seg("implement", 1, 0)], [])), 0)
         self.assertEqual(decision_escalation.owner_waits(rows, [seg("implement", 1, 0)], [], passed=("plan",)), [])
 
 
@@ -68,7 +68,9 @@ class MalformedTimes(unittest.TestCase):
         naive = row("plan", "Rework?", by="", reversed=True)
         naive.created_at = "2000-01-01T00:00:00"
         segments = [NS(stage="implement", attempt=2, started_at="2000-01-01T00:10:00"), seg("implement", 1, 0)]
-        rows = [hold(stage="review", attempt=1, context="review-1"), naive]
+        waiting = hold(stage="review", attempt=1, context="review-1")
+        waiting.record["decision"]["gate"] = False
+        rows = [waiting, naive]
         self.assertEqual(len(decision_escalation.owner_waits(rows, segments, [])), 1)
         self.assertTrue(decision_escalation.pending_decisions(rows, (), segments))
 
@@ -76,6 +78,7 @@ class MalformedTimes(unittest.TestCase):
         restart = row("plan", "Rework?", by="", restarted="implement", restart_attempt=2, minutes=7)
         segments = [NS(stage="review", attempt=1, started_at="2000-01-01T00:00:00"), seg("implement", 2, 6)]
         waiting = hold(stage="review", attempt=1, context="review-1")
+        waiting.record["decision"]["gate"] = False
         self.assertEqual(len(decision_escalation.owner_waits([waiting, restart], segments, [])), 1)
 
 
@@ -83,8 +86,7 @@ class RescopedGate(unittest.TestCase):
     def test_a_stored_return_edge_scope_follows_its_context(self):
         stored = hold(stage="architect", attempt=1, context="review-1")
         segments = [seg("review", 1, 0), seg("architect", 1, 0), seg("architect", 2, 5)]
-        wait, = decision_escalation.owner_waits([stored], segments, [])
-        self.assertEqual((wait.stage, wait.attempt), ("review", 1))
+        self.assertEqual(decision_escalation.owner_waits([stored], segments, []), [])
 
     def test_an_ordinary_ask_keeps_its_stored_scope(self):
         ask = row("ask", "Which?", minutes=1, decision={"stage": "implement", "attempt": 1, "context": "review-1",

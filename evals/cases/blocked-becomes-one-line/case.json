@@ -45,5 +45,6 @@
     }
   ],
   "max_turns": 12,
-  "timeout_seconds": 300
+  "timeout_seconds": 300,
+  "superseded_by": "autonomy-routine-push"
 }

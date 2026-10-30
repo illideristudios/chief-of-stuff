@@ -1,19 +1,17 @@
-"""A column board as an HTML fragment and its CSS: cards under column heads, with an overflow fold.
+"""A column board as an HTML fragment and its CSS: every card under its column head.
 
 Generic by design: it knows columns, cards, tags and marks, never what a column or a state means.
 Colours come from the palette passed to `css`; kinds are CSS classes a host can restyle or add to.
-No JavaScript: overflow is a native `<details>`, everything else is a class.
+No JavaScript.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from fragment import colour as _colour, css_str as _css_str, esc as _esc, href as _href, kind as _kind
 
-LIMIT = 3
 # Okabe-Ito on parchment. (fill, ink, border): a tag's background, its text, and its border shorthand.
 PALETTE: dict[str, tuple[str, str, str]] = {
     "running": ("#0072B2", "#fbf8ef", "1px solid #0072B2"),
@@ -34,7 +32,7 @@ class Mark:
 @dataclass(frozen=True)
 class Card:
     name: str
-    kind: str  # the chip's palette key, and what overflow tallies
+    kind: str  # the chip's palette key
     refs: tuple[tuple[str, str], ...] = ()  # (text, url); a blank url draws plain text
     owner: str = ""
     state: str = ""  # the chip's text; blank draws no chip
@@ -74,29 +72,22 @@ def _card(c: Card, inline: Callable[[str], str] = _esc, linked_inline: Callable[
             + f'<div class="columns-who">{_link(c.owner, c.owner_href, "columns-owner")}{chip}</div>{marks}{flag}</div>')
 
 
-def tally(cards: tuple[Card, ...]) -> str:
-    """One span per kind, in order of first appearance: `2 open`, `1 done`."""
-    return "".join(f"<span>{n} {_esc(k)}</span>" for k, n in Counter(c.kind for c in cards).items())
-
-
-def _column(col: Column, limit: int, inline: Callable[[str], str] = _esc,
+def _column(col: Column, inline: Callable[[str], str] = _esc,
             linked_inline: Callable[[str], str] | None = None) -> str:
     kind = f" columns-{_kind(col.kind)}" if col.kind else ""
     note = f'<span class="columns-note">{_esc(col.note)}</span>' if col.note else ""
-    shown, rest = col.cards[:limit], col.cards[limit:]
-    more = (f'<details class="columns-more"><summary>+ {tally(rest)}</summary>{"".join(_card(c, inline, linked_inline) for c in rest)}</details>'
-            if rest else "")
+    cards = "".join(_card(c, inline, linked_inline) for c in col.cards)
     return (f'<section class="columns-col{kind}" aria-label="{_esc(col.name)}, {len(col.cards)}">'
             f'<div class="columns-head"><h3 class="columns-name">{_esc(col.name)}</h3>{note}'
-            f'<span class="columns-count">{len(col.cards)}</span></div>{"".join(_card(c, inline, linked_inline) for c in shown)}{more}</section>')
+            f'<span class="columns-count">{len(col.cards)}</span></div>{cards}</section>')
 
 
-def render(cols: list[Column], limit: int = LIMIT, inline: Callable[[str], str] = _esc,
+def render(cols: list[Column], inline: Callable[[str], str] = _esc,
            linked_inline: Callable[[str], str] | None = None) -> str:
-    """At most `limit` cards per column; `linked_inline` renders names already inside navigation links."""
+    """Every card in each column; `linked_inline` renders names already inside navigation links."""
     n = sum(len(c.cards) for c in cols)
     out = [f'<figure class="columns" aria-label="{len(cols)} column{"" if len(cols) == 1 else "s"}, {n} card{"" if n == 1 else "s"}">',
-           '<div class="columns-grid">', *(_column(c, limit, inline, linked_inline) for c in cols), "</div>", "</figure>"]
+           '<div class="columns-grid">', *(_column(c, inline, linked_inline) for c in cols), "</div>", "</figure>"]
     return "\n".join(out)
 
 
@@ -122,10 +113,6 @@ BASE_CSS = """\
 .columns-mark{font-size:10px;padding:0 5px;border-radius:3px}
 .columns-flagged{border:2px solid var(--c);padding-bottom:0;overflow:hidden}
 .columns-flag{margin:3px -7px 0;padding:2px 0;border:0;text-align:center;font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}
-.columns-more{font-size:11px;color:var(--columns-muted)}
-.columns-more>summary{cursor:pointer;display:flex;gap:6px;flex-wrap:wrap}
-.columns-more[open]{display:flex;flex-direction:column;gap:6px}
-.columns summary:focus-visible{outline:2px solid var(--columns-ink);outline-offset:1px}
 """
 
 
