@@ -3,21 +3,182 @@
 import io
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
 import claude_adapter  # noqa: E402
+import performance_report  # noqa: E402
 import shell_setup  # noqa: E402
 import supervisor  # noqa: E402
+
+def _help_sections(help_text: str) -> dict[str, str]:
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    sections = {"purpose": body[:headings[0].start()].strip() if headings else body.strip()}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    return sections
+
+
+# A per-command help issue opts in here after bringing its parser up to the standard.
+ENFORCED = frozenset({"docs", "performance"})
+
+
+def missing_sections(help_text: str, name: str) -> list[str]:
+    """Check the shared help contract; Purpose is argparse's description."""
+    problems = []
+    if not re.match(rf"usage: chief-of-stuff {re.escape(name)}(?:\s|$)", help_text):
+        problems.append("usage must name the installed command")
+    # Usage may wrap across several indented lines. Description follows a blank line.
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    purpose = body[:headings[0].start()].strip() if headings else body.strip()
+    if not purpose:
+        problems.append("Purpose")
+    sections = {}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    for section in cli.HELP_SECTIONS[1:]:
+        if not sections.get(section.casefold()):
+            problems.append(section)
+    if not re.search(rf"^\s*chief-of-stuff {re.escape(name)}(?:\s|$)",
+                     sections.get("examples", ""), re.MULTILINE):
+        problems.append("Examples must invoke the installed command")
+    return problems
+
+
+class CommandHelpTest(unittest.TestCase):
+    def run_cli(self, *args, **kwargs):
+        return subprocess.run([sys.executable, str(ROOT / "chief_of_stuff.py"), *args],
+                              capture_output=True, text=True, **kwargs)
+
+    def test_top_level_help_groups_each_visible_command_with_its_own_purpose(self):
+        done = self.run_cli("--help", check=True)
+        group = None
+        seen = []
+        for line in done.stdout.splitlines():
+            if line.rstrip(":") in cli.COMMAND_GROUPS:
+                group = line.rstrip(":")
+            elif line.startswith("  "):
+                name, purpose = line.strip().split("  ", 1)
+                self.assertEqual(cli.COMMAND_REGISTRY[name][1], group)
+                self.assertEqual(purpose.strip(), cli.command_purpose(name))
+                seen.append(name)
+        expected = [name for name, (_, group) in cli.COMMAND_REGISTRY.items() if group]
+        self.assertCountEqual(seen, expected)
+        self.assertEqual(len(seen), len(set(seen)))
+        positions = [done.stdout.index(f"{group}:") for group in cli.COMMAND_GROUPS]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_every_routed_command_is_grouped_or_hidden_and_store_backed_ones_exist(self):
+        visible = {name for name, (_, group) in cli.COMMAND_REGISTRY.items() if group}
+        self.assertEqual(visible, {"init", "work", "engine", "supervisor", "worktree", "backlog", "kanban",
+                                   "pipeline", "health", "pages", "decisions", "performance", "limits",
+                                   "architect-signals", "docs"})
+        self.assertLessEqual(cli.STORE_BACKED, set(cli.COMMANDS))
+
+    def test_retiring_commands_are_routable_but_not_discoverable(self):
+        retired = {"install", "start", "models", "worker", "result", "adopt", "processes",
+                   "inbox", "log", "tracker", "tick", "audit", "notify", "decision", "sources",
+                   "merge-approved", "merge-ready", "review-threads"}
+        self.assertTrue(all(cli.COMMAND_REGISTRY[name][1] is None
+                            for name in retired & cli.COMMAND_REGISTRY.keys()))
+        help_text = self.run_cli("--help", check=True).stdout
+        docs = self.run_cli("docs", check=True).stdout
+        for name in retired:
+            self.assertNotRegex(help_text, rf"(?m)^  {re.escape(name)}  ")
+            self.assertNotIn(f"### `{name}`", docs)
+        registry = {"docs": (None, "observability"), "retiring-fixture": ("chief_of_stuff.py", None)}
+        with patch.object(cli, "COMMAND_REGISTRY", registry), \
+                patch.object(cli, "COMMANDS", {"retiring-fixture": "chief_of_stuff.py"}), \
+                patch.object(cli.os, "execv") as execute:
+            self.assertNotIn("retiring-fixture", cli.top_level_help())
+            self.assertNotIn("retiring-fixture", cli.command_reference())
+            self.assertEqual(cli.main(["retiring-fixture", "--help"]), 0)
+        self.assertEqual(execute.call_args.args[1][-2:],
+                         [str(ROOT / "chief_of_stuff.py"), "--help"])
+
+    def test_failed_help_names_the_command(self):
+        with patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 2, "", "parser unavailable")):
+            with self.assertRaisesRegex(ValueError, "help failed for worktree.*parser unavailable"):
+                cli.command_help("worktree")
+        with patch.object(cli.subprocess, "run", side_effect=subprocess.TimeoutExpired("help", 30)):
+            with self.assertRaisesRegex(ValueError, "help failed for worktree"):
+                cli.command_help("worktree")
+
+    def test_reference_is_fresh_and_independent_of_terminal_environment(self):
+        done = self.run_cli("docs", check=True,
+                            env=dict(os.environ, COLUMNS="40", NO_COLOR="", PYTHONHASHSEED="123"))
+        self.assertEqual((ROOT / "docs/commands.md").read_text(), done.stdout,
+                         "Regenerate with: python3 chief_of_stuff.py docs > docs/commands.md")
+
+    def test_generator_includes_each_visible_commands_actual_help(self):
+        reference = cli.command_reference()
+        for name, (_, group) in cli.COMMAND_REGISTRY.items():
+            if group:
+                with self.subTest(command=name):
+                    self.assertIn(f"### `{name}`\n\n```text\n{cli.command_help(name).rstrip()}\n```", reference)
+
+    def test_generator_failure_does_not_print_partial_reference(self):
+        with patch.object(cli, "command_help", side_effect=ValueError("help failed for worktree")):
+            with patch("sys.stdout") as output, patch("sys.stderr") as error:
+                self.assertEqual(cli.main(["docs"]), 1)
+        output.write.assert_not_called()
+        self.assertIn("help failed for worktree", error.write.call_args_list[0].args[0])
+
+    def test_standard_accepts_complete_help(self):
+        self.assertEqual(missing_sections(self.complete_help(), "sample"), [])
+
+    @staticmethod
+    def complete_help():
+        return ("usage: chief-of-stuff sample [-h]\n\nDo the sample operation.\n\n"
+                "options:\n  -h, --help  show this help message and exit\n\n"
+                "When not to use:\n  Use another operation for other work.\n\n"
+                "Output:\n  A sample on stdout.\n\nExit codes:\n  0 success; 2 usage error.\n\n"
+                "Side effects:\n  None.\n\nExamples:\n  chief-of-stuff sample --help\n")
+
+    def test_standard_rejects_each_missing_or_empty_section(self):
+        complete = self.complete_help()
+        for section in cli.HELP_SECTIONS[1:]:
+            with self.subTest(section=section):
+                heading = section.lower() if section == "Options" else section
+                deficient = re.sub(rf"(?m)^{heading}:\n(?:  .+\n)+", "", complete)
+                self.assertIn(section, missing_sections(deficient, "sample"))
+                empty = re.sub(rf"(?m)(^{heading}:\n)(?:  .+\n)+", r"\1", complete)
+                self.assertIn(section, missing_sections(empty, "sample"))
+        self.assertIn("Purpose", missing_sections(complete.replace("Do the sample operation.", ""), "sample"))
+        self.assertIn("usage must name the installed command",
+                      missing_sections(complete.replace("usage: chief-of-stuff sample", "usage: sample.py"), "sample"))
+        self.assertIn("Examples must invoke the installed command",
+                      missing_sections(complete.replace("  chief-of-stuff sample --help", "  sample.py --help"), "sample"))
+
+    def test_enforced_commands_meet_shared_standard_and_purpose(self):
+        live = {name for name, (_, group) in cli.COMMAND_REGISTRY.items() if group}
+        self.assertLessEqual(ENFORCED, live)
+        for name in sorted(ENFORCED):
+            with self.subTest(command=name):
+                help_text = cli.command_help(name)
+                self.assertEqual(missing_sections(help_text, name), [])
+                purpose = cli.command_purpose(name)
+                self.assertLessEqual(len(purpose), 100)
+                self.assertEqual(help_text.split("\n\n")[1].splitlines()[0], purpose)
 
 
 class InstallTest(unittest.TestCase):
@@ -64,8 +225,8 @@ class InstallTest(unittest.TestCase):
         self.assertTrue((self.share / "current").is_symlink())
         self.assertTrue((Path(first["release"]) / "chief_of_stuff.py").is_file())
         help_text = subprocess.run([str(command), "--help"], capture_output=True, text=True, check=True).stdout
-        self.assertIn("worker", help_text)
-        self.assertIn("start", help_text)
+        self.assertIn("worktree", help_text)
+        self.assertIn("init", help_text)
         workspace = self.root / "workspace"
         workspace.mkdir()
         gh = self.bin / "gh"
@@ -187,12 +348,35 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
              mock.patch.object(supervisor, "data_dir", return_value=data), \
              mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
             with self.assertRaises(SystemExit):
-                cli.main(["performance", "--help"])
+                cli.main(["performance", "--since", "2026-10-01"])
         ensure.assert_called_once_with(data)
         execv.assert_called_once_with(
             str(venv_python),
-            [str(venv_python), str(ROOT / "scripts/performance_report.py"), "--help"],
+            [str(venv_python), str(ROOT / "scripts/performance_report.py"), "--since", "2026-10-01"],
         )
+
+    def test_help_of_every_store_backed_command_never_bootstraps_the_engine_venv(self):
+        for name in sorted(cli.STORE_BACKED):
+            for flag in ("--help", "-h"):
+                with self.subTest(command=name, flag=flag), \
+                     mock.patch.object(supervisor, "lock", side_effect=AssertionError("bootstrap")), \
+                     mock.patch.object(supervisor, "ensure_venv", side_effect=AssertionError("bootstrap")), \
+                     mock.patch.object(sys, "stdout", io.StringIO()) as out:
+                    code = cli.main([name, flag])
+                    self.assertEqual(code, 0)
+                    self.assertTrue(out.getvalue().startswith("usage:"), out.getvalue())
+
+    def test_help_bootstraps_only_when_this_interpreter_lacks_the_dependencies(self):
+        missing = subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: No module named 'sqlalchemy'")
+        with mock.patch.object(cli.subprocess, "run", return_value=missing), \
+             mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=Path("/pin/venv/bin/python")) as ensure, \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["limits", "--help"])
+        ensure.assert_called_once()
+        execv.assert_called_once_with("/pin/venv/bin/python",
+                                      ["/pin/venv/bin/python", str(ROOT / "scripts/limits_cli.py"), "--help"])
 
     def test_plain_command_keeps_sys_executable(self):
         with mock.patch.object(supervisor, "ensure_venv") as ensure, \
@@ -343,6 +527,175 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                     if target.startswith("scripts/") and target.count("/") == 1
                     and forbidden_reach(scripts, Path(target).stem, set(), frozenset({"sqlalchemy", "alembic"}))}
         self.assertEqual(reaching, set(cli.STORE_BACKED))
+
+
+class PerformanceHelpTest(unittest.TestCase):
+    """#850: `chief-of-stuff performance --help` is the reference an agent discovers and trusts."""
+
+    def run_performance(self, *args):
+        env = dict(os.environ, COLUMNS="100", NO_COLOR="1", PYTHON_COLORS="0", PYTHONHASHSEED="0")
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "performance", *args],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_performance_help_meets_shared_standard_and_covers_performance_contract(self):
+        self.assertIn("performance", ENFORCED)
+        done = self.run_performance("--help")
+        short = self.run_performance("-h")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual((short.returncode, short.stdout, short.stderr), (0, done.stdout, ""))
+        self.assertEqual(missing_sections(done.stdout, "performance"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = performance_report.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = performance_report.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            if action.option_strings:
+                self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        help_text = " ".join(done.stdout.split())
+        for phrase in (
+            "chief-of-stuff board",
+            "chief-of-stuff pages",
+            "chief-of-stuff tracker",
+            "chief-of-stuff health",
+            "chief-of-stuff limits",
+            "stage segments",
+            "store.db",
+            "interactive sessions",
+            "one-shot",
+            "not TOON",
+            "not JSON",
+            "period",
+            "runtime",
+            "model",
+            "effort",
+            "agent_type",
+            "runs",
+            "completed",
+            "human_review",
+            "relaunched",
+            "median_minutes",
+            "Monday",
+            "lower middle",
+            "performance:",
+            "migrate.lock",
+            "engine.lock",
+            "No preview",
+            "--dry-run",
+            "--commit",
+            "maple-workspace",
+            "--raw",
+            "attempt records",
+        ):
+            self.assertIn(phrase, help_text, phrase)
+
+        examples = [line.strip() for line in sections["examples"].splitlines()
+                    if line.strip().startswith("chief-of-stuff performance")]
+        self.assertEqual(len(examples), 4, examples)
+        for example in examples:
+            tokens = shlex.split(example)
+            self.assertEqual(tokens[:2], ["chief-of-stuff", "performance"])
+            parser.parse_args(tokens[2:])
+
+    def test_help_does_not_read_config_or_open_store(self):
+        with mock.patch("performance_report.read_config") as read_cfg, \
+                mock.patch("performance_report.store_access.migrated_store") as migrated, \
+                mock.patch("performance_report.table") as tbl, \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                performance_report.main(["--help"])
+        self.assertEqual(raised.exception.code, 0)
+        read_cfg.assert_not_called()
+        migrated.assert_not_called()
+        tbl.assert_not_called()
+
+    def test_parser_fault_exits_two_without_store_access(self):
+        for bad_argv in ([], ["--since"], ["--by", "month"], ["--unknown"]):
+            with self.subTest(argv=bad_argv):
+                err = io.StringIO()
+                with mock.patch("performance_report.read_config") as read_cfg, \
+                        mock.patch("performance_report.store_access.migrated_store") as migrated, \
+                        mock.patch("performance_report.table") as tbl, \
+                        redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as raised:
+                        performance_report.main(bad_argv)
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("usage: chief-of-stuff performance", err.getvalue())
+                read_cfg.assert_not_called()
+                migrated.assert_not_called()
+                tbl.assert_not_called()
+
+    def test_invalid_date_and_missing_store_exit_two_on_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(
+                "# Workspace\n\n## Coordinator\n\n- User: Robin\n- Daily log dir: `daily/`\n"
+                "- Tracker: `daily/<date>-tracker.md`\n- Timezone: UTC\n")
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = performance_report.main(["--root", str(root), "--since", "not-a-date"])
+            self.assertEqual(code, 2)
+            self.assertEqual(out.getvalue(), "")
+            self.assertTrue(err.getvalue().startswith("performance: "), err.getvalue())
+
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = performance_report.main(["--root", str(root), "--since", "2026-10-01"])
+            self.assertEqual(code, 2)
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn(f"performance: no store at {root.resolve() / 'store.db'}", err.getvalue())
+
+    def test_printed_table_columns_and_empty_key_dash_match_documented_output(self):
+        import store
+
+        help_out = io.StringIO()
+        with redirect_stdout(help_out):
+            with self.assertRaises(SystemExit):
+                performance_report.main(["--help"])
+        output_section = _help_sections(help_out.getvalue())["output"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(
+                "# Workspace\n\n## Coordinator\n\n- User: Robin\n- Daily log dir: `daily/`\n"
+                "- Tracker: `daily/<date>-tracker.md`\n- Timezone: UTC\n")
+            store.migrate(root / "store.db")
+            db = store.Store(root / "store.db")
+            try:
+                db.upsert_item("github:example/repo#1", title="sample")
+                db.record_segment(
+                    "github:example/repo#1", "implement", 1,
+                    started_at="2026-10-08T09:00:00+00:00",
+                    ended_at="2026-10-08T09:15:00+00:00",
+                    outcome="done", runtime="claude", model="sonnet", effort="", agent_type="",
+                )
+            finally:
+                db.engine.dispose()
+
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = performance_report.main([
+                    "--root", str(root), "--since", "2026-10-08", "--until", "2026-10-08", "--by", "week",
+                ])
+        self.assertEqual(code, 0)
+        self.assertEqual(err.getvalue(), "")
+        lines = [line.split() for line in out.getvalue().strip().splitlines()]
+        self.assertEqual(len(lines), 2, lines)
+        headers, row = lines
+        for col in headers:
+            self.assertIn(f"- {col}:", output_section, col)
+        # Thursday 2026-10-08 buckets to Monday 2026-10-05; empty effort, agent_type and workflow print as "-".
+        self.assertEqual(row, ["2026-10-05", "claude", "sonnet", "-", "-", "-", "1", "1", "0", "0", "15"])
 
 
 if __name__ == "__main__":
