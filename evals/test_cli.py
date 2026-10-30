@@ -347,12 +347,35 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
              mock.patch.object(supervisor, "data_dir", return_value=data), \
              mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
             with self.assertRaises(SystemExit):
-                cli.main(["performance", "--help"])
+                cli.main(["performance", "--since", "2026-10-01"])
         ensure.assert_called_once_with(data)
         execv.assert_called_once_with(
             str(venv_python),
-            [str(venv_python), str(ROOT / "scripts/performance_report.py"), "--help"],
+            [str(venv_python), str(ROOT / "scripts/performance_report.py"), "--since", "2026-10-01"],
         )
+
+    def test_help_of_every_store_backed_command_never_bootstraps_the_engine_venv(self):
+        for name in sorted(cli.STORE_BACKED):
+            for flag in ("--help", "-h"):
+                with self.subTest(command=name, flag=flag), \
+                     mock.patch.object(supervisor, "lock", side_effect=AssertionError("bootstrap")), \
+                     mock.patch.object(supervisor, "ensure_venv", side_effect=AssertionError("bootstrap")), \
+                     mock.patch.object(sys, "stdout", io.StringIO()) as out:
+                    code = cli.main([name, flag])
+                    self.assertEqual(code, 0)
+                    self.assertTrue(out.getvalue().startswith("usage:"), out.getvalue())
+
+    def test_help_bootstraps_only_when_this_interpreter_lacks_the_dependencies(self):
+        missing = subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: No module named 'sqlalchemy'")
+        with mock.patch.object(cli.subprocess, "run", return_value=missing), \
+             mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=Path("/pin/venv/bin/python")) as ensure, \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["limits", "--help"])
+        ensure.assert_called_once()
+        execv.assert_called_once_with("/pin/venv/bin/python",
+                                      ["/pin/venv/bin/python", str(ROOT / "scripts/limits_cli.py"), "--help"])
 
     def test_plain_command_keeps_sys_executable(self):
         with mock.patch.object(supervisor, "ensure_venv") as ensure, \
