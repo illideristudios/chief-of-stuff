@@ -1252,6 +1252,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except decision_page.BAD:
                 return self._refusal(409, "The decision cannot be read. Your answer was not saved; try reloading it later.",
                                      answer=draft, words_name="words", link=f"/decisions/{m[1]}")
+            try:
+                answered = decision_page.is_answered(d, m[1], getattr(self.server, "root", None))
+            except (OSError, ValueError, ConfigError) as e:
+                return self.send_error(503, f"cannot tell whether the decision is answered: {e}")
+            if answered:
+                return self.send_error(409, "the decision is already answered")
             if (key and key not in [o["key"] for o in d["options"]]) or not (key or words):
                 root = getattr(self.server, "root", None)
                 pages_dir = Path(self.directory)

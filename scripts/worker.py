@@ -14,6 +14,7 @@ from typing import Any
 from collections.abc import Callable
 
 import claude_adapter
+import transcripts
 import clock as engine_clock
 import dispatch_prompt
 import guard_binding
@@ -26,7 +27,7 @@ import reconcile
 import runtimes
 import supervisor
 import t3_adapter
-from settings import ModelEntry, load as load_settings
+from settings import ModelEntry, Settings, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import RETRYABLE, Failure, Reply, Request, retry_at
@@ -348,10 +349,14 @@ def stage_defaults(root: Path, text: str, stage: str) -> Any:
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
+           claude_as_profile: str | None = None, config: Settings | None = None,
            clock: engine_clock.Clock = engine_clock.system, launcher: str = "cli",
            t3_providers: dict[str, str] | None = None) -> tuple[str, str]:
-    """The Launch port: verify a live start or adopt durable completion before slots records it."""
+    """The Launch port: verify a live start or adopt durable completion before slots records it.
+
+    `config` is the caller's settings snapshot (rotation, rules, suite policy, teardown, T3 providers); it is loaded
+    when omitted. An explicit `claude_as_profile` or `t3_providers` overrides the snapshot's (empty profile selects
+    the default login)."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
@@ -370,8 +375,11 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         used = (model, effort) if model else (actor.model, actor.effort or "")
         return (*used, runtime) if runtime not in ("", "claude") else used
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
-    loaded = load_settings(root, settings_path(text))
-    defaults = loaded.stages.get(stage)
+    if config is None:
+        config = load_settings(root, settings_path(text))
+    if claude_as_profile is None:
+        claude_as_profile = config.workers.claude_as_profile
+    defaults = config.stages.get(stage)
     agent = agent_for(text, actor, defaults)
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
@@ -381,8 +389,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if stage != "review" and (changes := data.get("architect_changes")):
         body += f"\n\n## Architect findings for {changes['head']}\n\n{changes['reply']}\n"
     assignment = dispatch_prompt.compose_issue(row, got.issue.title, body, stage, actor, root=root,
-                                               skills=defaults.skills if defaults else (), rules=rules,
-                                               require_green=require_green)
+                                               skills=defaults.skills if defaults else (), rules=config.workers.rules,
+                                               require_green=config.workers.require_green_tests)
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
@@ -482,16 +490,16 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     def available(entry: ModelEntry) -> bool:
         if entry.runtime not in capacity:
             account = claude_as_profile if entry.runtime == "claude" else ""
-            capacity[entry.runtime] = below_limit(entry.runtime, account, now, loaded.limits.warn_at)
+            capacity[entry.runtime] = below_limit(entry.runtime, account, now, config.limits.warn_at)
         return capacity[entry.runtime]
 
     workflow = policies.workflow_for(data.get("issue_type") or getattr(row, "issue_type", None)).name
-    rotation = loaded.models.get(TASK_CLASS.get(stage, stage), ())
+    rotation = config.models.get(TASK_CLASS.get(stage, stage), ())
     if launcher == "t3" and rotation and not any(entry.runtime in t3_adapter.PROVIDERS for entry in rotation):
         raise RuntimeError("T3 has no engine channel for any runtime in this rotation")
     try:
-        chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
-                        how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
+        chosen = _model(store, issue_key, stage, data, actor, config.models, now.isoformat(), launchable,
+                        how=config.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
                         attempt=attempt, available=available, workflow=workflow)
     except RuntimeError:
         if clock_refusals and clock_refusals[0] is not None:
@@ -501,7 +509,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         if launcher == "t3" and chosen.runtime not in t3_adapter.PROVIDERS:
             raise RuntimeError(f"T3 has no engine channel for {chosen.runtime}; refusing a local fallback")
         # An unmapped profile or a missing instance refuses here, never falling back to T3's default account.
-        provider = t3_adapter.provider_instance(claude_as_profile, t3_providers or {}) if launcher == "t3" else None
+        provider = t3_adapter.provider_instance(claude_as_profile, (config.workers.t3_providers if t3_providers is None else t3_providers) or {}) if launcher == "t3" else None
         request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                           cwd=str(tree), worker=True, agent=agent,
                           plugin_dirs=plugin_dirs)
@@ -588,7 +596,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                         pass
                 host_adapter.cleanup(host)
                 # The process is already up. collect() never sees a segment slots.claim drops on this failure.
-                for error in teardown(root, tree, tree.name, teardown_command):
+                for error in teardown(root, tree, tree.name, config.workers.teardown):
                     try:
                         store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
                     except Exception:
@@ -722,12 +730,39 @@ def _runner_live(record: dict, run_dir: Path) -> bool:
     return process_status.identity(record["runner_pid"], record["session_id"]) == record.get("runner_identity")
 
 
+def _capture_transcript(store, segment, record: dict, max_bytes: int) -> None:
+    if record.get("launcher") == "t3" or record.get("runtime", "claude") != "claude":
+        return  # T3's source is its thread, never the provider's local files.
+    session = record.get("session_id")
+    if not isinstance(session, str) or not session:
+        return  # no safe launch identity to bind
+    path, error = None, ""
+    try:
+        path = claude_adapter.transcript_path(record)
+    except (OSError, ValueError, KeyError, TypeError):
+        error = "transcript launch source unavailable or identity unverified"
+    try:
+        directory = record.get("run_dir")
+        exited = isinstance(directory, str) and bool(directory) and (Path(directory) / "exit.json").is_file()
+        transcripts.capture(store, segment.issue_key, segment.stage, segment.attempt, session, path,
+                            ended=segment.ended_at is not None or exited,
+                            max_bytes=max_bytes, source_error=error)
+    except ValueError as exc:
+        store.add_log(segment.issue_key, f"transcript capture refused: {exc}", engine_clock.system().isoformat())
+
+
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
             trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False,
-            finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None) -> reconcile.Facts | None:
+            finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None,
+            transcript_max_bytes: int = transcripts.DEFAULT_MAX_BYTES) -> reconcile.Facts | None:
     """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
     completed = []
     for segment in store.segments():
+        data = _resume(store, segment.issue_key)
+        runs = data.get("runs", {})
+        saved = runs.get(f"{segment.stage}-{segment.attempt}") if isinstance(runs, dict) else None
+        if isinstance(saved, dict):
+            _capture_transcript(store, segment, saved, transcript_max_bytes)
         if segment.ended_at is not None:
             continue
         key = segment.issue_key
@@ -755,6 +790,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     _save_run(store, key, segment.stage, segment.attempt, record)
                     data = _resume(store, key)
                     record = data["runs"][f"{segment.stage}-{segment.attempt}"]
+                    _capture_transcript(store, segment, record, transcript_max_bytes)
             if not isinstance(record, dict):
                 raise ValueError("missing run record")
             if record.get("launcher") == "t3":

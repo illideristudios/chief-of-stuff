@@ -40,6 +40,16 @@ BLOCK = """# Workspace
 BOARD = "- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`"
 
 
+def assert_settled(case: unittest.TestCase, page: str) -> None:
+    """An answered decision page shows the recorded answer and nothing that can post another."""
+    case.assertIn('<div class="card answered">', page)
+    case.assertIn('<div class="options">', page)
+    case.assertIn('<div class="opt">', page)
+    for absent in ("<label", "<form", 'type="radio"', 'name="words"', "Your own answer", "<button",
+                   "Answer here or in chat", "<script"):
+        case.assertNotIn(absent, page)
+
+
 def decision(**over) -> dict:
     d = {
         "topic": "Storage",
@@ -123,12 +133,16 @@ class RenderTest(unittest.TestCase):
         self.assertIn(">ANSWERED · B<", page)
         self.assertIn("answered, saved 02:08", page)
         self.assertIn("“B, and log it”", page)
-        self.assertIn('<input type="radio" name="key" value="B" checked>', page)
+        self.assertIn("Follow the plan", page)
+        self.assertIn("<b>Breaks</b> the architecture.", page)
+        self.assertIn("Follow the architecture", page)
+        self.assertIn("The bucket is dead.", page)
+        assert_settled(self, page)
         written = dp.render(dp.parse(decision(answer={"key": None, "words": "neither; ask the owner", "at": saved["at"]})),
                             "2026-09-25", slug="uploads")
         self.assertIn(">ANSWERED<", written)
         self.assertIn("“neither; ask the owner”", written)
-        self.assertNotIn("checked", written)
+        assert_settled(self, written)
 
     def test_a_saved_answer_is_checked(self):
         for bad, word in (({"key": "Z", "words": "", "at": "2026-09-25T02:08:00-05:00"}, "Z"),
@@ -604,7 +618,11 @@ class DesignTest(unittest.TestCase):
 
     def test_the_chip_says_pending_until_the_answer_is_recorded(self):
         self.assertIn(">PENDING<", self.page())
-        self.assertIn(">ANSWERED · B<", self.page(answer="B"))
+        answered = self.page(answer="B")
+        self.assertIn(">ANSWERED · B<", answered)
+        self.assertIn('<div class="card answered"><span><span class="key">B</span>Follow the plan</span>'
+                      '<span class="saved">answered</span></div>', answered)
+        assert_settled(self, answered)
         with self.assertRaisesRegex(dp.DecisionError, "answer"):
             dp.parse(decision(answer="Z"))
 
@@ -995,6 +1013,10 @@ class DerivedPageTest(unittest.TestCase):
         page = dp.render(dp.parse(decision()), "2026-09-26", ctx=ctx, slug="x")
         self.assertIn("asked 00:40", page)
         self.assertIn(">ANSWERED · B<", page)
+        self.assertIn('<span class="key">B</span>Follow the plan', page)
+        self.assertIn("“B”", page)
+        self.assertIn('<span class="saved">answered 01:15</span>', page)
+        assert_settled(self, page)
         page = dp.render(dp.parse(decision(asked="00:10")), "2026-09-26", ctx=dp.Context(NOW), slug="x", mtime=at("00:05").timestamp())
         self.assertIn("asked 00:10", page)
         self.assertIn(">PENDING<", page)
@@ -1010,6 +1032,57 @@ class DerivedPageTest(unittest.TestCase):
     def test_without_sources_the_page_still_renders(self):
         page = dp.render(dp.parse(decision(references=[{"kind": "MR", "value": "!58"}])), "2026-09-26", ctx=dp.Context(NOW), slug="x")
         self.assertIn('<span class="st"></span>', page)
+
+    def test_a_decisions_row_renders_read_only_and_outranks_a_saved_page_answer(self):
+        words = "let's go ahead and fix the toml issues preventing page rendering please"
+        ctx = dp.Context(NOW, rows=(row("01:15", "decision-x", f'"{words}"'),))
+        page = dp.render(dp.parse(decision()), "2026-09-26", ctx=ctx, slug="x")
+        self.assertIn(">ANSWERED<", page)
+        self.assertNotIn("ANSWERED ·", page)
+        card = page[page.index('<div class="card answered">'):page.index("</div>", page.index('<div class="card answered">'))]
+        # markdown_inline HTML-escapes the apostrophe in the recorded words.
+        self.assertIn("“let&#x27;s go ahead and fix the toml issues preventing page rendering please”", card)
+        self.assertIn("answered 01:15", card)
+        assert_settled(self, page)
+        saved = {"key": "A", "words": "old", "at": "2026-09-26T01:00:00-05:00"}
+        ctx = dp.Context(NOW, rows=(row("01:15", "option B of decision-x", '"B, from the tracker"'),))
+        page = dp.render(dp.parse(decision(answer=saved)), "2026-09-26", ctx=ctx, slug="x")
+        self.assertIn(">ANSWERED · B<", page)
+        card = page[page.index('<div class="card answered">'):page.index("</div>", page.index('<div class="card answered">'))]
+        self.assertIn('<span class="key">B</span>Follow the plan', card)
+        self.assertIn("“B, from the tracker”", card)
+        self.assertNotIn("old", card)
+        self.assertNotIn(">ANSWERED · A<", page)
+        # A free-form row, and a keyed row without words, take nothing from the superseded page save.
+        ctx = dp.Context(NOW, rows=(row("01:15", "decision-x", '"something else"'),))
+        page = dp.render(dp.parse(decision(answer=saved)), "2026-09-26", ctx=ctx, slug="x")
+        card = page[page.index('<div class="card answered">'):page.index("</div>", page.index('<div class="card answered">'))]
+        self.assertIn(">ANSWERED<", page)
+        self.assertIn("“something else”", card)
+        self.assertNotIn('class="key"', card)
+        self.assertNotIn("old", card)
+        ctx = dp.Context(NOW, rows=(row("01:15", "option B of decision-x", ""),))
+        page = dp.render(dp.parse(decision(answer=saved)), "2026-09-26", ctx=ctx, slug="x")
+        card = page[page.index('<div class="card answered">'):page.index("</div>", page.index('<div class="card answered">'))]
+        self.assertIn('<span class="key">B</span>', card)
+        self.assertNotIn("old", card)
+        self.assertNotIn("class=\"words\"", card)
+
+    def test_the_decisions_list_shows_a_string_answer_without_a_form(self):
+        d = dp.parse(decision(answer="B"))
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "decision-x.json").write_text(json.dumps(d))
+            page, _ = dp.index(Path(tmp), dp.Context(NOW), "2026-09-26")
+        self.assertIn('<span class="key">B</span>Follow the plan', page)
+        self.assertNotIn("<form", page)
+
+    def test_is_answered_reads_the_page_and_the_trackers_and_fails_loudly(self):
+        self.assertTrue(dp.is_answered(dp.parse(decision(answer="B"))))
+        self.assertFalse(dp.is_answered(dp.parse(decision()), "x", None))
+        self.assertIsNone(dp.tracker_answer(None, "x"))
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises((OSError, dp.ConfigError)):
+                dp.tracker_answer(Path(tmp), "x")
 
 
 def board_css() -> str:
@@ -1148,6 +1221,10 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertRegex(page, r"asked (?:Fri )?09:40")
         self.assertIn(">ANSWERED · B<", page)
+        self.assertIn('<span class="key">B</span>Follow the plan', page)
+        self.assertIn("“B, go”", page)
+        self.assertRegex(page, r'<span class="saved">answered (?:Fri )?10:05</span>')
+        assert_settled(self, page)
 
     def test_links_against_the_workspace_backlog(self):
         root = self.workspace(board=BOARD + "\n- Backlog: GitHub; repo o/app")
