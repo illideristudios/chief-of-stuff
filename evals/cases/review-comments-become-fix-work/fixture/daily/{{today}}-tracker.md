@@ -13,13 +13,6 @@
 |---|---|---|
 | 08:00 | Retry jitter, Locale fallback | "yes, dispatch them" |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Retry jitter | `src/upload/` |
-| Locale fallback | `src/locale/` |
-
 ## Log
 
 - 08:00 opened the day
