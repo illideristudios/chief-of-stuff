@@ -22,11 +22,6 @@ Coordinator: coordinator. Board: self-hosted.
 |---|---|---|
 | 09:10 | Unattended authority | "In unattended checks, choose markdown report formatting for workers and record your decisions. Architecture changes remain my decision." |
 
-## File ownership
-
-- Security audit: src/a/
-- Draft release notes: docs/release.md
-
 ## Log
 
 - 09:00 opened the day

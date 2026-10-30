@@ -1,11 +1,21 @@
-"""Clock readings as the tracker writes them: `HH:MM` alone or leading a line, a `HH:MM–HH:MM` range and a
-`YYYY-MM-DD[ HH:MM]` date."""
+"""The engine's clock, and the tracker clock readings: `HH:MM` alone or leading a line, a `HH:MM–HH:MM`
+range and a `YYYY-MM-DD[ HH:MM]` date."""
 
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time, timedelta
+from collections.abc import Callable
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
+
+# Zero-arg callable → aware UTC instant. Injected so deadline and age logic can pin time in tests.
+Clock = Callable[[], datetime]
+
+
+def system() -> datetime:
+    """Wall clock in UTC. The one impure read in this module."""
+    return datetime.now(timezone.utc)
+
 
 HHMM = re.compile(r"^(\d{1,2}):(\d{2})$")
 # The clock a Log line or a tracker cell starts with; whatever follows it is the line's own text.
@@ -42,3 +52,18 @@ def done_clock(value: str, now: datetime, zone: ZoneInfo) -> datetime | None:
 def dur(td: timedelta) -> str:
     h, m = divmod(int(td.total_seconds()) // 60, 60)
     return f"{h}h{m:02d}m" if h else f"{m}m"
+
+
+def parse_stamp(raw: str | None, fallback: datetime) -> datetime:
+    """Read a stored ISO timestamp in the fallback zone; malformed values use the fallback instant."""
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None and fallback.tzinfo is not None:
+                dt = dt.replace(tzinfo=fallback.tzinfo)
+            elif dt.tzinfo is not None and fallback.tzinfo is not None:
+                dt = dt.astimezone(fallback.tzinfo)
+            return dt
+        except ValueError:
+            pass
+    return fallback
