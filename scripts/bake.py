@@ -16,6 +16,9 @@ import reconcile
 import supervisor
 from workspace import ConfigError, read_config
 
+# Owner-facing decisions use the role identity in the store ("user"), never a personal name.
+OWNER_BY = "user"
+
 
 @dataclass(frozen=True)
 class BakeOutcome:
@@ -70,9 +73,16 @@ def _allowed_decision_record(record: dict[str, Any]) -> bool:
     return False
 
 
-def _allowed_interrupt_log(entry: Any) -> bool:
-    msg = str(getattr(entry, "message", "") or "")
-    return msg.startswith("limit:") or msg.startswith("exhausted:")
+def _interrupt_logs_for(key: str, logs: Sequence[Any], start: datetime, end: datetime,
+                        zone: ZoneInfo) -> bool:
+    """True when engine._interrupt logged limit:/exhausted: for this issue in the window."""
+    for entry in logs:
+        if entry.issue_key != key or not _in_window(entry.at, start, end, zone):
+            continue
+        msg = str(getattr(entry, "message", "") or "")
+        if msg.startswith("limit:") or msg.startswith("exhausted:"):
+            return True
+    return False
 
 
 def _policy_human_review(segment: Any) -> bool:
@@ -83,6 +93,10 @@ def _routine_human_review(item: Any, segments: Sequence[Any], decisions: Sequenc
                           start: datetime, end: datetime, zone: ZoneInfo) -> str | None:
     key = item.issue_key
     issue_decs = [d for d in decisions if d.issue_key == key]
+    allowed = any(
+        _allowed_decision_record(d.record if isinstance(d.record, dict) else {}) for d in issue_decs
+    )
+    # Suite / required_human_review stops are policy, not routine nudges.
     for seg in segments:
         if seg.issue_key != key or not _policy_human_review(seg):
             continue
@@ -90,10 +104,7 @@ def _routine_human_review(item: Any, segments: Sequence[Any], decisions: Sequenc
             if stamp and _in_window(stamp, start, end, zone):
                 return None
     if item.human_review and item.updated_at and _in_window(item.updated_at, start, end, zone):
-        if any(_allowed_decision_record(d.record if isinstance(d.record, dict) else {}) for d in issue_decs):
-            return None
-        if any(_allowed_decision_record(d.record if isinstance(d.record, dict) else {})
-               for d in issue_decs if _in_window(d.created_at, start, end, zone)):
+        if allowed:
             return None
         return f"human_review on {key}"
     for seg in segments:
@@ -101,7 +112,7 @@ def _routine_human_review(item: Any, segments: Sequence[Any], decisions: Sequenc
             continue
         for stamp in (seg.ended_at, seg.started_at):
             if stamp and _in_window(stamp, start, end, zone):
-                if not any(_allowed_decision_record(d.record if isinstance(d.record, dict) else {}) for d in issue_decs):
+                if not allowed:
                     return f"segment human_review on {key}"
     return None
 
@@ -111,16 +122,16 @@ def _check_s1(decisions: Sequence[Any], items: Sequence[Any], segments: Sequence
     for row in decisions:
         record = row.record if isinstance(getattr(row, "record", None), dict) else {}
         created = _in_window(row.created_at, start, end, zone)
-        if row.decided_by == "zach" and created:
-            if not _allowed_decision_record(record):
-                return f"zach decision {getattr(row, 'id', '')} at {row.created_at}"
-        if decision_escalation.needs_owner([row]) is not None:
-            if _in_window(row.created_at, start, end, zone) or created:
-                if not _allowed_decision_record(record):
-                    return f"owner wait on {row.issue_key} from {row.created_at}"
-    for entry in logs:
-        if _in_window(entry.at, start, end, zone) and _allowed_interrupt_log(entry):
+        if not created:
             continue
+        if _allowed_decision_record(record):
+            continue
+        if _interrupt_logs_for(row.issue_key, logs, start, end, zone):
+            continue
+        if row.decided_by == OWNER_BY:
+            return f"owner decision {getattr(row, 'id', '')} at {row.created_at}"
+        if decision_escalation.needs_owner([row]) is not None:
+            return f"owner wait on {row.issue_key} from {row.created_at}"
     for item in items:
         hit = _routine_human_review(item, segments, decisions, start, end, zone)
         if hit:
@@ -141,11 +152,6 @@ def _check_s2(items: Sequence[Any], flow_rows: Sequence[tuple[str, Any]]) -> str
         counts[key] = counts.get(key, 0) + 1
         if counts[key] > 1:
             return f"multiple gantt rows for {key}"
-    for key, row in flow_rows:
-        segs = getattr(row, "segments", ()) or ()
-        stages = [getattr(s, "category", "") for s in segs]
-        if len(stages) != len(set(stages)) and len(stages) > 1:
-            pass  # rework may repeat stage names across attempts
     return None
 
 
@@ -157,8 +163,25 @@ def _merge_stage_decision(row: Any) -> bool:
     return decision.get("stage") == "merge"
 
 
-def _check_s3(logs: Sequence[Any], decisions: Sequence[Any], kanban_hold_stages: Sequence[str],
-              start: datetime, end: datetime, zone: ZoneInfo) -> str | None:
+def _cleared_merge_human_review(key: str, merge_at: datetime, segments: Sequence[Any],
+                                zone: ZoneInfo) -> bool:
+    """True when a human_review hold covered merge and cleared at or before the merge log."""
+    for seg in segments:
+        if seg.issue_key != key or (seg.stage or "") != "merge":
+            continue
+        if seg.outcome != "human_review" and not _policy_human_review(seg):
+            continue
+        started = _parse_at(seg.started_at, zone)
+        if started > merge_at:
+            continue
+        if seg.ended_at and _parse_at(seg.ended_at, zone) <= merge_at:
+            return True
+    return False
+
+
+def _check_s3(logs: Sequence[Any], decisions: Sequence[Any], segments: Sequence[Any],
+              kanban_hold_stages: Sequence[str], start: datetime, end: datetime,
+              zone: ZoneInfo) -> str | None:
     if "merge" in kanban_hold_stages:
         return "kanban map holds merge for a human"
     for entry in logs:
@@ -171,16 +194,18 @@ def _check_s3(logs: Sequence[Any], decisions: Sequence[Any], kanban_hold_stages:
         for row in decisions:
             if row.issue_key != key:
                 continue
-            if row.decided_by != "zach" or not (row.answer or "").strip():
+            if row.decided_by != OWNER_BY or not (row.answer or "").strip():
                 continue
             if _parse_at(row.created_at, zone) > merge_at:
                 continue
             if _merge_stage_decision(row):
                 return f"prompted merge on {key} at {entry.at}"
+        if _cleared_merge_human_review(key, merge_at, segments, zone):
+            return f"prompted merge on {key} at {entry.at}"
     return None
 
 
-def _issue_open_at(item: Any, segments: Sequence[Any], at: datetime, zone: ZoneInfo) -> bool:
+def _issue_open_at(item: Any, at: datetime, zone: ZoneInfo) -> bool:
     if getattr(item, "forge_state", "") == "closed":
         close = getattr(item, "updated_at", "")
         if close:
@@ -228,7 +253,8 @@ def _autonomous_after(key: str, after: datetime, segments: Sequence[Any], logs: 
 
 
 def _owner_event_between(key: str, start: datetime, end: datetime, decisions: Sequence[Any],
-                         items: Sequence[Any], segments: Sequence[Any], zone: ZoneInfo) -> bool:
+                         items: Sequence[Any], segments: Sequence[Any], logs: Sequence[Any],
+                         zone: ZoneInfo) -> bool:
     for row in decisions:
         if row.issue_key != key:
             continue
@@ -236,9 +262,13 @@ def _owner_event_between(key: str, start: datetime, end: datetime, decisions: Se
         if not (start < t < end):
             continue
         record = row.record if isinstance(row.record, dict) else {}
-        if row.decided_by == "zach" and not _allowed_decision_record(record):
+        if _allowed_decision_record(record):
+            continue
+        if _interrupt_logs_for(key, logs, start, end, zone):
+            continue
+        if row.decided_by == OWNER_BY:
             return True
-        if decision_escalation.needs_owner([row]) and not _allowed_decision_record(record):
+        if decision_escalation.needs_owner([row]) is not None:
             return True
     item = next((i for i in items if i.issue_key == key), None)
     if item and _routine_human_review(item, segments, decisions, start, end, zone):
@@ -260,14 +290,14 @@ def _check_s4(engine_starts: Sequence[dict[str, Any]], items: Sequence[Any], seg
     for restart in starts[1:]:
         for item in items:
             key = item.issue_key
-            if not _issue_open_at(item, segments, restart, zone):
+            if not _issue_open_at(item, restart, zone):
                 continue
             if not _had_work_before(key, segments, logs, restart, zone):
                 continue
             progress = _autonomous_after(key, restart, segments, logs, zone)
             if progress is None:
                 return f"no autonomous progress after restart at {restart.isoformat()}"
-            if _owner_event_between(key, restart, progress, decisions, items, segments, zone):
+            if _owner_event_between(key, restart, progress, decisions, items, segments, logs, zone):
                 return f"owner prompt between restart and progress on {key}"
     return None
 
@@ -295,7 +325,7 @@ def judge(
     for name, check in (
         ("S1", lambda: _check_s1(decisions, items, segments, logs, start, end, zone)),
         ("S2", lambda: _check_s2(items, flow_rows)),
-        ("S3", lambda: _check_s3(logs, decisions, kanban_hold_stages, start, end, zone)),
+        ("S3", lambda: _check_s3(logs, decisions, segments, kanban_hold_stages, start, end, zone)),
         ("S4", lambda: _check_s4(engine_starts, items, segments, logs, decisions, start, end, zone)),
     ):
         reason = check()
@@ -318,18 +348,10 @@ def _load_starts(root) -> tuple[bool, list[dict[str, Any]]]:
 
 
 def _flow_rows(db, end: datetime) -> list[tuple[str, Any]]:
+    """Pair each gantt row with its issue_key from build_from_store (never zip by position)."""
     import flow_chart
 
-    built = flow_chart.build_from_store(db, end)
-    items = db.items()
-    by_key = {item.issue_key: item for item in items}
-    order = [item.issue_key for item in items if item.issue_key in by_key]
-    keys_in_build = []
-    for item in items:
-        keys_in_build.append(item.issue_key)
-    if len(keys_in_build) != len(built):
-        return [(item.issue_key, row) for (_, row), item in zip(built, items, strict=False)]
-    return list(zip(keys_in_build, (row for _, row in built), strict=True))
+    return [(key, row) for key, _status, row in flow_chart.build_from_store(db, end)]
 
 
 def load_and_judge(root, start: datetime, end: datetime, zone: ZoneInfo) -> BakeOutcome:

@@ -12,15 +12,19 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bake
 import reconcile
+import store
 import supervisor
 from gantt import Row, Segment
+from test_m6_store_board import make_store_workspace
 
 ZONE = ZoneInfo("America/Chicago")
 KEY = "github:example/project#1"
 OTHER = "github:other/project#1"
+CLOSED = "github:example/project#99"
 
 
 def _dt(day: int, hour: int = 0) -> datetime:
@@ -46,7 +50,7 @@ def _item(**extra):
     return SimpleNamespace(**defaults)
 
 
-def _dec(created: datetime, *, decided_by: str = "zach", answer: str = "", topic: str = "ask", record=None):
+def _dec(created: datetime, *, decided_by: str = "user", answer: str = "", topic: str = "ask", record=None):
     return SimpleNamespace(
         issue_key=KEY,
         topic=topic,
@@ -107,7 +111,7 @@ class JudgeTest(unittest.TestCase):
         ))
         self.assertEqual(outcome.status, "hold")
 
-    def test_zach_row_without_verdicts_fails_s1(self):
+    def test_owner_row_without_verdicts_fails_s1(self):
         outcome = bake.judge(**_kwargs(
             _dt(1), _dt(8),
             decisions=(_dec(_dt(3), record={"unanimous": False}),),
@@ -123,6 +127,15 @@ class JudgeTest(unittest.TestCase):
         ))
         self.assertEqual(outcome.status, "fail")
         self.assertTrue(any("S1:" in line for line in outcome.lines))
+
+    def test_s1_limit_interrupt_reaching_owner_holds(self):
+        outcome = bake.judge(**_kwargs(
+            _dt(1), _dt(8),
+            decisions=(_dec(_dt(3), record={}),),
+            logs=(_log(_dt(3), "limit: reached spend_usd limit"),),
+        ))
+        self.assertEqual(outcome.status, "hold")
+        self.assertFalse(any(line.startswith("S1:") for line in outcome.lines))
 
     def test_s2_one_item_three_segments_one_row(self):
         outcome = bake.judge(**_kwargs(
@@ -144,7 +157,7 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(outcome.status, "fail")
         self.assertTrue(any(line.startswith("S2:") for line in outcome.lines))
 
-    def test_s3_zach_merge_answer_before_merge_fails(self):
+    def test_s3_owner_merge_answer_before_merge_fails(self):
         merge_at = _dt(6)
         outcome = bake.judge(**_kwargs(
             _dt(1), _dt(8),
@@ -162,6 +175,19 @@ class JudgeTest(unittest.TestCase):
             logs=(_log(merge_at, "merged", reconcile.OP_MERGE),),
         ))
         self.assertNotIn("S3:", "\n".join(outcome.lines))
+
+    def test_s3_cleared_merge_human_review_fails(self):
+        merge_at = _dt(6)
+        outcome = bake.judge(**_kwargs(
+            _dt(1), _dt(8),
+            segments=(
+                _seg("merge", 1, _dt(4), _dt(5), outcome="human_review"),
+                _seg("implement", 1, _dt(2), _dt(3)),
+            ),
+            logs=(_log(merge_at, "merged", reconcile.OP_MERGE),),
+        ))
+        self.assertEqual(outcome.status, "fail")
+        self.assertTrue(any(line.startswith("S3:") for line in outcome.lines))
 
     def test_s4_progress_before_new_ask_holds(self):
         restart = _dt(5, 9)
@@ -207,6 +233,21 @@ class JudgeTest(unittest.TestCase):
     def test_missing_start_file_is_incomplete(self):
         outcome = bake.judge(**_kwargs(_dt(1), _dt(8), has_start_file=False, engine_starts=()))
         self.assertEqual(outcome.status, "incomplete")
+
+
+class FlowRowsLoadTest(unittest.TestCase):
+    def test_flow_rows_keeps_keys_when_closed_segmentless_skipped(self):
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        db.upsert_item(CLOSED, workflow="build", stage="merge", forge_state="closed", title="Gone")
+        db.upsert_item(KEY, workflow="build", stage="implement", forge_state="open", title="Live")
+        started = datetime(2026, 10, 9, 10, 0, tzinfo=ZONE)
+        db.record_segment(KEY, "implement", 1, started_at=started.isoformat(),
+                          ended_at=(started + timedelta(hours=1)).isoformat(), outcome="done")
+        rows = bake._flow_rows(db, datetime(2026, 10, 9, 14, 0, tzinfo=ZONE))
+        keys = [key for key, _ in rows]
+        self.assertEqual(keys, [KEY])
+        self.assertNotIn(CLOSED, keys)
 
 
 class RecordEngineStartTest(unittest.TestCase):
