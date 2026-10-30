@@ -32,6 +32,8 @@ import one_shot  # noqa: E402
 import pages as pg  # noqa: E402
 import render_board as rb  # noqa: E402
 import task_forge  # noqa: E402
+from backlog_ref import Backlog  # noqa: E402
+from tracker import issue_key  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
 import tracker_write as tw  # noqa: E402
 from test_flow_chart import BoardTest, CT, KANBAN, LANES, NOW, TODAY, TODAY_TRACKER, YESTERDAY, at, flow_launch_tracker, merged  # noqa: E402
@@ -1069,13 +1071,16 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
         # person it waits on; the board's Flow and the task page read the one cause.
         cfg = BoardTest().cfg()
         src = sources()
+        # The cell says pr. The hold follows the stage Flow keeps, so the Log says pr too (#887).
+        tracker = TODAY_START.replace("- 00:01 opened the day\n",
+                                      "- 00:01 opened the day\n- 00:05 stage: Upload size limit → pr\n")
         for kanban, refs, cause in ((KANBAN, {}, "Robin"), (replace(KANBAN, hold_stages=("pr",)), {}, "pr"),
                                     (replace(KANBAN, hold_stages=("pr",)), {"#109": None}, "decision")):
             with self.subTest(cause=cause):
-                board = self.flow_rows(lambda: rb.render(TODAY_START, cfg, self.NOW2, lanes=LANES, tracker_day=TODAY,
+                board = self.flow_rows(lambda: rb.render(tracker, cfg, self.NOW2, lanes=LANES, tracker_day=TODAY,
                                                          kanban=kanban, stage_log=[(YESTERDAY, YESTERDAY_TRACKER)],
                                                          sources=src, pending_refs=refs))
-                task = self.flow_rows(lambda: ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, TODAY_START)],
+                task = self.flow_rows(lambda: ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, tracker)],
                                                         src, self.NOW2, LANES, cfg, kanban=kanban, pending_refs=refs))
                 self.assertEqual(board["Upload size limit"][1].note, f"needs input · {cause}")
                 self.assertEqual(task["Upload size limit"][1].note, f"needs input · {cause}")
@@ -1112,6 +1117,103 @@ def flow_section(html: str) -> str:
     assert start, "no Flow section"
     after = next((m.start() for m in re.finditer(r"<h2[^>]*>\s*(?!Flow\b)", html[start.end():])), None)
     return text(html[start.start():start.end() + after if after is not None else len(html)])
+
+
+class ClosedIssueHeaderTest(unittest.TestCase):
+    """#886: closed forge issues whose tracker rows are done match the board header, not OPEN."""
+
+    HOME = Backlog("https://labs.example.test", "team/app")
+    URL = "https://labs.example.test/team/app/-/issues/109"
+
+    def cfg(self):
+        # render() scopes forge facts through for_home(cfg.backlog); keep it on the closed issue's home.
+        return replace(BoardTest().cfg(), backlog=self.HOME)
+
+    def closed_sources(self) -> tuple[bs.Sources, bs.Issue]:
+        closed_at = at(TODAY, "01:00").astimezone(timezone.utc)
+        key = issue_key(self.URL, self.HOME)
+        issue = replace(ISSUE, ref=key, url=self.URL, state="closed", closed_at=closed_at)
+        return bs.Sources({}, {key: issue}, {}, (), {}, home=self.HOME), issue
+
+    def header_chip(self, html: str) -> str:
+        header = re.search(r"<header\b.*?</header>", html, re.S)[0]
+        return re.search(r'<span class="chip[^"]*">([^<]+)</span>', header)[1]
+
+    def render_page(self, src: bs.Sources, trackers: list) -> str:
+        return ip.render(109, trackers, src, NOW, LANES, self.cfg())
+
+    def test_done_tracker_and_closed_issue_show_done_or_closed_not_open(self):
+        src, _ = self.closed_sources()
+        tracker = DONE_TRACKER.replace("#109", self.URL)
+        chip = self.header_chip(self.render_page(src, [(TODAY, tracker)]))
+        self.assertNotRegex(chip, r"(?i)^(open|waiting|running|needs input)$")
+        self.assertRegex(chip, r"(?i)^(done|closed)$")
+
+    def test_render_passes_sources_home_to_flow_chart_build(self):
+        src, _ = self.closed_sources()
+        with mock.patch.object(fc, "build", wraps=fc.build) as build:
+            self.render_page(src, [(TODAY, DONE_TRACKER)])
+        self.assertIs(build.call_args.kwargs.get("home"), self.HOME)
+
+    def test_the_board_and_task_page_agree_on_a_closed_issues_flow_status(self):
+        src, issue = self.closed_sources()
+        tracker = DONE_TRACKER.replace("#109", self.URL)
+        cfg = self.cfg()
+        board_rows = ForgeMergedTaskPageTest.flow_rows(
+            lambda: rb.render(tracker, cfg, NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
+                               stage_log=[(YESTERDAY, YESTERDAY_TRACKER)], sources=src))
+        task_html = self.render_page(src, [(TODAY, tracker)])
+        task_chip = re.search(r'<span class="chip (\w+)">', re.search(r"<header\b.*?</header>", task_html, re.S)[0])[1]
+        status, row = board_rows["Upload size limit"]
+        self.assertEqual((status, row.note), ("closed", f"closed {at(TODAY, '01:00'):%H:%M}"))
+        card = next(c for col in rb.build_columns(rb.parse_tracker(tracker).tasks, LANES, KANBAN, src, NOW, {})
+                    for c in col.cards if c.name == "Upload size limit")
+        self.assertEqual(task_chip, card.kind)
+        refs = text(section(task_html, "References"))
+        self.assertRegex(refs, r"(?i)\bclosed\b")
+
+    def test_an_open_held_issue_keeps_needs_input_even_when_a_change_merged(self):
+        # #886 must not treat forge_ends "merged" as a finished header while the issue is still open and held —
+        # the board and engine-health pages keep NEEDS INPUT (#936).
+        merged_at = at(TODAY, "01:00").astimezone(timezone.utc)
+        src = sources(replace(MR, state="merged", merged_at=merged_at, approved=True, pipeline="passed"))
+        today = today_tracker()  # #109 waits on Robin (held)
+        chip = self.header_chip(page(109, src=src, today=today))
+        self.assertRegex(chip, r"(?i)^needs input$")
+        self.assertNotRegex(chip, r"(?i)^(merged|closed|done)$")
+
+    def test_open_store_human_review_keeps_needs_input_when_a_change_merged(self):
+        # Exact #936 / engine-health shape: open forge issue, human_review hold, PR already merged.
+        import shutil
+        from test_m6_store_board import KEY, make_store_workspace
+
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        db.upsert_item(KEY, workflow="build", stage="review", forge_state="open",
+                       title="Upload size limit", human_review=True)
+        merged_at = (NOW - timedelta(minutes=15)).astimezone(timezone.utc)
+        src = bs.Sources(
+            fetched={"kanban": NOW, "merge requests": NOW, "workers": NOW},
+            issues={
+                KEY: bs.Issue("#12", "https://github.com/example/repo/issues/12",
+                              "Upload size limit", "open", ("Needs input",)),
+                "#12": bs.Issue("#12", "https://github.com/example/repo/issues/12",
+                                "Upload size limit", "open", ("Needs input",)),
+            },
+            changes={
+                "#21": bs.Change("#21", "https://github.com/example/repo/pull/21", "Upload size limit",
+                                 "merged", False, "passed", True, 1, merged_at,
+                                 "main", ("src/upload.py",), (KEY, "#12")),
+            },
+            workers=(),
+            errors={},
+            home=bs.backlog.GitHubBacklog("example/repo"),
+        )
+        html = ip.render(KEY, [], src, NOW, LANES, db=task_forge.page_data(db))
+        chip = self.header_chip(html)
+        self.assertRegex(chip, r"(?i)^needs input$")
+        self.assertNotRegex(chip, r"(?i)^(merged|closed|done)$")
 
 
 # 17:16 yesterday plus 8h25m is 01:41 today; an hour later is 02:41. One minute of work is 17:16–17:17.

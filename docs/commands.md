@@ -423,20 +423,103 @@ Examples:
 ### `pages`
 
 ```text
-usage: pages.py [-h] [--ensure] [--root ROOT] [--dir DIR] [--port PORT]
-                [{serve,supervise,install,uninstall,status}]
+usage: chief-of-stuff pages [-h] [--ensure] [--root ROOT] [--dir DIR] [--port PORT]
+                            [{serve,supervise,install,uninstall,status}]
 
 Serve the workspace's pages locally: the board and any page a session writes beside it.
 
+The pages are routes: `/` the board, `/workers` the running workers and today's ends, `/decisions` the list,
+`/decisions/<slug>` an authored decision page, `/decisions/<id>` (digits only) a store decision's page rendered
+from the store (#945), `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
+and diff. `/workers/` and `/decisions/` are the same pages as the bare routes (#988); other directory URLs stay 404
+(#340). A missing `/favicon.ico` answers 204 so the browser console stays clean; a real icon in the pages dir is
+served. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
+`issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the file's own name is a 404.
+A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the settings TOML, the decision JSON,
+`.sources.json`) is newer than its last render, or differs in bytes from what that render read, and `/workers` on every GET (it reads the session logs too), and a thread refreshes `.sources.json` from the forge every minute. An open tab
+reloads itself when the file changes.
+
+    chief-of-stuff pages [--ensure] [--root R]            # start it unless it is already serving; print status only
+    chief-of-stuff pages serve --dir D --port P --root R  # what --ensure starts, detached
+    chief-of-stuff pages install|uninstall|status [--root R]  # the independent board LaunchAgent (#935)
+    chief-of-stuff pages supervise [--root R]             # what that LaunchAgent runs: ensure, every POLL seconds
+    chief-of-stuff pages --board [--date D] [--root R]    # what `chief-of-stuff board` runs: write the board file, no server
+
+A decision page posts the user's answer to `POST /decisions/<slug>` (`key` and/or `words`, form-encoded).
+The server saves it as the decision JSON's `answer` ({key, words, at}) for the coordinator's next pass, and
+redirects back to the page, which then shows the decision answered.
+
+The `## Coordinator` block's `Board:` line names both halves: `URL http://127.0.0.1:<port>/` and
+``dir `<pages dir>` ``. It listens on 127.0.0.1 only, and it answers only requests whose Host is
+127.0.0.1 or localhost. `/` is today's board once today's tracker exists, else the newest one; `/all` lists every other file a session
+wrote there. Binding to loopback does not stop a page elsewhere from rebinding its own
+name to 127.0.0.1, but that page still sends its own name as the Host.
+
 positional arguments:
   {serve,supervise,install,uninstall,status}
+                        string; default omitted (ensure); serve is the internal foreground server,
+                        supervise the LaunchAgent's loop, install|uninstall|status manage that
+                        LaunchAgent
 
 options:
   -h, --help            show this help message and exit
-  --ensure              start the server unless it is serving; print status only
-  --root ROOT           workspace root holding CLAUDE.md (default: the current directory)
-  --dir DIR
-  --port PORT
+  --ensure              flag; default off; ensure the server (also the bare command's behavior)
+  --root ROOT           path; default . when ensuring, none with serve; workspace holding
+                        CLAUDE.md
+  --dir DIR             path; default none; required with serve, ignored otherwise; pages
+                        directory
+  --port PORT           integer; default none; required with serve, ignored otherwise; listen port
+
+When not to use:
+  To open the board for the user, use a browser: nothing here ever opens it. To write the board file without a
+  server, use chief-of-stuff board. To write a decision page, use chief-of-stuff decision. Agents do not run
+  serve: --ensure starts it detached.
+
+Output:
+  Text, not TOON or JSON, except status (a TOON record). Ensuring prints exactly one stdout status line, never
+  the URL: pages: serving (the same or a newer version already answers), pages: started, or pages: restarted
+  (an older pages server was replaced). install and uninstall print one line saying what changed. status prints
+  the board and the engine separately: board state, port, pid, whether the LaunchAgent exists, whether a
+  supervisor holds the board. serve and supervise print no status line; a detached serve appends its stdout and
+  stderr to <root>/.chief-of-stuff/pages.log. Failures print pages: not served - <reason> (ensuring) or
+  pages: <reason> (install, uninstall, status) on stderr; usage faults print usage and an error on stderr.
+
+Exit codes:
+  0  serving, started or restarted; install, uninstall or status succeeded; help printed; serve and
+     supervise run until stopped (SIGTERM or SIGINT end supervise with 0).
+  1  ensuring failed: missing Board line or unreadable config, a foreign server owns the port, an older server
+     cannot be identified or stopped, the new server did not come up, or a connection was denied (often a sandbox).
+  2  usage fault (unknown argument, serve without --dir and --port, --port not an integer), or install,
+     uninstall or status failed (pages: <reason> on stderr).
+
+Side effects:
+  Ensuring reads the Board line, probes HEAD http://127.0.0.1:<port>/all and, for an older server, reads
+  <pages dir>/.pid and checks that process's command line. It creates the pages and log directories, appends
+  <root>/.chief-of-stuff/pages.log, writes .pid only after a new server answers, and may SIGTERM an older pages
+  serve on that port. It never switches to another port.
+  install needs macOS and a Board line; it writes the board LaunchAgent under the supervisor lock and loads it; uninstall removes the agent and
+  leaves a running page server serving until it stops or the Mac restarts; status writes nothing. supervise
+  checks the server every few seconds and restarts it (what the LaunchAgent runs).
+  The server binds only to 127.0.0.1 and accepts only a 127.0.0.1 or localhost Host. Routes: / is today's board
+  once today's tracker exists, else the newest board; /workers (and /workers/) the running workers and today's
+  ends; /decisions (and /decisions/) the list; /decisions/<slug> an authored decision; /decisions/<id> (digits)
+  a store decision rendered from the store; /issues/<n> and /issues/<n>/source; /all every other non-hidden
+  file a session wrote there. Rendered HTML files are served only through their routes, not their filenames.
+  A GET (and HEAD) re-renders a page when its sources change in time or bytes; /workers renders on every GET.
+  Rendering writes HTML into the pages directory, keeping unchanged files; an open tab reloads itself. A render
+  failure keeps the last good page with an error banner. A background thread reads forge and worker facts at
+  start and about every 60 seconds and writes <pages dir>/.sources.json.
+  POST /decisions/<slug> (form: key and/or words) writes that decision JSON's answer {key, words, at}. POST / (a
+  store decision's form) records an answer, reversal or re-route as an intent row that the engine alone
+  applies: the request never touches the forge or a card. POST /workers/sessions/<n>/messages records a message
+  for that worker session in the store (same-origin form only). Only this machine's own pages may post.
+  No forge writes and no --commit, preview or dry run: writes happen as the server runs.
+
+Examples:
+  chief-of-stuff pages --ensure --root ~/work/field-notes
+  chief-of-stuff pages status --root ~/work/field-notes
+  chief-of-stuff pages install --root ~/work/field-notes
+  chief-of-stuff pages --help
 ```
 
 ### `decisions`

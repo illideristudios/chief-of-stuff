@@ -914,13 +914,13 @@ class StoreIndexTest(unittest.TestCase):
         import decision_actions
         self.store.upsert_item("github:example/repo#10", title="Auth flow", stage="implement", forge_state="open")
         self.store.upsert_item("github:example/repo#11", title="Closed item", stage="merge", forge_state="closed")
-        self.store.add_decision("github:example/repo#10", "scope", "Split auth token refresh?",
+        self.store.add_decision("github:example/repo#10", "scope", "Split auth token refresh?", None, "zach",
                                 asked_at="2026-09-26T01:15:00-05:00")
         self.store.add_decision("github:example/repo#10", "plan", "Approve rollout gate?",
                                 asked_at="2026-09-26T01:45:00-05:00",
                                 record={"status": "blocked", "blocked_reason": "awaiting owner"})
         self.store.add_decision("github:example/repo#11", "scope", "Stale question on closed issue?",
-                                asked_at="2026-09-26T01:50:00-05:00")
+                                decided_by="owner", asked_at="2026-09-26T01:50:00-05:00")
         data = self.page_data()
         nav = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
         self.assertEqual(nav["decisions"], 2)
@@ -944,6 +944,42 @@ class StoreIndexTest(unittest.TestCase):
         self.assertNotIn("Stale question on closed issue?", page)
         self.assertIn("0 completed today", page)
         self.assertIn(" · 0</h2>", done)
+
+        # Closing the issue excludes an owner wait; reopening it makes the same decision pending again.
+        self.store.upsert_item("github:example/repo#11", forge_state="open")
+        data = self.page_data()
+        nav = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+        self.assertEqual(nav["decisions"], 3)
+        page, _ = dp.index(self.pages, dp.Context(NOW), "2026-09-26", db=data, navigation=nav)
+        self.assertIn("Stale question on closed issue?", page.split("COMPLETED")[0])
+
+    def test_only_a_decision_needs_owner_names_waits_on_the_owner_or_counts_as_pending(self):
+        """C30 (#1152): an unanswered newest row whose decided_by is empty (a trio retry, or an old permission row)
+        waits on no one; only a row routed to the owner does."""
+        import decision_actions
+        key = "github:example/repo#10"
+        self.store.upsert_item(key, title="Auth flow", stage="implement", forge_state="open")
+        retry = self.store.add_decision(key, "ask", "Permission requested for Bash", None, "",
+                                        {"decision": {"options": ["allow", "deny"], "instance": "ask-1"}, "failures": 1},
+                                        asked_at="2026-09-26T01:00:00-05:00")
+        legacy = self.store.add_decision(key, "permission", "Permission requested for Read",
+                                         record={"options": ["allow", "deny"], "why": "outside the worktree"},
+                                         asked_at="2026-09-26T01:05:00-05:00")
+        owner = self.store.add_decision(key, "scope", "Split auth token refresh?", None, "owner",
+                                        asked_at="2026-09-26T01:10:00-05:00")
+        data = self.page_data()
+        nav = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+        self.assertEqual(nav["decisions"], 1)
+        page, _ = dp.index(self.pages, dp.Context(NOW), "2026-09-26", db=data, navigation=nav)
+        pending = page.split("COMPLETED")[0]
+        self.assertIn("1 pending", page)
+        self.assertIn("Split auth token refresh?", pending)
+        self.assertNotIn("Permission requested", pending)
+        ctx = dp.Context(NOW, user="Robin")
+        self.assertIn("<p>Robin</p>", dp.store_page(data.decision_rows, owner.id, ctx))
+        for row in (retry, legacy):
+            with self.subTest(row=row.topic):
+                self.assertIn("no one: answered by the engine", dp.store_page(data.decision_rows, row.id, ctx))
 
     def test_completed_store_decisions_answered_today_in_workspace_zone_appear_under_completed(self):
         self.store.upsert_item("github:example/repo#10", title="Auth flow", stage="implement", forge_state="open")
@@ -978,7 +1014,7 @@ class StoreIndexTest(unittest.TestCase):
         own, foreign = "github:team/app#9", "github:o/n#4"
         for key, question in ((own, "Ship?"), (foreign, "Wait?")):
             self.store.upsert_item(key, title=question, stage="implement", forge_state="open")
-            self.store.add_decision(key, "scope", question, asked_at=NOW.isoformat())
+            self.store.add_decision(key, "scope", question, None, "zach", asked_at=NOW.isoformat())
         page, _ = dp.index(self.pages, dp.Context(NOW, forge=GitHubBacklog("team/app")), NOW.date().isoformat(),
                            db=self.page_data())
         self.assertIn(f'href="{escape(issue_href(own))}">#9</a>', page)
@@ -992,7 +1028,7 @@ class StoreIndexTest(unittest.TestCase):
         new = self.store.add_decision(key, "scope", "Approve this file ownership?", None, "zach", asked_at=NOW.isoformat(),
                                       record={"default": "Not written: nothing is written unapproved.",
                                               "status": "blocked", "blocked_reason": "awaiting owner"})
-        old = self.store.add_decision(key, "design", "Split the parser?", asked_at=NOW.isoformat())
+        old = self.store.add_decision(key, "design", "Split the parser?", None, "zach", asked_at=NOW.isoformat())
         rows = self.page_data().decision_rows
         page = dp.store_page(rows, new.id, dp.Context(NOW))
         fallback = page.split("If you don't answer")[1]

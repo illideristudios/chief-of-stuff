@@ -1,6 +1,7 @@
 """The one installed command routes fixed operations and preserves release pinning."""
 
 import io
+import json
 import os
 import re
 import shlex
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
+import claude_adapter  # noqa: E402
 import performance_report  # noqa: E402
 import probe_health  # noqa: E402
 import shell_setup  # noqa: E402
@@ -34,7 +36,7 @@ def _help_sections(help_text: str) -> dict[str, str]:
 
 
 # A per-command help issue opts in here after bringing its parser up to the standard.
-ENFORCED = frozenset({"docs", "health", "init", "performance"})
+ENFORCED = frozenset({"docs", "health", "init", "pages", "performance"})
 
 
 def missing_sections(help_text: str, name: str) -> list[str]:
@@ -180,6 +182,31 @@ class CommandHelpTest(unittest.TestCase):
                 self.assertEqual(help_text.split("\n\n")[1].splitlines()[0], purpose)
 
 
+class PagesCommandTest(unittest.TestCase):
+    def pages(self, *args):
+        return subprocess.run([sys.executable, str(ROOT / "chief_of_stuff.py"), "pages", *args],
+                              capture_output=True, text=True)
+
+    def test_help_is_the_agent_command_reference(self):
+        done = self.pages("--help")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(missing_sections(done.stdout, "pages"), [], done.stdout)
+        for text in ("--ensure", "/workers", "re-render", "nothing here ever opens it", "supervise", "install",
+                     "uninstall", "status", "--board", "/decisions/<id>", "POST / ", "pages.log"):
+            self.assertIn(text, done.stdout)
+        self.assertNotIn("pages: started", done.stdout.splitlines())
+
+    def test_serve_requires_directory_and_port(self):
+        for args in (("serve",), ("serve", "--dir", "."), ("serve", "--port", "8787")):
+            with self.subTest(args=args):
+                done = self.pages(*args)
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertEqual(done.stdout, "")
+                self.assertIn("usage:", done.stderr)
+                self.assertNotIn("Traceback", done.stderr)
+
+
 class InstallTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -188,12 +215,24 @@ class InstallTest(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.share = self.root / "share"
+        # No test runs the real claude: the install's plugin step answers from here.
+        patcher = mock.patch.object(claude_adapter, "update_plugin", return_value={"plugin": "reported"})
+        self.plugin = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def install(self, **kwargs):
         return cli.install(source=ROOT, install_dir=self.share, bin_dir=self.bin, **kwargs)
 
+    def test_an_install_brings_the_plugin_to_the_release_and_reports_it(self):
+        # §14: I → Pl ∨ F. The plugin step reports where the plugin stands; the install passes that on.
+        result = self.install()
+        version = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())["version"]
+        self.plugin.assert_called_once_with(self.share / "current", version)
+        self.assertEqual(result["plugin"], "reported")
+
     def test_dry_run_does_not_write(self):
         result = self.install(dry_run=True)
+        self.plugin.assert_not_called()
         self.assertFalse(result["installed"])
         self.assertTrue(result["wrapper_write"])
         self.assertFalse(self.share.exists())
@@ -353,6 +392,18 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                     self.assertEqual(code, 0)
                     self.assertTrue(out.getvalue().startswith("usage:"), out.getvalue())
 
+    def test_bad_arguments_of_store_backed_commands_exit_2_without_bootstrapping(self):
+        bad = {"pages": ["serve"], "performance": [], "limits": ["--root"], "work": [],
+               "engine": ["--interval", "soon"], "decision": [], "adopt": ["--bogus"]}
+        self.assertLessEqual(set(bad), cli.STORE_BACKED)
+        for name, argv in bad.items():
+            with self.subTest(command=name), \
+                 mock.patch.object(supervisor, "lock", side_effect=AssertionError("bootstrap")), \
+                 mock.patch.object(supervisor, "ensure_venv", side_effect=AssertionError("bootstrap")), \
+                 mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                self.assertEqual(cli.main([name, *argv]), 2)
+                self.assertIn("usage:", err.getvalue())
+
     def test_help_bootstraps_only_when_this_interpreter_lacks_the_dependencies(self):
         missing = subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: No module named 'sqlalchemy'")
         with mock.patch.object(cli.subprocess, "run", return_value=missing), \
@@ -450,7 +501,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                                side_effect=supervisor.ServiceError("no python3 on the login shell's PATH")), \
              mock.patch.object(cli.os, "execv") as execv, \
              mock.patch.object(sys, "stderr", buf):
-            code = cli.main(["performance"])
+            code = cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(code, 1)
         self.assertIn("refused:", buf.getvalue())
         self.assertIn("no python3", buf.getvalue())
@@ -463,7 +514,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                                side_effect=shell_setup.ShellError("configured login shell '/missing' is not executable")), \
              mock.patch.object(cli.os, "execv") as execv, \
              mock.patch.object(sys, "stderr", buf):
-            code = cli.main(["performance"])
+            code = cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(code, 1)
         self.assertIn("refused:", buf.getvalue())
         self.assertIn("not executable", buf.getvalue())
@@ -475,7 +526,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
              mock.patch.object(supervisor, "ensure_venv", side_effect=OSError("permission denied")), \
              mock.patch.object(cli.os, "execv") as execv, \
              mock.patch.object(sys, "stderr", buf):
-            code = cli.main(["performance"])
+            code = cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(code, 1)
         self.assertIn("refused:", buf.getvalue())
         self.assertIn("permission denied", buf.getvalue())
@@ -500,7 +551,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
              mock.patch.object(supervisor, "data_dir", return_value=data), \
              mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)):
             with self.assertRaises(SystemExit):
-                cli.main(["performance"])
+                cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(order, [
             ("lock", data / "supervisor.lock", True),
             ("ensure", data),
