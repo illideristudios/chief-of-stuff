@@ -32,7 +32,9 @@ import clock
 import guard_binding
 from model_port import Reply, Request
 
-STAMP = re.compile(r"\[Current TimeStamp: .+ \| (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) .+ \(UTC([+-]\d\d:\d\d)\)\]")
+STAMP = re.compile(
+    r"\[Current TimeStamp: [^|\]]+ \| (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) [^\]]+ \(UTC([+-]\d\d:\d\d)\)\]"
+)
 SCHEMA = {
     "type": "object",
     "properties": {"lines": {"type": "array", "items": {"type": "string"}}},

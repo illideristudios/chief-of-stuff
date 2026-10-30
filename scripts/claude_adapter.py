@@ -592,7 +592,7 @@ def _kill_and_drain(process: subprocess.Popen) -> tuple[str, str]:
     """Reap the leader and bound pipe draining even if a descendant escaped its group."""
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         pass
     except PermissionError:
         # macOS can report EPERM for a process group whose leader already exited.
