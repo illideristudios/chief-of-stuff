@@ -601,7 +601,7 @@ The graph exists to prevent decision poisoning: superseded decisions left in a c
 - **Leaves only, by default.** An agent sees the current decisions, those nothing has replaced.
 - **A leaf is a whole decision.** It carries the full decision text as a usable unit, not a diff, with its reason. The reason of a current leaf is always granted.
 - **Provenance is by links to parents.** A leaf may replace several earlier decisions, so the structure is a graph, not a tree. Rejected alternatives live only in ancestors, never in a leaf.
-- **One tool.** History is reached only through the approved tool, the only way an agent reaches the graph. The coordinator, the architect and the owner read freely, and should not routinely, to protect their context. The owner's view for traversing the graph is open (section 19).
+- **One tool.** History is reached only through the approved tool, the only way an agent reaches the graph. The coordinator, the architect and the owner read freely, and should not routinely, to protect their context. The owner traverses the graph on its own pages (below).
 - **History needs a justified, approved request.** The tool refuses a request for ancestors and tells the worker to justify it. The justification goes to the coordinator, which is harsh and judges the text without reading the history. On approval, the tool returns the slice straight to the worker, as far up as the justification requires and the coordinator approves. Every grant is logged (call).
 - **Grant:** two current decisions contradict, and the request states exactly what each requires that cannot both hold; or a current decision does not match what the code shows, and the mismatch is also reported to the architect.
 - **Deny:** a reviewer finding that contradicts a leaf, on which the coordinator rules from the leaf and its reason; "more context"; "looks related"; "the decision is unclear"; "double-checking my own work"; any request that meets no grant case.
@@ -630,6 +630,8 @@ As built (#1181), the rules above hold this way:
 - **No direct read.** The worker guard denies a worker's `sqlite3` (or `sqlite`), any run of `decisions_cli.py`, and `chief-of-stuff decisions`, with the reason that history is reached only through the tool. The guard is a Claude Code hook, so a worker on a host without that Bash guard can still open the store directly (`compliance.md` row C42).
 - **The worker waits without polling a model.** The tool records the request, opens a named pipe for its verdict, and only then posts the request to the coordinator. Each wait cycle checks the store first and returns at once when a verdict is already there; otherwise it waits on the pipe, registered as a reader on the server's event loop, which the coordinator's verdict writes to. A one-second recheck of the store covers a pipe that could not be opened or a missed wake.
 - **The graph's storage is reversible.** Migration `0012_decision_graph` keeps the graph in the store and has a downgrade, as does `0011_rotation_records` (#1187). Migrations `0001` to `0010` have none, so the store steps back no further than `0010`.
+- **The owner's view is two read-only pages** (pull request 1203, `decision_graph_page.py`). `/decisions/graph` lists the current leaves, each with its full decision text and reason and a link to `/decisions/graph/<id>`. That page shows one decision, its parents and its children as links, and, only for a superseded decision, its rejected alternatives with their reasons (`scripts/decision_graph_page.py:167`), so a leaf never shows one. Both render on request from a snapshot of the store's graph (`Store.decision_graph_nodes`, `scripts/store.py:1089`). They call no history tool, log no grant and write nothing to the store, and the page server refuses any POST to them (`scripts/pages.py:1216`). They are cycle-safe: the parent and child maps are deduplicated and built in one pass over the nodes and edges, so a cycle in the stored edges cannot loop the render (`_graph_maps`, `scripts/decision_graph_page.py:44`). A path under `/decisions/graph/` that is not a number is refused with 404 (`scripts/pages.py:699-703`), and an id the graph does not hold renders no page and removes any stale file for it (`scripts/decision_graph_page.py:239-241`). The decision pages link to the view (`scripts/decision_page.py:1040`).
+- **The pages are open to any local reader.** The page server serves them to every request, and the rendered files sit in the pages directory, so a worker that fetches `/decisions/graph/<id>` or reads `decisions-graph-<id>.html` reaches ancestors and rejected alternatives without the tool, and the guard denies neither (`compliance.md` row C46).
 
 ```
 Rq := a worker requests history      Tl := the request goes through the decisions MCP tool      Gd := the guard denies the command
@@ -641,6 +643,16 @@ Vr := a verdict is recorded      Pw := the worker's tool is waiting on the pipe 
 3.  Ad = min(Rd, Dj), Dj = 1 when the text names no depth      [scripts/decision_history.py:180; owner, 2026-10-29: "as far up as the justification requires"]
 4.  Vr → Wk                              [scripts/engine_mcp.py:132: the store is checked first; :149: the pipe wakes the loop]
 ∴   on a Claude host every worker read of history goes through the tool (1), the depth granted never exceeds what the justification names (3), and a verdict reaches the waiting worker without a model loop (4); on other hosts, 2 is the open gap
+```
+
+```
+Ov := the owner's graph pages render      Lg := a grant is logged      Wr := the render writes to the store or calls the history tool
+Cy := the stored edges contain a cycle      Hl := the render terminates      Pg := a worker fetches or reads the graph pages      Tl := the read goes through the tool
+1.  Ov → ¬Lg ∧ ¬Wr                     [scripts/decision_graph_page.py:1-6, :210-243; scripts/pages.py:1216]
+2.  Cy → Hl                            [scripts/decision_graph_page.py:44: deduplicated maps built in O(V + E)]
+3.  the owner reads freely             [owner, 2026-10-29: rule 4 above]
+4.  Pg ∧ ¬Tl                           [scripts/pages.py:697-703 serve every GET; no guard rule names the page server; C46]
+∴   the owner's view is read-only and cannot loop (1 to 3), and the open item of section 19 is closed; a worker's read of those pages bypasses the tool (4), which is gap C46
 ```
 
 ## 18. Observability, heartbeat and stalls
@@ -717,7 +729,6 @@ X := the integration counts as a success
 These are unsettled. Nothing in this document settles them, and work that depends on one waits for the owner's answer.
 - The definition of success, which also blocks auto mode (section 9).
 - The names of modes beyond auto, deferred until the system is tried (section 9).
-- The view for traversing the decision graph (section 17).
 - Deep-link behaviour in the real app, which needs a click in the desktop app (section 18).
 - Interrupting and renaming a thread from outside T3. The `t3` CLI has neither; both are MCP tools that need an outside-agent login and an MCP client in the engine (section 18, heartbeat A; and cancel, section 13). That client is a new dependency, so it is adopted only on the owner's approval.
 - A cross-project meta dashboard, deferred (section 12).
