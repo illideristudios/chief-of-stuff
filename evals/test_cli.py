@@ -377,6 +377,18 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                     self.assertEqual(code, 0)
                     self.assertTrue(out.getvalue().startswith("usage:"), out.getvalue())
 
+    def test_bad_arguments_of_store_backed_commands_exit_2_without_bootstrapping(self):
+        bad = {"pages": ["serve"], "performance": [], "limits": ["--root"], "work": [],
+               "engine": ["--interval", "soon"], "decision": [], "adopt": ["--bogus"]}
+        self.assertLessEqual(set(bad), cli.STORE_BACKED)
+        for name, argv in bad.items():
+            with self.subTest(command=name), \
+                 mock.patch.object(supervisor, "lock", side_effect=AssertionError("bootstrap")), \
+                 mock.patch.object(supervisor, "ensure_venv", side_effect=AssertionError("bootstrap")), \
+                 mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                self.assertEqual(cli.main([name, *argv]), 2)
+                self.assertIn("usage:", err.getvalue())
+
     def test_help_bootstraps_only_when_this_interpreter_lacks_the_dependencies(self):
         missing = subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: No module named 'sqlalchemy'")
         with mock.patch.object(cli.subprocess, "run", return_value=missing), \
@@ -474,7 +486,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                                side_effect=supervisor.ServiceError("no python3 on the login shell's PATH")), \
              mock.patch.object(cli.os, "execv") as execv, \
              mock.patch.object(sys, "stderr", buf):
-            code = cli.main(["performance"])
+            code = cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(code, 1)
         self.assertIn("refused:", buf.getvalue())
         self.assertIn("no python3", buf.getvalue())
@@ -487,7 +499,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                                side_effect=shell_setup.ShellError("configured login shell '/missing' is not executable")), \
              mock.patch.object(cli.os, "execv") as execv, \
              mock.patch.object(sys, "stderr", buf):
-            code = cli.main(["performance"])
+            code = cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(code, 1)
         self.assertIn("refused:", buf.getvalue())
         self.assertIn("not executable", buf.getvalue())
@@ -499,7 +511,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
              mock.patch.object(supervisor, "ensure_venv", side_effect=OSError("permission denied")), \
              mock.patch.object(cli.os, "execv") as execv, \
              mock.patch.object(sys, "stderr", buf):
-            code = cli.main(["performance"])
+            code = cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(code, 1)
         self.assertIn("refused:", buf.getvalue())
         self.assertIn("permission denied", buf.getvalue())
@@ -524,7 +536,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
              mock.patch.object(supervisor, "data_dir", return_value=data), \
              mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)):
             with self.assertRaises(SystemExit):
-                cli.main(["performance"])
+                cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(order, [
             ("lock", data / "supervisor.lock", True),
             ("ensure", data),

@@ -1858,16 +1858,21 @@ def main(argv: list[str] | None = None) -> int:
     # shortcut: --ensure is unused; the bare command already ensures; drop the flag when every caller stops passing it.
     ap.add_argument("--ensure", action="store_true", help="flag; default off; ensure the server (also the bare command's behavior)")
     ap.add_argument("--root", help="path; default . when ensuring, none with serve; workspace holding CLAUDE.md")
+    dir_action = ap.add_argument("--dir", help="path; default none; required with serve, ignored otherwise; pages directory")
+    port_action = ap.add_argument("--port", type=int, help="integer; default none; required with serve, ignored otherwise; listen port")
+
+    class ServeNeedsDirAndPort(argparse.Action):  # argparse checks `required` once the whole line is parsed
+        def __call__(self, parser, namespace, value, option_string=None):
+            namespace.command = value
+            dir_action.required = port_action.required = value == "serve"
+
     ap.add_argument("command", nargs="?", choices=("serve", "supervise", "install", "uninstall", "status"),
+                    action=ServeNeedsDirAndPort,
                     help="string; default omitted (ensure); serve is the internal foreground server, supervise "
                          "the LaunchAgent's loop, install|uninstall|status manage that LaunchAgent")
-    ap.add_argument("--dir", help="path; default none; required with serve, ignored otherwise; pages directory")
-    ap.add_argument("--port", type=int, help="integer; default none; required with serve, ignored otherwise; listen port")
     ap.add_argument("--handoff-ready-fd", type=int, help=argparse.SUPPRESS)
     args = ap.parse_args(args_list)
     if args.command == "serve":
-        if args.dir is None or args.port is None:
-            ap.error("serve requires --dir and --port")
         make_server(Path(args.dir), args.port, Path(args.root) if args.root else None).serve_forever()
         return 0
     root = Path(args.root or ".")

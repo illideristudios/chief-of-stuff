@@ -72,6 +72,21 @@ COMMANDS = {name: script for name, (script, _) in COMMAND_REGISTRY.items() if sc
 STORE_BACKED = frozenset({"adopt", "board", "decision", "decisions", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
 
 
+# Runs a script's main() only as far as argument parsing: argparse exits 0 for help and 2 for bad
+# arguments itself, and a successful parse stops the run with 75 before the command does any work.
+PARSE_PROBE = """\
+import argparse, os, runpy, sys
+script = sys.argv[1]
+sys.argv, sys.path[0] = [script, *sys.argv[2:]], os.path.dirname(script)
+parse = argparse.ArgumentParser.parse_known_args
+def parse_only(self, *args, **kwargs):
+    parse(self, *args, **kwargs)
+    raise SystemExit(75)
+argparse.ArgumentParser.parse_known_args = parse_only
+sys.exit(runpy.run_path(script, run_name="probe")["main"](sys.argv[1:]))
+"""
+
+
 def command_purpose(name: str) -> str:
     """Read a purpose without importing or executing the routed script."""
     script, _ = COMMAND_REGISTRY[name]
@@ -275,16 +290,19 @@ def main(argv: list[str] | None = None) -> int:
     if not target.is_file():
         print(f"installed command is missing: {target}", file=sys.stderr)
         return 1
-    if args[0] in STORE_BACKED and {"-h", "--help"} & set(args[1:]):
-        # Help must not install the engine venv (offline CI, first run). Bootstrap only when this interpreter
-        # cannot import the script's dependencies.
-        done = subprocess.run([sys.executable, str(target), *(["--board"] if args[0] == "board" else []), *args[1:]],
+    if args[0] in STORE_BACKED:
+        # Help and usage errors must not install the engine venv (offline CI, first run). Parse under this
+        # interpreter; exit 0 (help) and 2 (bad arguments) are final. Anything else, including an import
+        # failure for lack of dependencies, falls through to the bootstrap and the real run.
+        # shortcut: valid invocations import the script twice, drop the probe if startup cost matters.
+        done = subprocess.run([sys.executable, "-c", PARSE_PROBE, str(target),
+                               *(["--board"] if args[0] == "board" else []), *args[1:]],
                               capture_output=True, text=True)
-        if "ModuleNotFoundError" not in done.stderr:
+        if done.returncode in (0, 2):
             sys.stdout.write(done.stdout)
             sys.stderr.write(done.stderr)
             return done.returncode
-    if args[0] in STORE_BACKED:
+
         scripts_dir = str(SOURCE / "scripts")
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)
