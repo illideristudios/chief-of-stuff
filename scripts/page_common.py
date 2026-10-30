@@ -109,6 +109,65 @@ _MARKDOWN.renderer.rules['strong_close'] = lambda *args: '</b>'
 # The threaded page server shares this parser, whose ruler caches compile lazily.
 _MARKDOWN_LOCK = RLock()
 
+# Code spans use a matching run of backticks; code blocks are protected using the block parser below.
+_COMMENT_OR_CODE = re.compile(
+    r"(?P<code>(?<!`)(?P<ticks>`+)(?!`).*?(?<!`)\2(?!`))|(?P<comment><!--.*?-->)",
+    re.DOTALL,
+)
+
+
+def drop_html_comments(text: str) -> str:
+    """Drop complete forge-hidden comments, preserving literal comments in Markdown code."""
+    def block_ranges(source: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+        offsets = [0]
+        for line in source.splitlines(keepends=True):
+            offsets.append(offsets[-1] + len(line))
+        blocks = MarkdownIt('commonmark', {'html': True}).parse(source)
+        def ranges(types: tuple[str, ...]) -> list[tuple[int, int]]:
+            return [(offsets[t.map[0]], offsets[t.map[1]]) for t in blocks if t.type in types and t.map]
+        return ranges(('fence', 'code_block')), ranges(('inline',))
+
+    protected, inline = block_ranges(text)
+    pos = 0
+    while pos < len(text):
+        block = next(((start, end) for start, end in protected if end > pos), None)
+        if block and block[0] <= pos:
+            pos = block[1]
+            continue
+        match = _COMMENT_OR_CODE.search(text, pos)
+        if block and (match is None or block[0] <= match.start() or
+                      (match.group('code') and block[0] < match.end())):
+            # An inline code span cannot cross a block boundary.
+            match = _COMMENT_OR_CODE.search(text, pos, block[0])
+            if match is None:
+                pos = block[1]
+                continue
+        if match is None:
+            break
+        if match.group('code') and not any(start <= match.start() and match.end() <= end for start, end in inline):
+            pos = match.start() + 1
+            continue
+        backslashes = len(text[:match.start()]) - len(text[:match.start()].rstrip('\\'))
+        if backslashes % 2:
+            pos = match.start() + 1
+            continue
+        if match.group('comment'):
+            # Keep offsets and line boundaries stable; reparse because hidden text can contain fake fences.
+            masked = re.sub(r'[^\r\n]', ' ', match.group(0))
+            text = text[:match.start()] + masked + text[match.end():]
+            protected, inline = block_ranges(text)
+        pos = match.end()
+    return text
+
+
+def identify(page: bytes, label: str) -> bytes:
+    """Name the workspace in a served page's `<title>` and first `<h1>`, so a tab, history entry or screenshot says
+    which board it is. The label is escaped here; a page without either tag is left as it was."""
+    prefix = html.escape(label, quote=False).encode() + " · ".encode()
+    for tag in (rb"<title\b[^>]*>", rb"<h1\b[^>]*>"):
+        page = re.sub(tag, lambda m: m[0] + prefix, page, count=1, flags=re.I)
+    return page
+
 
 def markdown_inline(text: str, resolve: ReferenceResolver | None = None, *, links: bool = True) -> str:
     """Inline CommonMark with raw HTML escaped; `links=False` keeps a navigation label free of anchors."""

@@ -21,11 +21,6 @@
 | time | item | Robin's words |
 |---|---|---|
 
-## File ownership
-
-- Security audit: `src/a/` (read-only for the audit; findings go to `notes/audit.md`)
-- Remove the dead `_unused` helper: `src/a/loader.py`
-
 ## Log
 
 - 09:00 opened the day
