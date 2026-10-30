@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Worker — implementer-claude-04</title>
+<script src="lib/86a3e9940611.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/ee8b56df405b.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/c271ee5c70f2.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/b80617d9b7e8.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fddc117a5ff1.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/1ca85659ab25.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/d8bf25eb11d0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/624ea7e85a53.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/bab9dc1971b0.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/261638ad9761.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/517fcb8cabb3.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/b34c10a1ffe0.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/43dc1b9a0c96.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/5be63e946cc5.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/dedb7e4dce28.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3df86f009f15.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/4bb93aca54b3.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/967b38372db4.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/9a9defceff14.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/f1c49bfd357d.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5c1cb227aa5a.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/1a2f3006ecc7.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/b3cedae80e66.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/071a53d2119e.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/455dfdb0f51a.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/50e2fc3909a0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/9777be10ff78.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5bf655ce1293.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/ea97db9e8f8b.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/156f0047d272.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3b1c199b3a86.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/aab9ff2ff8f0.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+<style>
+body{margin:0;font-family:"Alegreya Sans","Gill Sans",system-ui,sans-serif;background:#f4efe1;color:#2f2630}
+a{color:#8a6c30}a:hover{color:#6b5325}
+p{margin:0}
+.h2{margin:0 0 6px;font-family:'Cormorant SC',Georgia,serif;font-size:16px;font-weight:600;letter-spacing:.1em}
+.card{background:#fbf8ef;border:1px solid #ddd3bd;border-radius:5px;padding:10px 14px}
+.cap{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6e6470}
+.chip{font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:0 6px;white-space:nowrap}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.btn{font:inherit;font-size:14px;font-weight:500;border-radius:5px;padding:6px 16px;min-height:40px;cursor:pointer}
+.btn.primary{color:#fbf8ef;background:#2f2630;border:1px solid #2f2630}
+.btn.primary:hover{background:#4a3f4b}
+.btn.danger{color:#a3402b;background:#fbf8ef;border:1.5px solid #c9533a}
+.btn.danger:hover{background:#f8e7df}
+.btn.quiet{color:#2f2630;background:#fbf8ef;border:1px solid #ddd3bd}
+.btn.quiet:hover{border-color:#a7843e}
+.lanelab{width:84px;flex:none;font-size:10.5px;letter-spacing:.08em;color:#6e6470}
+.step{display:grid;grid-template-columns:48px 14px minmax(0,1fr) auto 176px;gap:0 10px;align-items:center;padding:6px 0;font-size:13px}
+.step+.step{border-top:1px dotted #ddd3bd}
+.call{display:grid;grid-template-columns:44px 58px minmax(0,1fr) auto;gap:0 10px;align-items:baseline;padding:3px 8px;font-size:12.5px;border-radius:3px}
+.call+.call{border-top:1px dotted #e6dcc6}
+.opt{display:flex;gap:8px;align-items:baseline;font-size:13px;cursor:pointer}
+.opt input{accent-color:#2f2630;margin:0}
+textarea{font:inherit;font-size:13px;line-height:1.45;color:#2f2630;background:#fbf8ef;border:1px solid #ddd3bd;border-radius:4px;padding:8px 10px;resize:vertical;width:100%;box-sizing:border-box}
+select{font:inherit;font-size:13px;color:#2f2630;background:#fbf8ef;border:1px solid #ddd3bd;border-radius:4px;padding:4px 8px}
+</style>
+</helmet>
+
+<div style="width: 1280px; height: 1884px; box-sizing: border-box; padding: 24px 32px 22px; background: #f4efe1; color: #2f2630; display: flex; flex-direction: column; gap: 16px; overflow: hidden; font-size: 14px; line-height: 1.45;">
+
+  <div style="margin: -12px 0 -4px;"><dc-import name="Tabs" current="Workers" parent="true" hint-size="100%,34px"></dc-import></div>
+
+  <div style="display: flex; align-items: flex-end; gap: 20px; border-bottom: 1px solid #a7843e; padding-bottom: 10px;">
+    <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 3px;">
+      <div style="font-size: 12.5px; color: #6e6470;">Worker · session · claude opus · <a href="Issue.dc.html">#105 Audit log retention</a> · <a href="#">!44</a> · <span class="mono" style="font-size: 12px;">trees/audit-retention</span> · epic <a href="Goal.dc.html">&amp;14 Demo</a></div>
+      <div style="display: flex; align-items: baseline; gap: 12px;">
+        <h1 style="margin: 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 27px; font-weight: 600; letter-spacing: .04em;">implementer-claude-04</h1>
+        <span class="chip" style="color: #2f2630; border: 1.5px solid #D55E00;">FIX</span>
+        <span class="chip" style="{{stateStyle}}">{{stateLabel}}</span>
+      </div>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: flex-end;">
+      <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 6px 12px; text-align: right;">
+        <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">running</div>
+        <div class="mono" style="font-size: 18px; font-variant-numeric: tabular-nums;">1h23m</div>
+      </div>
+      <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-top: 3px solid #E69F00; border-radius: 5px; padding: 4px 12px 6px; text-align: right;">
+        <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">last activity</div>
+        <div class="mono" style="font-size: 18px; font-variant-numeric: tabular-nums;">01:59 <span style="font-size: 13px; color: #a8660f;">11m ago</span></div>
+      </div>
+    </div>
+  </div>
+
+  <sc-if value="{{showSummary}}" hint-placeholder-val="{{ true }}">
+    <div class="card" style="border-top: 3px solid #c9533a; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 20px; align-items: center;">
+      <div style="display: flex; flex-direction: column; gap: 3px;">
+        <strong style="font-size: 16px;">Stuck on one test for 39 minutes, and it has left the brief.</strong>
+        <p><span class="mono" style="font-size: 12.5px;">test_retention_skips_legal_hold</span> failed 6 times with the same assertion while <span class="mono" style="font-size: 12.5px;">retention.py:48</span> flipped between two conditions. At 01:44 and 01:52 it changed a model and added a migration; the brief says no schema changes.</p>
+        <p style="color: #6e6470; font-size: 12.5px;">Last green state: <span class="mono">c19e0b4</span> at 01:18, 41 of 42 passing.</p>
+      </div>
+    </div>
+  </sc-if>
+
+  <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px;">
+    <sc-for list="{{checks}}" as="c" hint-placeholder-count="6">
+      <div title="{{c.how}}" style="{{c.style}}">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span style="{{c.dot}}"></span>
+          <span style="font-family: 'Cormorant SC', Georgia, serif; font-size: 13px; letter-spacing: .08em;">{{c.label}}</span>
+          <span style="{{c.levelStyle}}">{{c.level}}</span>
+        </div>
+        <span style="font-size: 19px; font-weight: 700; line-height: 1.25; font-variant-numeric: tabular-nums;">{{c.value}}</span>
+        <span style="font-size: 11.5px; color: #6e6470;">{{c.sub}}</span>
+      </div>
+    </sc-for>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 4px;">
+    <div style="display: flex; align-items: baseline; gap: 10px;">
+      <h2 class="h2" style="margin: 0;">SESSION</h2>
+    </div>
+    <div style="display: flex; align-items: center; height: 15px; font-size: 10.5px; color: #6e6470;" class="mono">
+      <div class="lanelab"></div>
+      <div style="position: relative; flex-grow: 1; height: 15px;">
+        <sc-for list="{{ticks}}" as="k" hint-placeholder-count="6"><span style="{{k.style}}">{{k.label}}</span></sc-for>
+        <span style="{{nowLabel}}">now 02:10</span>
+      </div>
+    </div>
+    <div style="position: relative; display: flex; flex-direction: column; background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 4px 0;">
+      <div style="position: absolute; top: 0; bottom: 0; left: 84px; right: 0; pointer-events: none;">
+        <sc-for list="{{ticks}}" as="k" hint-placeholder-count="6"><span style="{{k.line}}"></span></sc-for>
+        <span style="{{loopBand}}"></span>
+        <span style="{{loopLabel}}">same failure × 6 since 01:31</span>
+        <span style="{{nowLine}}"></span>
+      </div>
+      <sc-for list="{{lanes}}" as="l" hint-placeholder-count="4">
+        <div style="display: flex; align-items: center; height: 30px;">
+          <div class="lanelab" style="padding-left: 10px; box-sizing: border-box;">{{l.label}}</div>
+          <div style="position: relative; flex-grow: 1; height: 30px;">
+            <sc-for list="{{l.marks}}" as="m" hint-placeholder-count="6">
+              <span title="{{m.title}}" style="{{m.style}}">{{m.text}}</span>
+            </sc-for>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11px; color: #6e6470; padding-top: 3px;">
+      <sc-for list="{{legend}}" as="g" hint-placeholder-count="7">
+        <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="{{g.style}}"></span>{{g.t}}</span>
+      </sc-for>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: 18px; flex-grow: 1; min-height: 0;">
+
+    <div>
+      <h2 class="h2">STEPS</h2>
+      <sc-if value="{{showDone}}" hint-placeholder-val="{{ false }}">
+        <div class="card" style="{{doneStyle}} margin-bottom: 8px;">
+          <strong style="font-size: 15px;">{{doneHead}}</strong>
+          <span style="color: #6e6470; font-size: 13px;">{{doneBody}}</span>
+          <button type="button" class="btn quiet" sc-camel-on-click="{{close}}" style="margin-left: auto;">Undo (prototype)</button>
+        </div>
+      </sc-if>
+      <div class="card" style="padding: 4px 14px;">
+        <sc-for list="{{steps}}" as="s" hint-placeholder-count="5">
+          <div class="step">
+            <span class="mono" style="font-size: 12px; color: #6e6470;">{{s.t}}</span>
+            <span style="{{s.dot}}"></span>
+            <span><b style="font-weight: 600;">{{s.head}}</b> <span style="color: #6e6470;">{{s.meta}}</span></span>
+            <span style="{{s.outStyle}}">{{s.out}}</span>
+            <span style="display: flex; justify-content: flex-end;">
+              <sc-if value="{{s.hasRestart}}" hint-placeholder-val="{{ false }}"><button type="button" sc-camel-on-click="{{s.restart}}" style="{{s.restartStyle}}">{{s.restartLabel}}</button></sc-if>
+              <sc-if value="{{s.isLive}}" hint-placeholder-val="{{ false }}"><button type="button" sc-camel-on-click="{{s.kill}}" style="font: inherit; font-size: 12.5px; font-weight: 500; color: #a3402b; background: #fbf8ef; border: 1.5px solid #c9533a; border-radius: 4px; padding: 3px 14px; min-height: 32px; cursor: pointer;">Kill</button></sc-if>
+            </span>
+          </div>
+          <sc-if value="{{s.formOpen}}" hint-placeholder-val="{{ false }}">
+            <div style="margin: 0 0 10px 62px; background: #fbf8ef; border: 1px solid #2f2630; border-radius: 5px; padding: 10px 12px; display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 12px;">
+              <div style="display: flex; flex-direction: column; gap: 4px;">
+                <span class="cap">note</span>
+                <textarea rows="5" aria-label="Note to the new session">test_retention_skips_legal_hold failed 6 times with "assert len(deleted) == 2, got 3". Changing the condition on retention.py:48 did not change the result: look at what the test sets up before touching the condition again.
+
+Revert src/audit/models.py and migrations/0042_legal_hold_default.py. The brief says no schema changes.</textarea>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 8px; font-size: 13px;">
+                <span><span class="cap">from</span> <span class="mono" style="font-size: 12px;">{{s.fromText}}</span></span>
+                <label class="opt"><input type="checkbox" checked=""> <span>Summary of the steps above</span></label>
+                <label class="opt" style="align-items: center;"><span class="cap" style="width: 42px;">model</span>
+                  <sc-raw-select aria-label="Model for the new session"><option>claude opus · same</option><option>codex</option></sc-raw-select>
+                </label>
+                <div style="display: flex; gap: 8px; margin-top: auto;">
+                  <button type="button" class="btn primary" sc-camel-on-click="{{doRestart}}">Restart</button>
+                  <button type="button" class="btn quiet" sc-camel-on-click="{{close}}">Cancel</button>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+          <sc-if value="{{s.killOpen}}" hint-placeholder-val="{{ false }}">
+            <div style="margin: 0 0 10px 62px; background: #fbf8ef; border: 1.5px solid #c9533a; border-radius: 5px; padding: 10px 12px; display: flex; align-items: center; gap: 10px;">
+              <p style="flex-grow: 1; font-size: 13px;">Ends the session now. The worktree and its 7 unpushed commits stay on disk; #105 goes back to FIX, unassigned.</p>
+              <button type="button" class="btn danger" sc-camel-on-click="{{doKill}}">Kill session</button>
+              <button type="button" class="btn quiet" sc-camel-on-click="{{close}}">Cancel</button>
+            </div>
+          </sc-if>
+          <sc-if value="{{s.open}}" hint-placeholder-val="{{ false }}">
+            <div style="margin: 0 0 8px 62px; background: #f6f1e4; border: 1px solid #e6dcc6; border-radius: 4px; padding: 3px 0;">
+              <sc-for list="{{calls}}" as="c" hint-placeholder-count="9">
+                <div class="call" style="{{c.style}}">
+                  <span class="mono" style="font-size: 11.5px; color: #6e6470;">{{c.t}}</span>
+                  <span class="mono" style="font-size: 11.5px; font-weight: 600;">{{c.tool}}</span>
+                  <span class="mono" style="font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{c.what}}</span>
+                  <span style="{{c.resStyle}}">{{c.res}}</span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div>
+        <h2 class="h2">WHAT IT WAS TOLD</h2>
+        <div class="card" style="display: flex; flex-direction: column; gap: 8px; font-size: 13px;">
+          <p>Make the retention job keep rows on legal hold. Review round 1 on <a href="#">!44</a> failed the pipeline: held rows older than 90 days were deleted.</p>
+          <div style="display: flex; flex-direction: column; gap: 2px;">
+            <span class="cap">acceptance</span>
+            <span>· rows with legal_hold survive the job · test_retention_* all pass · no schema changes</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 3px;">
+            <span class="cap">scope · files named in the brief</span>
+            <sc-for list="{{scope}}" as="f" hint-placeholder-count="5">
+              <div style="display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: baseline;">
+                <span class="mono" style="{{f.pathStyle}}">{{f.path}}</span>
+                <span style="{{f.tagStyle}}">{{f.tag}}</span>
+              </div>
+            </sc-for>
+          </div>
+          <div style="display: flex; gap: 14px; flex-wrap: wrap; color: #6e6470; font-size: 12.5px; border-top: 1px dotted #ddd3bd; padding-top: 6px;">
+            <span>limit 1h30m</span><span>2.5M tokens</span><span>given: review thread, pipeline #8847 log, 3 files</span>
+          </div>
+        </div>
+      </div>
+      <div>
+        <h2 class="h2">COST · <a href="Limits.dc.html" style="font-family: 'Alegreya Sans', system-ui, sans-serif; font-size: 13px; letter-spacing: 0;">limits</a></h2>
+        <div class="card" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 12px; font-size: 13px;">
+          <div style="display: flex; flex-direction: column;"><span class="cap">tokens in</span><span class="mono" style="font-size: 15px; font-weight: 600;">1.62M</span></div>
+          <div style="display: flex; flex-direction: column;"><span class="cap">tokens out</span><span class="mono" style="font-size: 15px; font-weight: 600;">0.28M</span></div>
+          <div style="display: flex; flex-direction: column;"><span class="cap">cache hits</span><span class="mono" style="font-size: 15px; font-weight: 600;">71%</span></div>
+          <div style="grid-column: 1 / -1; display: flex; flex-direction: column; gap: 3px;">
+            <div style="position: relative; height: 8px; background: #ebe4d2; border-radius: 4px;">
+              <span style="position: absolute; left: 0; top: 0; bottom: 0; width: 76%; background: #E69F00; border-radius: 4px;"></span>
+              <span title="median of 11 similar fixes" style="position: absolute; top: -3px; bottom: -3px; left: 36%; width: 2px; background: #2f2630;"></span>
+            </div>
+            <span style="font-size: 12px; color: #6e6470;">1.90M of 2.5M · similar fixes use a median of 0.9M · 0.84M spent since the loop began</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script="" data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:1884}}">
+class Component extends DCLogic {
+  renderVals() {
+    var self = this, st = this.state || {};
+    var panel = st.panel || 'summary';
+    var set = function (p) { return function () { self.setState({ panel: p }); }; };
+    var ACTS = { 0: { label: 'Restart from start', from: '8e2a771 · 00:47 · before any change' }, 3: { label: 'Restart from c19e0b4', from: 'c19e0b4 · 01:18 · 41/42 · last green', suggested: true } };
+    var LIVE = 4;
+    var level = {
+      ok: ['#009E73', 'OK', 'color: #1e6b52;'],
+      warn: ['#E69F00', 'WATCH', 'color: #a8660f;'],
+      bad: ['#c9533a', 'ACT', 'color: #a3402b;']
+    };
+    var checks = [
+      ['SILENCE', 'warn', '11m', 'no event since 01:59 · act at 15m', 'amber at 10m without a tool call or reply, red at 15m'],
+      ['LOOPING', 'bad', '6× same failure', 'one test, one assertion, since 01:31', 'red when one test fails 3+ times with the same assertion text'],
+      ['SCOPE', 'bad', '2 files outside', 'a model and a migration', 'red on any write outside the brief’s files, or any migration when the brief says no schema changes'],
+      ['BUDGET', 'warn', '1h23m / 1h30m', '1.90M of 2.5M tokens', 'amber past 75% of time or tokens, red past 100%'],
+      ['TESTS', 'bad', '41 / 42 · flat', 'no new pass in 52 minutes', 'red when the passing count has not risen in 30 minutes of edits'],
+      ['CONTEXT', 'warn', '78%', '1 compaction at 01:22', 'amber past 70% or after a compaction, red after 2']
+    ].map(function (c) {
+      var l = level[c[1]];
+      return { label: c[0], value: c[2], sub: c[3], how: c[4], level: l[1],
+        levelStyle: 'margin-left: auto; font-size: 10px; font-weight: 700; letter-spacing: .08em; ' + l[2],
+        dot: 'width: 9px; height: 9px; border-radius: 50%; background: ' + l[0] + ';',
+        style: 'display: flex; flex-direction: column; background: #fbf8ef; border: 1px solid #ddd3bd; border-top: 3px solid ' + l[0] + '; border-radius: 5px; padding: 6px 11px;' };
+    });
+    // timeline: minutes from 00:40
+    var span = 100, now = 90;
+    var x = function (t) { return t / span * 100; };
+    var clock = function (t) { var m = 40 + t; return ('0' + Math.floor(m / 60)).slice(-2) + ':' + ('0' + (m % 60)).slice(-2); };
+    var phaseColor = { read: '#8a8f98', plan: '#a7843e', edit: '#0072B2', test: '#56B4E9' };
+    var bar = function (a, b, style, title, text) {
+      return { title: title, text: text || '', style: 'position: absolute; top: 8px; height: 14px; border-radius: 2px; box-sizing: border-box; left: ' + x(a) + '%; width: ' + Math.max(x(b) - x(a), 0.35) + '%; ' + style };
+    };
+    var dot = function (t, color, title, text, hollow) {
+      return { title: title, text: text || '', style: 'position: absolute; top: 9px; left: ' + x(t) + '%; margin-left: -6px; width: 12px; height: 12px; border-radius: 50%; box-sizing: border-box; ' + (hollow ? 'border: 2px solid ' + color + '; background: #fbf8ef;' : 'background: ' + color + ';') + ' font-size: 10.5px; line-height: 12px; text-indent: 16px; white-space: nowrap; color: #6e6470; font-family: ui-monospace, monospace;' };
+    };
+    var tick = function (t, color, title, text, dashed) {
+      return { title: title, text: text || '', style: 'position: absolute; top: 5px; height: 20px; left: ' + x(t) + '%; width: 0; border-left: 3px ' + (dashed ? 'dashed' : 'solid') + ' ' + color + '; font-size: 10.5px; line-height: 20px; padding-left: 5px; white-space: nowrap; color: ' + (dashed ? '#a3402b' : '#6e6470') + ';' };
+    };
+    var phases = [[7, 15, 'read'], [15, 20, 'plan'], [20, 27, 'edit'], [27, 30, 'test'], [30, 34, 'edit'], [34, 36, 'test'], [38, 44, 'edit'], [44, 47, 'test'], [47, 51, 'edit'],
+      [51, 53, 'edit'], [53, 56, 'test'], [57, 59, 'edit'], [59, 62, 'test'], [64, 67, 'edit'], [67, 70, 'test'], [72, 75, 'edit'], [75, 78, 'test']];
+    var tests = [[30, 38, 1], [36, 40, 1], [47, 41, 1], [56, 41, 0], [62, 41, 0], [70, 41, 0], [78, 41, 0]];
+    var writes = [[22, 'src/audit/retention.py', 1], [32, 'tests/audit/test_retention.py', 1], [40, 'src/audit/retention.py', 1], [48, 'src/audit/clock.py', 1], [52, 'src/audit/retention.py:48', 1], [58, 'src/audit/retention.py:48', 1], [64, 'src/audit/models.py', 0], [72, 'migrations/0042_legal_hold_default.py', 0]];
+    var lanes = [
+      { label: 'WORK', marks: phases.map(function (p) { return bar(p[0], p[1], 'background: ' + phaseColor[p[2]] + ';', p[2] + ' ' + clock(p[0]) + '–' + clock(p[1])); })
+          .concat([bar(79, 90, 'background: repeating-linear-gradient(135deg, #bdb3a2 0 2px, transparent 2px 5px); box-shadow: inset 0 0 0 1px #a39884;', 'silent since 01:59')]) },
+      { label: 'TESTS', marks: tests.map(function (t, i) {
+          var up = i === 0 || t[1] > tests[i - 1][1];
+          return dot(t[0], up ? '#009E73' : '#c9533a', 'pytest ' + clock(t[0]) + ' · ' + t[1] + '/42 passing' + (up ? '' : ' · same failure'), (i === 0 || up) ? t[1] + '' : '', !up);
+        }) },
+      { label: 'WRITES', marks: writes.map(function (w) { return tick(w[0], w[2] ? '#0072B2' : '#c9533a', clock(w[0]) + ' · ' + w[1] + (w[2] ? '' : ' · outside the brief'), w[2] ? '' : w[1].split('/').pop(), !w[2]); }) },
+      { label: 'EVENTS', marks: [tick(7, '#2f2630', '00:47 · brief delivered', 'brief'), tick(38, '#009E73', '01:18 · c19e0b4 · last green commit', 'c19e0b4'), tick(42, '#8a8f98', '01:22 · context compacted', 'compacted'), tick(79, '#a7843e', '01:59 · reply: "Trying a different approach…"', 'last reply')] }
+    ];
+    var ticks = [0, 20, 40, 60, 80, 100].map(function (t) {
+      return { label: clock(t), style: 'position: absolute; transform: translateX(-50%); left: ' + x(t) + '%;', line: 'position: absolute; top: 0; bottom: 0; width: 1px; background: #ebe3cf; left: ' + x(t) + '%;' };
+    });
+    var steps = [
+      ['00:47', '#8a8f98', 'Read the brief, review thread and pipeline log', '6 calls', 'done', 0],
+      ['00:55', '#a7843e', 'Planned: filter legal_hold in the delete query', '1 call', 'done', 0],
+      ['01:00', '#0072B2', 'Filtered the query and added a held-row test', '11 calls', '38 → 40', 0],
+      ['01:18', '#0072B2', 'Fixed the 90-day cutoff to use UTC · commit c19e0b4', '7 calls', '40 → 41', 0],
+      ['01:31', '#c9533a', 'test_retention_skips_legal_hold · 6 attempts', '17 calls · 0.84M tokens', 'no progress', 1]
+    ].map(function (s, i) {
+      var bad = s[4] === 'no progress';
+      var a = ACTS[i] || {};
+      return { t: s[0], head: s[2], meta: '· ' + s[3], out: s[4], open: !!s[5],
+        hasRestart: !!a.label, restartLabel: a.label || '', fromText: a.from || '', isLive: i === LIVE,
+        restartStyle: 'font: inherit; font-size: 12.5px; font-weight: 500; border-radius: 4px; padding: 3px 12px; min-height: 32px; cursor: pointer; white-space: nowrap; ' + (a.suggested ? 'color: #fbf8ef; background: #2f2630; border: 1px solid #2f2630;' : 'color: #2f2630; background: #fbf8ef; border: 1px solid #ddd3bd;'),
+        restart: function () { self.setState({ panel: 'restart', at: i }); }, kill: function () { self.setState({ panel: 'kill' }); },
+        formOpen: panel === 'restart' && st.at === i, killOpen: panel === 'kill' && i === LIVE,
+        dot: 'width: 9px; height: 9px; border-radius: 50%; background: ' + s[1] + ';',
+        outStyle: 'font-size: 12px; white-space: nowrap; ' + (bad ? 'color: #a3402b; font-weight: 700;' : s[4] === 'done' ? 'color: #6e6470;' : 'color: #1e6b52; font-weight: 700;') };
+    });
+    var calls = [
+      ['01:31', 'Edit', 'retention.py:48  if row.legal_hold:  →  if row.legal_hold is True:', '', 0],
+      ['01:33', 'Bash', 'pytest tests/audit/test_retention.py::test_retention_skips_legal_hold', 'fail · 3 != 2', 1],
+      ['01:37', 'Edit', 'retention.py:48  if row.legal_hold is True:  →  if row.legal_hold:', 'reverts 01:31', 2],
+      ['01:39', 'Bash', 'pytest …::test_retention_skips_legal_hold', 'fail · 3 != 2', 1],
+      ['01:44', 'Edit', 'src/audit/models.py  legal_hold = Column(Boolean, default=False)', 'outside brief', 3],
+      ['01:47', 'Bash', 'pytest …::test_retention_skips_legal_hold', 'fail · 3 != 2', 1],
+      ['01:52', 'Write', 'migrations/0042_legal_hold_default.py', 'schema change', 3],
+      ['01:55', 'Bash', 'pytest …::test_retention_skips_legal_hold', 'fail · 3 != 2', 1],
+      ['01:59', 'Reply', '“Trying a different approach…”', 'then silent', 2]
+    ].map(function (c) {
+      var rs = ['color: #6e6470;', 'color: #a3402b;', 'color: #a8660f;', 'color: #fbf8ef; background: #c9533a; border-radius: 3px; padding: 0 5px;'][c[4]];
+      return { t: c[0], tool: c[1], what: c[2], res: c[3], resStyle: 'font-size: 11.5px; white-space: nowrap; ' + rs,
+        style: c[4] === 3 ? 'background: #f8e7df;' : '' };
+    });
+    var scope = [
+      ['src/audit/retention.py', 'edited 4×', 1], ['tests/audit/test_retention.py', 'edited', 1], ['src/audit/clock.py', 'edited', 1],
+      ['src/audit/models.py', 'OUTSIDE · edited 01:44', 0], ['migrations/0042_legal_hold_default.py', 'OUTSIDE · created 01:52', 0]
+    ].map(function (f) {
+      return { path: f[0], tag: f[1],
+        pathStyle: 'font-size: 12px; ' + (f[2] ? '' : 'color: #a3402b;'),
+        tagStyle: f[2] ? 'font-size: 11.5px; color: #6e6470;' : 'font-size: 10px; font-weight: 700; letter-spacing: .05em; color: #a3402b; border: 1px dashed #c9533a; border-radius: 3px; padding: 0 5px;' };
+    });
+    var done = panel === 'restarted' || panel === 'killed';
+    var fromHash = ((ACTS[st.at] || {}).from || '').split(' ')[0];
+    return {
+      live: !done,
+      stateLabel: panel === 'restarted' ? 'RESTARTED' : panel === 'killed' ? 'KILLED' : 'LOOPING',
+      stateStyle: panel === 'restarted' ? 'color: #fbf8ef; background: #0072B2;' : panel === 'killed' ? 'color: #fbf8ef; background: #6e6470;' : 'color: #fbf8ef; background: #c9533a;',
+      showSummary: !done, showDone: done,
+      doneHead: panel === 'restarted' ? 'Restarted as implementer-claude-08 from ' + fromHash + '.' : 'Killed at 02:10.',
+      doneBody: panel === 'restarted' ? 'Your note and the summary of steps 1–4 went in with the brief. This page now follows the new session.' : 'Worktree kept with 7 unpushed commits. #105 is back in FIX, unassigned.',
+      doneStyle: 'display: flex; align-items: center; gap: 12px; border-top: 3px solid ' + (panel === 'restarted' ? '#0072B2' : '#6e6470') + ';',
+      openRestart: set('restart'), openKill: set('kill'), close: set('summary'), doRestart: set('restarted'), doKill: set('killed'),
+      checks: checks, lanes: lanes, ticks: ticks, steps: steps, calls: calls, scope: scope,
+      nowLabel: 'position: absolute; transform: translateX(-50%); left: ' + x(now) + '%; color: #c9533a; font-weight: 600; background: #f4efe1; padding: 0 3px;',
+      nowLine: 'position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #c9533a; left: ' + x(now) + '%;',
+      loopBand: 'position: absolute; top: 0; bottom: 0; left: ' + x(51) + '%; width: ' + (x(now) - x(51)) + '%; background: repeating-linear-gradient(135deg, rgba(201,83,58,.10) 0 6px, transparent 6px 12px);',
+      loopLabel: 'position: absolute; bottom: 2px; left: calc(' + x(51) + '% + 6px); font-size: 11px; font-weight: 700; color: #a3402b;',
+      legend: [
+        ['read', 'background: #8a8f98;'], ['plan', 'background: #a7843e;'], ['edit', 'background: #0072B2;'], ['test run', 'background: #56B4E9;'],
+        ['silent', 'background: repeating-linear-gradient(135deg, #bdb3a2 0 2px, transparent 2px 5px); box-shadow: inset 0 0 0 1px #a39884;'],
+        ['more tests pass', 'background: #009E73; border-radius: 50%; width: 10px;'], ['no change', 'border: 2px solid #c9533a; border-radius: 50%; width: 10px;'],
+        ['write in scope', 'border-left: 3px solid #0072B2; width: 3px;'], ['write outside', 'border-left: 3px dashed #c9533a; width: 3px;']
+      ].map(function (g) { return { t: g[0], style: 'display: inline-block; width: 18px; height: 10px; border-radius: 2px; box-sizing: border-box; ' + g[1] }; })
+    };
+  }
+}
+</script>
+
+
+</body></html>

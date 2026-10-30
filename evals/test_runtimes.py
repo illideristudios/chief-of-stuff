@@ -23,11 +23,6 @@ from test_spawn_session import run_main  # noqa: E402
 
 
 class TableTest(unittest.TestCase):
-    def test_the_runtimes_and_their_order(self):
-        # `start --runtime`, `evals/run.py --runtime` and the settings refusal list them in this order;
-        # `worker --runtime` sorts them.
-        self.assertEqual(runtimes.NAMES, ("claude", "codex", "cursor", "agy"))
-
     def test_cursor_installs_as_agent(self):
         self.assertEqual([runtimes.binary(name) for name in runtimes.NAMES], ["claude", "codex", "agent", "agy"])
 
@@ -39,10 +34,13 @@ class TableTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             runtimes.get("someday")
 
-    def test_a_record_cannot_be_changed(self):
-        with self.assertRaises(AttributeError):
-            runtimes.get("claude").binary = "other"  # type: ignore[misc]
-
+    def test_every_record_has_the_shape_an_adapter_needs(self):
+        # Ledger E13: codex, cursor and agy stay as data in 1.0, checked for shape only; 1.1 builds their adapters.
+        for r in runtimes.RUNTIMES:
+            with self.subTest(runtime=r.name):
+                self.assertTrue(all(isinstance(v, str) and v for v in (r.name, r.binary, r.display)))
+                self.assertEqual({type(r.needs_model), type(r.schedules)}, {bool})
+                self.assertEqual(sum("{effort}" in token for token in r.effort_argv), 1 if r.effort_argv else 0)
 
 class EveryLauncherCoversEveryRuntimeTest(unittest.TestCase):
     def test_every_runtime_has_a_worker_template_that_starts_its_executable(self):

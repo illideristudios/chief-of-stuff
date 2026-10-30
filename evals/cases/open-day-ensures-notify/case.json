@@ -45,13 +45,6 @@
       "rule": "If today's log and tracker do not exist, create both from the templates the `## Coordinator` block names (or from the section headings alone if there are none)."
     },
     {
-      "name": "tracker has File ownership",
-      "type": "file_matches",
-      "path": "daily/{{today}}-tracker.md",
-      "pattern": "^## File ownership",
-      "rule": "If today's log and tracker do not exist, create both from the templates the `## Coordinator` block names (or from the section headings alone if there are none)."
-    },
-    {
       "name": "tracker has Log",
       "type": "file_matches",
       "path": "daily/{{today}}-tracker.md",

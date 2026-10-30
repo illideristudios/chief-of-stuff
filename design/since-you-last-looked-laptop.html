@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Since you last looked</title>
+<script src="lib/86a3e9940611.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/ee8b56df405b.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/c271ee5c70f2.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/b80617d9b7e8.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fddc117a5ff1.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/1ca85659ab25.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/d8bf25eb11d0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/624ea7e85a53.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/bab9dc1971b0.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/261638ad9761.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/517fcb8cabb3.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/b34c10a1ffe0.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/43dc1b9a0c96.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/5be63e946cc5.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/dedb7e4dce28.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3df86f009f15.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/4bb93aca54b3.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/967b38372db4.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/9a9defceff14.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/f1c49bfd357d.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5c1cb227aa5a.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/1a2f3006ecc7.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/b3cedae80e66.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/071a53d2119e.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/455dfdb0f51a.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/50e2fc3909a0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/9777be10ff78.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5bf655ce1293.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/ea97db9e8f8b.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/156f0047d272.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3b1c199b3a86.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/aab9ff2ff8f0.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+<style>
+body{margin:0;font-family:"Alegreya Sans","Gill Sans",system-ui,sans-serif;background:#f4efe1;color:#2f2630}
+a{color:#8a6c30}a:hover{color:#6b5325}
+p{margin:0}
+.h2{margin:0 0 6px;font-family:'Cormorant SC',Georgia,serif;font-size:16px;font-weight:600;letter-spacing:.1em}
+.card{background:#fbf8ef;border:1px solid #ddd3bd;border-radius:5px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.chip{font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:0 6px;white-space:nowrap;justify-self:start}
+.need{display:grid;grid-template-columns:52px 96px minmax(0,1fr) minmax(0,1.1fr) 70px;gap:0 14px;align-items:baseline;padding:9px 14px}
+.need+.need{border-top:1px dotted #ddd3bd}
+.mv{display:grid;grid-template-columns:48px 44px minmax(0,1fr) auto;gap:0 10px;align-items:baseline;padding:4px 0;font-size:13px}
+.mv+.mv{border-top:1px dotted #e6dcc6}
+.fc{display:grid;grid-template-columns:40px minmax(0,1fr) auto 12px auto 48px;gap:0 8px;align-items:baseline;padding:6px 0;font-size:13px}
+.fc+.fc{border-top:1px dotted #e6dcc6}
+.lanelab{width:96px;flex:none;padding-left:12px;box-sizing:border-box;font-size:10.5px;letter-spacing:.08em;color:#6e6470}
+</style>
+</helmet>
+
+<div style="width: 1280px; height: 1544px; box-sizing: border-box; padding: 24px 32px 22px; background: #f4efe1; color: #2f2630; display: flex; flex-direction: column; gap: 18px; overflow: hidden; font-size: 14px; line-height: 1.45;">
+
+  <div style="margin: -12px 0 -4px;"><dc-import name="Tabs" current="Since you last looked" hint-size="100%,34px"></dc-import></div>
+
+  <div style="display: flex; align-items: flex-end; gap: 20px; border-bottom: 1px solid #a7843e; padding-bottom: 10px;">
+    <div style="flex-grow: 1;">
+      <h1 style="margin: 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 27px; font-weight: 600; letter-spacing: .04em;">Since you last looked</h1>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: flex-end;">
+      <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 6px 12px; text-align: right;">
+        <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">last looked</div>
+        <div class="mono" style="font-size: 18px;">Fri 22:40</div>
+      </div>
+      <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 6px 12px; text-align: right;">
+        <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">away</div>
+        <div class="mono" style="font-size: 18px;">3h30m</div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <h2 class="h2">NEEDS INPUT · 6</h2>
+    <div class="card" style="border-top: 3px solid #c9533a;">
+      <sc-for list="{{needs}}" as="n" hint-placeholder-count="6">
+        <div class="need">
+          <span class="mono" style="font-size: 12px; color: #6e6470;">{{n.t}}</span>
+          <span class="chip" style="{{n.kindStyle}}">{{n.kind}}</span>
+          <b style="font-weight: 600;">{{n.what}}</b>
+          <span style="color: #6e6470; font-size: 13px;">{{n.why}}</span>
+          <a href="{{n.href}}" style="font-size: 13px; text-align: right;">open</a>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <div>
+    <h2 class="h2">WHILE YOU WERE AWAY</h2>
+    <div style="display: flex; align-items: center; height: 15px; font-size: 10.5px; color: #6e6470;" class="mono">
+      <div class="lanelab"></div>
+      <div style="position: relative; flex-grow: 1; height: 15px; margin-right: 24px;">
+        <sc-for list="{{ticks}}" as="k" hint-placeholder-count="8"><span style="{{k.style}}">{{k.label}}</span></sc-for>
+      </div>
+    </div>
+    <div class="card" style="position: relative; padding: 4px 0;">
+      <div style="position: absolute; top: 0; bottom: 0; left: 96px; right: 24px; pointer-events: none;">
+        <sc-for list="{{ticks}}" as="k" hint-placeholder-count="8"><span style="{{k.line}}"></span></sc-for>
+      </div>
+      <sc-for list="{{lanes}}" as="l" hint-placeholder-count="6">
+        <div style="display: flex; align-items: center; height: 44px; border-top: 1px dotted #e6dcc6;">
+          <div class="lanelab">{{l.label}}</div>
+          <div style="position: relative; flex-grow: 1; height: 44px; margin-right: 24px;">
+            <sc-for list="{{l.marks}}" as="m" hint-placeholder-count="4">
+              <span title="{{m.title}}" style="{{m.dot}}"></span>
+              <span style="{{m.labelStyle}}">{{m.text}}</span>
+            </sc-for>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px;">
+
+    <div>
+      <h2 class="h2">THE BOARD, THEN AND NOW</h2>
+      <div class="card" style="padding: 10px 14px; display: flex; flex-direction: column; gap: 10px;">
+        <div style="display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px;">
+          <sc-for list="{{cols}}" as="c" hint-placeholder-count="7">
+            <div style="{{c.style}}">
+              <span style="font-family: 'Cormorant SC', Georgia, serif; font-size: 12px; letter-spacing: .08em;">{{c.stage}}</span>
+              <span class="mono" style="font-size: 12px; color: #6e6470;">{{c.then}} → <b style="font-size: 16px; color: #2f2630;">{{c.now}}</b></span>
+              <span class="mono" style="{{c.deltaStyle}}">{{c.delta}}</span>
+            </div>
+          </sc-for>
+        </div>
+        <div>
+          <sc-for list="{{moves}}" as="m" hint-placeholder-count="9">
+            <div class="mv">
+              <span class="mono" style="font-size: 12px; color: #6e6470;">{{m.t}}</span>
+              <a href="{{m.href}}" class="mono" style="font-size: 12px;">{{m.issue}}</a>
+              <span><b style="font-weight: 500;">{{m.name}}</b> <span style="color: #6e6470; font-size: 12px;">{{m.cause}}</span></span>
+              <span class="mono" style="font-size: 11.5px; white-space: nowrap;">{{m.from}} → <b>{{m.to}}</b></span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div>
+        <h2 class="h2">FORECASTS THAT MOVED</h2>
+        <div class="card" style="padding: 4px 14px;">
+          <sc-for list="{{forecasts}}" as="f" hint-placeholder-count="3">
+            <div class="fc">
+              <a href="{{f.href}}" class="mono" style="font-size: 12px;">{{f.ref}}</a>
+              <span><b style="font-weight: 500;">{{f.name}}</b> <span style="color: #6e6470; font-size: 12px;">{{f.cause}}</span></span>
+              <span class="chip" style="{{f.fromStyle}}">{{f.from}}</span>
+              <span style="color: #6e6470;">→</span>
+              <span class="chip" style="{{f.toStyle}}">{{f.to}}</span>
+              <span class="mono" style="font-size: 12px; color: #6e6470; text-align: right;">{{f.t}}</span>
+            </div>
+          </sc-for>
+          <div style="border-top: 1px dotted #e6dcc6; padding: 5px 0; font-size: 12.5px; color: #6e6470;">4 epics unchanged</div>
+        </div>
+      </div>
+      <div>
+        <h2 class="h2">SPENT</h2>
+        <div class="card" style="padding: 8px 14px; display: flex; flex-direction: column; gap: 5px;">
+          <sc-for list="{{spent}}" as="s" hint-placeholder-count="4">
+            <div style="display: grid; grid-template-columns: 92px minmax(0, 1fr) 150px; gap: 0 10px; align-items: center; font-size: 13px;">
+              <b style="font-weight: 600;">{{s.name}}</b>
+              <div style="position: relative; height: 10px; background: #ebe4d2; border-radius: 3px;">
+                <span style="{{s.before}}"></span>
+                <span style="{{s.added}}"></span>
+              </div>
+              <span class="mono" style="{{s.textStyle}}">{{s.text}}</span>
+            </div>
+          </sc-for>
+          <div style="display: flex; gap: 14px; font-size: 11px; color: #6e6470; padding-top: 3px;">
+            <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 18px; height: 10px; background: #bdb3a2; border-radius: 2px;"></span>at 22:40</span>
+            <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 18px; height: 10px; background: #6f63b4; border-radius: 2px;"></span>while away</span>
+            <a href="Limits.dc.html" style="margin-left: auto;">limits</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script="" data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:1544}}">
+class Component extends DCLogic {
+  renderVals() {
+    var kinds = {
+      LOOPING: 'color: #fbf8ef; background: #c9533a;',
+      LIMIT: 'color: #fbf8ef; background: #c9533a;',
+      DECISION: 'color: #8a6c30; border: 1px solid #a7843e; background: #efe7d3;',
+      ORPHANED: 'color: #a3402b; border: 1px dashed #c9533a;',
+      DRIFT: 'color: #a8660f; border: 1.5px solid #E69F00;'
+    };
+    var needs = [
+      ['01:31', 'LOOPING', 'implementer-claude-04 on #105', 'same failing test 6×, a migration outside the brief', 'Agent.dc.html'],
+      ['01:59', 'LIMIT', 'Claude 5-hour window', 'runs out 03:44, back 04:40', 'Limits.dc.html'],
+      ['01:41', 'DECISION', 'Cache warmup: keep the warm pool?', 'holds #111; Demo went at risk', 'Decision.dc.html'],
+      ['00:52', 'DECISION', 'Session timeout: 30 or 60 minutes?', 'holds #107', 'Decisions.dc.html'],
+      ['23:58', 'ORPHANED', '#124 Webhook signature check', 'implementer-codex-05 crashed; Security review prep at risk', 'Dispatch.dc.html'],
+      ['01:07', 'DRIFT', '!52 Login throttle', 'imports auth.session from rate limiting', '#']
+    ].map(function (n) { return { t: n[0], kind: n[1], kindStyle: kinds[n[1]], what: n[2], why: n[3], href: n[4] }; });
+    // timeline: minutes from 22:40, 0..210
+    var span = 210;
+    var x = function (t) { return t / span * 100; };
+    var clock = function (t) { var m = (22 * 60 + 40 + t) % 1440; return ('0' + Math.floor(m / 60)).slice(-2) + ':' + ('0' + (m % 60)).slice(-2); };
+    var ticks = [20, 50, 80, 110, 140, 170, 200].map(function (t) {
+      return { label: clock(t), style: 'position: absolute; transform: translateX(-50%); left: ' + x(t) + '%;', line: 'position: absolute; top: 0; bottom: 0; width: 1px; background: #ebe3cf; left: ' + x(t) + '%;' };
+    });
+    var lane = function (label, color, hollow, evs) {
+      return { label: label, marks: evs.map(function (e, i) {
+        return { title: clock(e[0]) + ' · ' + e[2], text: e[1],
+          dot: 'position: absolute; top: ' + (i % 2 ? 24 : 8) + 'px; left: ' + x(e[0]) + '%; margin-left: -5px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; ' + (hollow ? 'border: 2px solid ' + color + '; background: #fbf8ef;' : 'background: ' + color + ';'),
+          labelStyle: 'position: absolute; top: ' + (i % 2 ? 20 : 4) + 'px; left: calc(' + x(e[0]) + '% + 9px); font-size: 11.5px; white-space: nowrap; color: #2f2630;' };
+      }) };
+    };
+    var lanes = [
+      lane('MERGED', '#4f6b3a', false, [[121, '#98', 'Locale fallback merged · !37'], [155, '#99', 'Report CSV header merged · !38']]),
+      lane('BROKE', '#c9533a', true, [[32, '#105 pipeline', 'pipeline #8847 failed on !44'], [78, '#124 orphaned', 'implementer-codex-05 crashed'], [147, '!52 drift', 'auth.session imported from rate limiting'], [171, 'claude-04 loop', 'same failure from here on']]),
+      lane('ASKED YOU', '#a7843e', false, [[132, 'session timeout', 'decision asked'], [181, 'cache warmup', 'decision asked']]),
+      lane('FORECASTS', '#E69F00', false, [[78, 'Security → at risk', '&15 at risk: #124 orphaned'], [110, 'Exports → late', '&13 late: queue estimate grew'], [181, 'Demo → at risk', '&14 at risk: #111 needs input']]),
+      lane('WORKERS', '#0072B2', false, [[100, 'codex-01 done', 'reviewer-codex-01 finished round 1 on !48'], [127, 'claude-04', 'implementer-claude-04 started #105'], [187, 'claude-01', 'reviewer-claude-01 started review of !54'], [168, 'claude-07', 'implementer-claude-07 started #118'], [190, 'claude-06 done', 'implementer-claude-06 pushed a7f03d1'], [198, 'codex-02', 'reviewer-codex-02 started round 2 on !48']]),
+      lane('LIMITS', '#c9533a', true, [[199, 'Claude 5h short', 'forecast: out 03:44–04:40']])
+    ];
+    var cols = [['IMPLEMENT', 1, 3], ['REVIEW', 8, 5], ['TRIAGE', 0, 2], ['FIX', 0, 1], ['VERIFY', 1, 1], ['MERGE', 4, 2], ['MAIN', 0, 2]].map(function (c) {
+      var d = c[2] - c[1];
+      return { stage: c[0], then: c[1], now: c[2], delta: d === 0 ? '·' : (d > 0 ? '+' + d : '−' + (-d)),
+        deltaStyle: 'font-size: 12px; font-weight: 700; color: ' + (d === 0 ? '#bdb3a2' : c[0] === 'TRIAGE' ? '#a8660f' : '#2f2630') + ';',
+        style: 'display: flex; flex-direction: column; align-items: flex-start; background: ' + (d === 0 ? '#f4efe1' : '#ebe4d2') + '; border-radius: 4px; padding: 5px 7px;' };
+    });
+    var moves = [
+      ['23:12', '#105', 'Audit log retention', 'pipeline #8847 failed', 'REVIEW', 'FIX', 'Issue.dc.html'],
+      ['00:20', '#109', 'Upload size limit', 'round 1 asked for changes', 'REVIEW', 'FIX', 'Task.dc.html'],
+      ['00:41', '#98', 'Locale fallback', '', 'MERGE', 'MAIN', 'Issue98.dc.html'],
+      ['00:52', '#107', 'Session timeout', 'decision asked', 'REVIEW', 'TRIAGE', 'Issue107.dc.html'],
+      ['01:15', '#99', 'Report CSV header', '', 'MERGE', 'MAIN', '#'],
+      ['01:28', '#118', 'Rate limit headers', '', 'queue', 'IMPLEMENT', 'AgentHealthy.dc.html'],
+      ['01:41', '#111', 'Cache warmup', 'decision asked', 'REVIEW', 'TRIAGE', 'Decision.dc.html'],
+      ['01:52', '#121', 'CSV import quoting', '', 'queue', 'IMPLEMENT', '#'],
+      ['01:58', '#109', 'Upload size limit', 'fix pushed', 'FIX', 'REVIEW', 'Task.dc.html']
+    ].map(function (m) { return { t: m[0], issue: m[1], name: m[2], cause: m[3], from: m[4], to: m[5], href: m[6] }; });
+    var st = {
+      'ON TRACK': 'color: #1e6b52; border: 1px solid #009E73;',
+      'AT RISK': 'color: #2f2630; background: #E69F00;',
+      'LATE': 'color: #fbf8ef; background: #c9533a;'
+    };
+    var forecasts = [
+      ['&14', 'Demo', '#111 needs input', 'ON TRACK', 'AT RISK', '01:41', 'Goal.dc.html'],
+      ['&13', 'Self-serve exports', 'queue estimate grew', 'ON TRACK', 'LATE', '00:30', 'Goals.dc.html'],
+      ['&15', 'Security review prep', '#124 orphaned', 'ON TRACK', 'AT RISK', '23:58', 'Goals.dc.html']
+    ].map(function (f) { return { ref: f[0], name: f[1], cause: f[2], from: f[3], to: f[4], fromStyle: st[f[3]], toStyle: st[f[4]], t: f[5], href: f[6] }; });
+    var spent = [['Claude', 49, 9, 'week +9 · 58%', 1], ['Codex', 28, 5, 'week +5 · 33%', 0], ['Antigravity', 44, 3, 'week +3 · 47%', 0], ['Cursor', 79, 2, 'cycle +2 · 81%', 1]].map(function (s) {
+      var full = !!s[4];
+      return { name: s[0], text: s[3],
+        before: 'position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px 0 0 3px; background: #bdb3a2; width: ' + s[1] + '%;',
+        added: 'position: absolute; top: 0; bottom: 0; background: #6f63b4; left: ' + s[1] + '%; width: ' + s[2] + '%;',
+        textStyle: 'font-size: 12px; ' + (full ? 'color: #a3402b; font-weight: 700;' : 'color: #6e6470;') };
+    });
+    return { needs: needs, ticks: ticks, lanes: lanes, cols: cols, moves: moves, forecasts: forecasts, spent: spent };
+  }
+}
+</script>
+
+
+</body></html>
