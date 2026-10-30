@@ -627,6 +627,10 @@ class LandingTest(unittest.TestCase):
                             return []
 
                         def backlog_call(method, url, token, timeout):
+                            if method == "GET" and "merge_requests" in url and "state=opened" in url:
+                                rows = list(opened)
+                                move_after_first_list()
+                                return rows, {}, ""
                             if method == "GET" and "merge_requests" in url and "state=merged" in url:
                                 move_after_first_list()
                                 return list(merged), {}, ""
