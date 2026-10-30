@@ -275,11 +275,19 @@ def main(argv: list[str] | None = None) -> int:
     if not target.is_file():
         print(f"installed command is missing: {target}", file=sys.stderr)
         return 1
+    if args[0] in STORE_BACKED and {"-h", "--help"} & set(args[1:]):
+        # Help must not install the engine venv (offline CI, first run). Bootstrap only when this interpreter
+        # cannot import the script's dependencies.
+        done = subprocess.run([sys.executable, str(target), *(["--board"] if args[0] == "board" else []), *args[1:]],
+                              capture_output=True, text=True)
+        if "ModuleNotFoundError" not in done.stderr:
+            sys.stdout.write(done.stdout)
+            sys.stderr.write(done.stderr)
+            return done.returncode
     if args[0] in STORE_BACKED:
         scripts_dir = str(SOURCE / "scripts")
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)
-        import subprocess
         import shell_setup
         import supervisor
         try:
