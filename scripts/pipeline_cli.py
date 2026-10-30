@@ -91,9 +91,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="path, default: none (required). Workspace whose CLAUDE.md Backlog: line selects the forge and repository.")
     selector = parser.add_mutually_exclusive_group(required=True)
     selector.add_argument("--id", type=int,
-                          help="int, default: none (required with --ref). One GitLab pipeline or one GitHub Actions run. Mutually exclusive with --ref; must be > 0. Does not aggregate.")
+                          help="int, default: none; exactly one of --id or --ref is required. One GitLab pipeline or one GitHub Actions run. Mutually exclusive with --ref; must be > 0. Does not aggregate.")
     selector.add_argument("--ref",
-                          help="string, default: none (required with --id). Branch name. GitHub: status is the aggregate of every workflow's latest run at that head; ID and URL identify the newest run, whose own status may differ. GitLab: the latest pipeline at that head (one pipeline, so id, url, and status agree). Mutually exclusive with --id.")
+                          help="string, default: none; exactly one of --id or --ref is required. Branch name. GitHub: status is the aggregate of every workflow's latest run at that head; ID and URL identify the newest run, whose own status may differ. GitLab: the latest pipeline at that head (one pipeline, so id, url, and status agree). Mutually exclusive with --id.")
     return parser
 
 
