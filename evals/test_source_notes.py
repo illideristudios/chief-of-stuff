@@ -31,7 +31,9 @@ import json
 import os
 import re
 import sys
+import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, time, timezone
 from html import escape, unescape
 from pathlib import Path
@@ -128,6 +130,16 @@ class NotesPage(SourcePage):
         self.assertIn(escape(MARKED.body, quote=False), body.replace("&quot;", '"').replace("&#x27;", "'"))
         self.assertIn(MARKED.author, text(body))
 
+    def test_a_note_drops_a_trailing_hidden_html_comment(self):
+        if sp is None:
+            raise AssertionError("scripts/source_page.py does not exist yet")
+        body = "Useful? React with 👍 / 👎.\n\n<!-- codex-code-review-finding:v1 -->"
+        noted = thread(True, "02:10", "chatgpt-codex-connector", body, 9)
+        html = sp.render(109, TRACKERS, self.sources(), NOW, self.graph, self.root / "pages", self.root,
+                         notes=[sp.Note(LIMITS, 7, "new", noted)])
+        self.assertIn("Useful? React with 👍 / 👎.", html)
+        self.assertNotIn("codex-code-review-finding", html)
+
     # "When the notes cannot be read the page still renders its diff and says why in one line."
     def test_unreadable_notes_leave_the_diff_and_say_why(self):
         if sp is None:
@@ -149,7 +161,7 @@ class NotesPage(SourcePage):
         if sp is None or not hasattr(sp, "notes"):
             raise AssertionError("source_page.notes does not exist yet")
         root = self.root
-        home = backlog.Backlog("https://labs.example.test", "team/app")
+        home = backlog.Backlog("https://forge.example", "grp/app")
         (root / "CLAUDE.md").write_text(
             "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
             f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n"
@@ -158,7 +170,7 @@ class NotesPage(SourcePage):
         (root / "daily").mkdir(exist_ok=True)
         day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
         (root / "daily" / f"{day}-tracker.md").write_text(ROUTE_TRACKER.format(day=day))
-        bs._write(root / "pages" / bs.CACHE, self.sources())
+        bs._write(root / "pages" / bs.CACHE, replace(self.sources(), home=home))
         asked = []
 
         def fake(change, home, *a, **k):
@@ -169,6 +181,66 @@ class NotesPage(SourcePage):
             out = sp.write(root, root / "pages", 109)
         self.assertEqual(asked, [("!48", home)])
         self.assertIn(OPEN_ADD.body, out.read_text())
+
+    def test_changed_home_failed_refresh_then_recovery_queries_only_the_new_change(self):
+        old = backlog.Backlog("https://forge.example", "grp/app")
+        new = backlog.Backlog("https://forge.example", "grp/other")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "daily").mkdir()
+            (root / "cos.toml").write_text("")
+            config = ("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n"
+                      "- Tracker: `daily/<date>-tracker.md`\n"
+                      f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n"
+                      "- Settings: `cos.toml`\n"
+                      f"- Backlog: GitLab issues; host {old.host}; project {old.project}\n")
+            (root / "CLAUDE.md").write_text(config)
+            now = datetime.now(ZoneInfo(ZONE))
+            (root / "daily" / f"{now.date().isoformat()}-tracker.md").write_text(
+                ROUTE_TRACKER.format(day=now.date().isoformat()))
+            bs._write(root / "pages" / bs.CACHE, self.sources())
+            (root / "CLAUDE.md").write_text(config.replace(old.project, new.project))
+            with mock.patch.object(bs, "forge", return_value=(None, None, {"kanban": "offline", "merge requests": "offline"})), \
+                    mock.patch.object(bs, "workers", return_value=()):
+                failed = bs.refresh(root, now)
+            self.assertEqual(failed.home, old)
+            with mock.patch.object(sp, "notes") as query:
+                out = sp.write(root, root / "pages", 109)
+                query.assert_not_called()
+            html = out.read_text()
+            self.assertNotIn("Cap uploads", html)
+            self.assertIn("Nothing to diff", html)
+
+            fresh = replace(self.mr, url=f"{new.host}/{new.project}/-/merge_requests/48", title="New project change")
+            with mock.patch.object(bs, "forge", return_value=({}, {fresh.ref: fresh}, {})), \
+                    mock.patch.object(bs, "workers", return_value=()):
+                recovered = bs.refresh(root, now)
+            self.assertEqual(recovered.home, new)
+            with mock.patch.object(sp, "notes", return_value=([sp.Note(LIMITS, 7, "new", OPEN_ADD)], "")) as query:
+                out = sp.write(root, root / "pages", 109)
+                query.assert_called_once_with(fresh, new)
+            self.assertIn(OPEN_ADD.body, out.read_text())
+            self.assertNotIn("Review notes unavailable", out.read_text())
+
+    def test_unknown_cache_home_does_not_query_notes(self):
+        root = self.root
+        home = backlog.Backlog("https://forge.example", "grp/app")
+        (root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n"
+            f"- Settings: `cos.toml`\n- Backlog: GitLab issues; host {home.host}; project {home.project}\n")
+        (root / "cos.toml").write_text("")
+        (root / "daily").mkdir(exist_ok=True)
+        day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
+        (root / "daily" / f"{day}-tracker.md").write_text(
+            ROUTE_TRACKER.format(day=day).replace("| #109 |", "| https://forge.example/grp/app/-/issues/109 |"))
+        # A legacy cache can still have an explicitly keyed issue and change, without a verified home.
+        src = replace(self.sources(), home=None,
+                      changes={"!48": replace(self.mr, issues=("gitlab:forge.example/grp/app#109",))})
+        with mock.patch.object(bs, "load", return_value=src), mock.patch.object(sp, "notes") as query:
+            out = sp.write(root, root / "pages", 109)
+            query.assert_not_called()
+        self.assertIn("Nothing to diff", out.read_text())
 
 
 def iso(hhmm: str) -> str:

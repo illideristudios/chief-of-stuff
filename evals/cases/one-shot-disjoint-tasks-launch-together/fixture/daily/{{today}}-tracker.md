@@ -17,9 +17,6 @@
 ## File ownership
 
 - Fix upload handler: `src/a/` (the upload handler; tests under `tests/a/`); worktree `trees/fix-upload-handler` (feat/fix-upload-handler)
-- Add upload limits: `src/a/upload.py` (the size check in the same handler file)
-- Fix report writer: `src/b/` (the report writer; tests under `tests/b/`)
-- Fix export header: `src/c/` (the export header; tests under `tests/c/`)
 
 ## Log
 

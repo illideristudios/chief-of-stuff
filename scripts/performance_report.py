@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
 
-from performance import table
+from performance import records, table
 import store_access
 from workspace import ConfigError, read_config
 
@@ -30,8 +32,11 @@ When not to use:
   and interactive sessions are not sources (architecture §9).
 
 Output:
-  Plain text table on stdout (two-space-separated, left-padded columns; not TOON
-  and not JSON). Normal completion prints the header row followed by zero or more
+  Without --raw, a plain text table on stdout (two-space-separated, left-padded
+  columns; not TOON and not JSON). With --raw, one JSON array on stdout of attempt
+  records (one per stage segment started in the window, in the workspace
+  timezone, with its outcome and individual duration) instead of the table; the
+  columns and grouping below do not apply. Normal completion prints the header row followed by zero or more
   sorted data rows on stdout (an empty window prints the header row only) and
   leaves stderr empty. Help prints text on stdout with stderr empty. Workspace,
   date, and missing-store errors print "performance: <reason>" on stderr with
@@ -40,11 +45,11 @@ Output:
   Windowing, grouping, and keys (§9):
   Each segment's started_at timestamp is converted to the workspace timezone
   (Timezone: in CLAUDE.md). Segments whose start date falls in [--since, --until]
-  inclusive are grouped by (period, runtime, model, effort, agent_type) sorted
+  inclusive are grouped by (period, runtime, model, effort, agent_type, workflow) sorted
   ascending; a run that ends after midnight stays in the period of its start.
   With --by day, period is the start date (YYYY-MM-DD); with --by week, a week
   starts on Monday and period is that week's Monday (YYYY-MM-DD). A segment with
-  no runtime, model, effort, or agent_type is keyed by what is recorded, and an
+  no runtime, model, effort, agent_type, or workflow is keyed by what is recorded, and an
   empty key field prints as "-".
 
   Columns (in order):
@@ -56,6 +61,8 @@ Output:
   - effort: reasoning effort recorded on the segment, or "-" when empty.
   - agent_type: declared workspace agent type recorded on the segment, or "-"
     when empty.
+  - workflow: workflow recorded on the segment, or "-" when empty (an older
+    segment's unknown workflow stays empty).
   - runs: total stage segments started in the bucket for that key, including
     open (unended) segments.
   - completed: segments with outcome == "done".
@@ -107,6 +114,9 @@ Examples:
 
   # Weekly Monday-anchored rows for a closed date range
   chief-of-stuff performance --root /tmp/maple-workspace --since 2026-10-01 --until 2026-10-07 --by week
+
+  # JSON attempt records for the same range, ungrouped
+  chief-of-stuff performance --root /tmp/maple-workspace --since 2026-10-01 --until 2026-10-07 --raw
 """
 
 
@@ -115,10 +125,10 @@ def _cell(value: object) -> str:
 
 
 def _print_table(rows: list) -> None:
-    headers = ("period", "runtime", "model", "effort", "agent_type",
+    headers = ("period", "runtime", "model", "effort", "agent_type", "workflow",
                "runs", "completed", "human_review", "relaunched", "median_minutes")
     cells = [headers] + [
-        (_cell(r.period), _cell(r.runtime), _cell(r.model), _cell(r.effort), _cell(r.agent_type),
+        (_cell(r.period), _cell(r.runtime), _cell(r.model), _cell(r.effort), _cell(r.agent_type), _cell(r.workflow),
          _cell(r.runs), _cell(r.completed), _cell(r.human_review), _cell(r.relaunched),
          _cell(r.median_minutes))
         for r in rows
@@ -160,6 +170,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=("grouping period {day,week}, default: day. Groups segments into daily buckets (period is the "
               "segment's start date) or Monday-anchored weekly buckets (period is that week's Monday)."),
     )
+    ap.add_argument(
+        "--raw", action="store_true",
+        help=("flag, default: off. Print JSON attempt records, preserving each outcome and individual duration, "
+              "instead of the grouped table."),
+    )
     return ap
 
 
@@ -179,7 +194,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     db = store_access.migrated_store(root)
     try:
-        _print_table(table(db.segments(), since=since, until=until, by=args.by, zone=cfg.zone))
+        segments = db.segments()
+        if args.raw:
+            print(json.dumps([asdict(row) for row in records(segments)
+                              if since <= datetime.fromisoformat(row.started_at).astimezone(cfg.zone).date() <= until]))
+        else:
+            _print_table(table(segments, since=since, until=until, by=args.by, zone=cfg.zone))
     finally:
         db.engine.dispose()
     return 0
