@@ -575,6 +575,12 @@ class NeedsInputParityTest(unittest.TestCase):
         self.assertIn("CRASHED", html)
         self.assertRegex(html, r'href="/workers"[^>]*>Workers<span class="badge" title="1 need input">1</span>')
 
+    def test_missing_review_flag_defaults_to_no_wait_but_segment_review_still_counts(self):
+        summary = SimpleNamespace(issue_key="github:example/repo#7", forge_state="open")
+        self.assertEqual(task_forge.workers_need_input(items=[summary]), 0)
+        self.assertEqual(task_forge.workers_need_input(items=[summary],
+                         segments=[_seg(summary.issue_key, "human_review")]), 1)
+
     def test_workers_need_input_is_one_count_for_the_store_and_the_log(self):
         # Open + flag, open + latest human_review, closed excluded. The end date is not consulted, so a
         # review that ended yesterday still counts. A store snapshot is authoritative when a tracker log also exists.

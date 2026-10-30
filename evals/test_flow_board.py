@@ -728,7 +728,7 @@ class Page(unittest.TestCase):
 
     def test_each_tile_links_to_the_cards_that_carry_its_facts(self) -> None:
         # #208: the removed panels no longer have anchors; tiles reach BUILD, and tabs reach the detail pages.
-        links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="([#/][a-z#-]+)"(?: title="[^\"]*")?><span class="panels-label">([A-Z ]+)</span>', self.body)
+        links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="([#/][a-z#-]+)"><span class="panels-label">([A-Z ]+)</span>', self.body)
         # #349 review: the kind is what the stylesheet colours a tile by, so each is pinned with its link and label.
         # #1122: NEEDS INPUT opens the decisions page.
         self.assertEqual(links, [("all", "#flow", "ALL"), ("blocked", "/decisions#pending-decisions", "NEEDS INPUT"), ("running", "#flow", "RUNNING"),
@@ -772,8 +772,7 @@ class Page(unittest.TestCase):
         self.assertEqual(tiles["NEEDS INPUT"], "2")
         flags = re.findall(r'<div class="columns-tag columns-flag" data-cat="hold">([^<]*)<', html)
         self.assertEqual(flags, ["NEEDS INPUT", "NEEDS INPUT"])
-        # #898: this tile counts held tasks, so its title says tasks. The Workers tab counts workers and can differ.
-        self.assertRegex(html, r'<a class="panels-tile" data-kind="blocked" href="/decisions#pending-decisions" title="[^"]*tasks[^"]*"')
+        # #898: held task counts and current worker waits can differ; the tile keeps its decisions route.
         workers = re.search(r'href="/workers"[^>]*>Workers(?:<span class="badge"[^>]*>(\d+)</span>)?', html)
         self.assertIsNotNone(workers)
         self.assertNotEqual(workers.group(1) or "0", tiles["NEEDS INPUT"])

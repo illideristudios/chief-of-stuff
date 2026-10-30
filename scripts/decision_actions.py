@@ -299,7 +299,7 @@ def waiting_workers(items, segments, resumes: dict | None = None) -> set[str]:
 
     opened = {i.issue_key: i for i in items if i.forge_state != "closed"}
     last = {s.issue_key: s for s in segments}
-    waiting = {i.issue_key for i in opened.values() if i.human_review}
+    waiting = {i.issue_key for i in opened.values() if getattr(i, "human_review", False)}
     waiting.update(key for key, seg in last.items() if key in opened and seg.outcome == "human_review")
     segs_by_key: dict[str, list] = {}
     for seg in segments:
