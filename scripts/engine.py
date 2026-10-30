@@ -43,6 +43,7 @@ import readiness
 import reconcile
 import release_selection
 import runtimes
+import self_update
 import settings
 import shell_setup
 import slots
@@ -1202,6 +1203,38 @@ def _prepare_handoff(release: Path) -> Path | None:
         return None
 
 
+def _follow_main(root: Path) -> None:
+    """Install each new origin/main as the release when the engine runs installed on its own repository (the owner, 2026-10-27)."""
+    if supervisor.RELEASE.parent.name != "versions":
+        return  # run from a checkout: there is no installed `current` to move
+    try:
+        if (release_selection.selected_release(root, supervisor) != supervisor.RELEASE
+                or _pending_explicit_install(root)):
+            return  # let the selected explicit install or rollback hand off first
+
+        @contextlib.contextmanager
+        def install_lock():
+            with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+                if (release_selection.selected_release(root, supervisor) != supervisor.RELEASE
+                        or _pending_explicit_install(root)):
+                    raise supervisor.ServiceError("release selection changed during fetch")
+                yield
+
+        upstream = json.loads((supervisor.RELEASE / ".claude-plugin/plugin.json").read_text()).get("repository", "")
+        # Lock order is engine.lock -> supervisor.lock, as in _prepare_handoff; `current` is every workspace's.
+        # The fetch runs before it, so the machine-wide lock is held only for the install.
+        result = self_update.follow_main(root, supervisor.RELEASE.parent.parent, supervisor.state_dir(root) / "main-release",
+                                         upstream, lock=install_lock)
+    except supervisor.ServiceError:
+        return  # another workspace or the CLI holds the lock; a later pass installs
+    except Exception as exc:
+        print(f"engine: cannot install origin/main: {exc}", file=sys.stderr, flush=True)
+        return
+    if result is not None:
+        print(f"engine: installed origin/main as {Path(result['release']).name}; plugin {result['plugin']}",
+              file=sys.stderr, flush=True)
+
+
 def _handoff(release: Path, python: Path, root: Path, interval: float, once: bool) -> None:
     release_selection.validate_handoff(root, release, supervisor)
     argv = release_selection.isolated_release_argv(python, release / "scripts/engine.py",
@@ -1463,6 +1496,7 @@ def main(argv: list[str] | None = None) -> int:
                             release=release,
                         )
                     time.sleep(args.interval)
+                    _follow_main(root)
                     installed = release_selection.selected_release(root, supervisor)
                     if (installed != supervisor.RELEASE or
                             _pending_explicit_install(root)):

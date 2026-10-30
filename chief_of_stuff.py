@@ -9,6 +9,7 @@ and writes a stable, tiny launcher to /usr/local/bin. Later installs only move t
 from __future__ import annotations
 
 import argparse
+import json
 import ast
 import os
 import subprocess
@@ -214,8 +215,13 @@ def install(*, source: Path, install_dir: Path, bin_dir: Path, dry_run: bool = F
         os.replace(staged_pointer, current)
     finally:
         staged_pointer.unlink(missing_ok=True)
-    return {"command": str(binary), "release": str(release),
-            "wrapper_write": change_wrapper, "installed": True}
+    # §14: the same install brings the Claude Code plugin to this release, or reports where it stands.
+    if str(SOURCE / "scripts") not in sys.path:
+        sys.path.insert(0, str(SOURCE / "scripts"))
+    import claude_adapter
+    version = json.loads((release / ".claude-plugin/plugin.json").read_text())["version"]
+    return {"command": str(binary), "release": str(release), "wrapper_write": change_wrapper, "installed": True,
+            **claude_adapter.update_plugin(current, version)}
 
 
 def install_main(argv: list[str]) -> int:

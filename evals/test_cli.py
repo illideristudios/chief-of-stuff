@@ -1,6 +1,7 @@
 """The one installed command routes fixed operations and preserves release pinning."""
 
 import io
+import json
 import os
 import re
 import shlex
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
+import claude_adapter  # noqa: E402
 import performance_report  # noqa: E402
 import probe_health  # noqa: E402
 import shell_setup  # noqa: E402
@@ -188,12 +190,24 @@ class InstallTest(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.share = self.root / "share"
+        # No test runs the real claude: the install's plugin step answers from here.
+        patcher = mock.patch.object(claude_adapter, "update_plugin", return_value={"plugin": "reported"})
+        self.plugin = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def install(self, **kwargs):
         return cli.install(source=ROOT, install_dir=self.share, bin_dir=self.bin, **kwargs)
 
+    def test_an_install_brings_the_plugin_to_the_release_and_reports_it(self):
+        # §14: I → Pl ∨ F. The plugin step reports where the plugin stands; the install passes that on.
+        result = self.install()
+        version = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())["version"]
+        self.plugin.assert_called_once_with(self.share / "current", version)
+        self.assertEqual(result["plugin"], "reported")
+
     def test_dry_run_does_not_write(self):
         result = self.install(dry_run=True)
+        self.plugin.assert_not_called()
         self.assertFalse(result["installed"])
         self.assertTrue(result["wrapper_write"])
         self.assertFalse(self.share.exists())
