@@ -18,6 +18,13 @@ PLUGIN = {".claude-plugin/plugin.json": json.dumps({"name": "chief-of-stuff", "v
           "scripts/engine.py": "print('one')\n", "start_coordinator.py": "", "chief_of_stuff.py": ""}
 
 
+class ReleaseMetadataTest(unittest.TestCase):
+    def test_the_shipped_release_identifies_its_upstream_for_self_update(self):
+        manifest = Path(__file__).resolve().parents[1] / ".claude-plugin/plugin.json"
+        upstream = json.loads(manifest.read_text()).get("repository", "")
+        self.assertTrue(self_update.same_repo("git@github.com:illideristudios/chief-of-stuff.git", upstream))
+
+
 class FollowMainTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
