@@ -1,5 +1,5 @@
 """MODULE GRAPH, the section the decision and issue pages share: the branch-graph CLI's drawing of a change's head
-against its merge base, into `<pages dir>/.graphs/<sha>-<settings hash>/`, from the clone the settings' `[graph]` table
+against its merge base, into `<pages dir>/.graphs/<comparison hash>/`, from the clone the settings' `[graph]` table
 names. The source & diff page fetches a change the same way, with `fetch` and `run`.
 """
 
@@ -53,26 +53,74 @@ def git(args: list[str], timeout: int = 120) -> str:
     return _run(["git", *git_trees.GIT_WRITE_PINS, *args], git_trees.write_env(), timeout)
 
 
-def fetch(change: board_sources.Change, clone: Path) -> str:
-    """Fetch the change's head into the clone; return its merge base with `origin/<base>`."""
+def validate_source(change: board_sources.Change) -> tuple[str, str]:
+    """Reject sources the configured clone cannot safely fetch or serve from cache."""
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", change.head):
         raise ValueError("the forge gave no head commit")
-    n = change.ref[1:]
-    ref = f"refs/merge-requests/{n}/head" if change.ref.startswith("!") else f"pull/{n}/head"
+    if re.fullmatch(r"[\w.-]+/[\w.-]+#\d+", change.ref):
+        raise ValueError("the configured clone has no authorized source for a sibling pull request")
+    match = re.fullmatch(r"([#!])(\d+)", change.ref)
+    if not match:
+        raise ValueError("invalid change reference")
+    return match.groups()
+
+
+def fetch(change: board_sources.Change, clone: Path) -> str:
+    """Fetch the change's head into the clone; return its merge base with `origin/<base>`."""
+    kind, n = validate_source(change)
+    ref = f"refs/merge-requests/{n}/head" if kind == "!" else f"pull/{n}/head"
     # ponytail: the fetch runs synchronously on the GET that renders the page (up to minutes on a big clone); a
     # background job if that bites.
     git(["-C", str(clone), "fetch", "-q", "--end-of-options", "origin", ref, *([change.base] if change.base else [])])
     return run(["git", "-C", str(clone), "merge-base", "--end-of-options", f"origin/{change.base}", change.head]).strip()
 
 
-def draw(change: board_sources.Change, g: Graph, clone: Path, pages: Path) -> tuple[list[str], str]:
-    """(mermaid views, summary) from branch-graph for the change's head against its merge base, drawn once per commit
+def cache_key(change: board_sources.Change, clone: Path, base: str, *inputs) -> str:
+    """Identify the actual comparison, source and all caller-specific output inputs."""
+    identity = [change.head, change.base, change.ref, change.url, str(clone.resolve()), base, *inputs]
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def comparison(change: board_sources.Change, clone: Path, index: Path, *inputs) -> tuple[str, bool]:
+    """Fetch the comparison, or identify the last verified one as stale when offline."""
+    validate_source(change)
+    identity = cache_key(change, clone, '', *inputs)
+    try:
+        return fetch(change, clone), False
+    except (OSError, ValueError) as error:
+        try:
+            saved = json.loads((index / identity).read_text())
+            base = saved['base']
+            if not isinstance(base, str) or not base or saved['key'] != cache_key(change, clone, base, *inputs):
+                raise ValueError('invalid cache identity')
+            return base, True
+        except (OSError, ValueError, KeyError, TypeError):
+            raise error
+
+
+def remember_comparison(change: board_sources.Change, clone: Path, index: Path, base: str, *inputs) -> None:
+    index.mkdir(parents=True, exist_ok=True)
+    identity = cache_key(change, clone, '', *inputs)
+    (index / identity).write_text(json.dumps({'base': base, 'key': cache_key(change, clone, base, *inputs)}))
+
+
+def draw_result(change: board_sources.Change, g: Graph, clone: Path, pages: Path) -> tuple[list[str], str, bool]:
+    """(mermaid views, summary) from branch-graph for the change's head against its merge base, cached per comparison
     and settings."""
-    key = hashlib.sha256(json.dumps([g.exclude, g.max_nodes]).encode()).hexdigest()[:8]
-    out = pages / ".graphs" / f"{change.head}-{key}"
+    rules = clone / g.rules if g.rules else None
+    try:
+        rules_hash = hashlib.sha256(rules.read_bytes()).hexdigest() if rules else None
+    except OSError:
+        rules_hash = None  # branch-graph will report an unreadable rules file
+    inputs = (g.root, g.depth, g.rules, rules_hash, g.exclude, g.max_nodes)
+    index = pages / '.graphs' / '.comparisons'
+    base, stale = comparison(change, clone, index, *inputs)
+    key = cache_key(change, clone, base, *inputs)
+    out = pages / ".graphs" / key
     summary = out / "summary.txt"
     if not summary.is_file():
-        base = fetch(change, clone)
+        if stale:
+            raise ValueError('cached module graph is unavailable while offline')
         out.mkdir(parents=True, exist_ok=True)
         said = run(["branch-graph", "--repo", str(clone), "--base", base, "--head", change.head, "--root", g.root,
                     "--depth", str(g.depth), *(["--rules", str(clone / g.rules)] if g.rules else []),
@@ -81,10 +129,22 @@ def draw(change: board_sources.Change, g: Graph, clone: Path, pages: Path) -> tu
         summary.write_text((said.splitlines() or [""])[0])  # written last: it marks the drawing done
     said = summary.read_text()
     if re.search(r"\bviews=0\b", said):  # every changed module is excluded: nothing to draw
-        return [], said
+        if not stale:
+            remember_comparison(change, clone, index, base, *inputs)
+        return [], said, stale
     # An older branch-graph ignores --max-nodes, writes one page.mmd, and says no views=.
     views = sorted(out.glob("page-*.mmd"), key=lambda f: int(f.stem[5:])) or [out / "page.mmd"]
-    return [DRIFT[0].sub(DRIFT[1], f.read_text()) for f in views], said
+    result = [DRIFT[0].sub(DRIFT[1], f.read_text()) for f in views]
+    if not stale:
+        remember_comparison(change, clone, index, base, *inputs)
+    return result, said, stale
+
+
+def draw(change: board_sources.Change, g: Graph, clone: Path, pages: Path) -> tuple[list[str], str]:
+    views, summary, stale = draw_result(change, g, clone, pages)
+    if stale:
+        raise ValueError('module graph is stale: the current base could not be verified')
+    return views, summary
 
 
 def section(change: board_sources.Change | None, graph: Graph | None, pages: Path | None, root: Path | None,
@@ -103,11 +163,12 @@ def section(change: board_sources.Change | None, graph: Graph | None, pages: Pat
     if not (graph and pages and root):
         return wrap('    <p class="card">The module graph is not configured: the settings have no <code>[graph]</code> table.</p>')
     try:
-        views, summary = draw(change, graph, root / graph.clone, pages)
+        views, summary, stale = draw_result(change, graph, root / graph.clone, pages)
     except (OSError, ValueError) as e:
         return wrap(f'    <p class="card">The module graph is unavailable: {escape(str(e))}</p>')
+    warning = '    <p class="card">Stale cached graph: the current base could not be verified.</p>\n' if stale else ''
     if not views:
-        return wrap('    <p class="card">No module outside the excluded set changed.</p>')
+        return wrap(warning + '    <p class="card">No module outside the excluded set changed.</p>')
     head += (f' <span class="cap">{len(views)} view{"s" * (len(views) != 1)} · '
              f"at most {graph.max_nodes} modules each</span>")
     figures = []
@@ -120,5 +181,5 @@ def section(change: board_sources.Change | None, graph: Graph | None, pages: Pat
     rest = f"<span>Not drawn: {rest} modules.</span>" if rest else ""
     # Decision.dc.html's caption: "nodes +1 −1 ~1 · edges +2 −1 · drift 1".
     caption = re.sub(r" (?:excluded|views)=\S*", "", summary).replace(" edges", " · edges").replace(" drift=", " · drift ")
-    return wrap('    <figure class="graph"><div class="views">\n' + "\n".join(figures) + "\n    </div>\n"
+    return wrap(warning + '    <figure class="graph"><div class="views">\n' + "\n".join(figures) + "\n    </div>\n"
                 f'    <figcaption>{chips}<span class="sum">{escape(caption)}</span>{rest}</figcaption></figure>\n    {MERMAID}')

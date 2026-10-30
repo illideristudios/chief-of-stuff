@@ -24,6 +24,7 @@ from evals import git_taint as taint  # noqa: E402
 import tree_state  # noqa: E402
 from tree_state import TreeState, at_risk  # noqa: E402
 
+ORIGINAL_AUDIT_ENV = git_trees.audit_env
 ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null",
        "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@example.test",
        "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@example.test"}
@@ -1630,7 +1631,10 @@ class AuditEnvTest(Repo):
         self.assertEqual(env, git_trees.audit_env())
 
     def test_the_audit_call_keeps_the_rest_of_its_environment(self) -> None:
-        env = self._spied_env()
+        # The module fixture substitutes a macOS Git executable for integration tests;
+        # this assertion checks the production environment, not that fixture's PATH.
+        with patch.object(git_trees, "audit_env", ORIGINAL_AUDIT_ENV):
+            env = self._spied_env()
         self.assertEqual(env["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual((env["GIT_TERMINAL_PROMPT"], env["GIT_OPTIONAL_LOCKS"]), ("0", "0"))
         self.assertEqual(env["PATH"], "/usr/bin:/bin:/usr/local/bin")
@@ -1650,7 +1654,7 @@ class AuditEnvTest(Repo):
                              (git_trees.SAFE_HOME, "/dev/null", "/dev/null", "1"))
 
     def test_audit_env_is_the_one_definition(self) -> None:
-        self.assertEqual(git_trees.audit_env(), {
+        self.assertEqual(ORIGINAL_AUDIT_ENV(), {
             "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
             "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": git_trees.SAFE_HOME,
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"})
