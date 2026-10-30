@@ -28,5 +28,3 @@ For a new GitHub issue, `--parent 12` and repeated `--blocked-by 7` flags create
 ## Checks and failures
 
 `python3 scripts/backlog.py --config /path/to/workspace/CLAUDE.md` prints open and closed counts. `--list` prints open issues; `--state closed --list` prints closed issues. A missing CLI, credential, unreachable host, malformed response, or partial result reports an unknown backlog and exits nonzero. An unknown result never counts as an empty backlog.
-
-The previous workspace specific setup and migration history are preserved in [backlog-history.md](archive/backlog-history.md).

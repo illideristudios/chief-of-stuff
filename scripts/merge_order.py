@@ -216,6 +216,7 @@ def trial(root: Path, a: Change, b: Change, git=subprocess.run) -> Trial:
 
 
 def report(changes: list[Change], trials: dict[tuple[int, int], Trial], mark: str) -> str:
+    """Shared text for the CLI and the board's merge-order.html page (#75)."""
     blocks = []
     for base in sorted({c.base for c in changes}):
         group = sorted((c for c in changes if c.base == base), key=lambda c: c.number)

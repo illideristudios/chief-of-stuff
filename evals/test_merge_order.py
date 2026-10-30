@@ -354,5 +354,28 @@ class RealGitTest(unittest.TestCase):
             self.assertEqual(before, (git("rev-parse", "HEAD"), git("status", "--porcelain"), (root / ".git/index").read_bytes()))
 
 
+class SharedReportPageTest(unittest.TestCase):
+    """#75: board write publishes merge-order.html using the same report() text as the CLI."""
+
+    def test_page_embeds_the_shared_report(self) -> None:
+        import board_sources as bs
+        import render_board as rb
+
+        change = bs.Change("#12", "https://github.com/o/app/pull/12", "Fix uploads", "open", False,
+                           "passed", True, 1, None, "main", ("src/a.py",), ("#1",), head="a" * 40)
+        other = bs.Change("#13", "https://github.com/o/app/pull/13", "Docs", "open", False,
+                          "passed", False, 0, None, "main", ("README.md",), (), head="b" * 40)
+        sources = bs.Sources({}, {}, {"#12": change, "#13": other}, (), {},
+                             home=bs.backlog.GitHubBacklog("o/app"))
+        changes = [
+            mo.Change(12, "Fix uploads", change.url, "a" * 40, "main", frozenset({"src/a.py"})),
+            mo.Change(13, "Docs", other.url, "b" * 40, "main", frozenset({"README.md"})),
+        ]
+        expected = mo.report(changes, {}, "#")
+        html = rb.merge_order_page(sources)
+        self.assertIn(expected, html)
+        self.assertIn("order: #12 #13", html)
+
+
 if __name__ == "__main__":
     unittest.main()
