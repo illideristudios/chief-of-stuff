@@ -513,8 +513,10 @@ class CardFactsTest(unittest.TestCase):
     def test_finished_tasks_have_no_looping_mark(self):
         log = "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n- 11:00 stage: Cut the release → fix\n"
         lanes = {"build": st.Lane(("implement", "review", "fix", "merge", "main"))}
+        # A done task draws no card at all outside `main` (#1153), so it carries no mark.
+        self.assertNotRegex(self.cols([], log, tracker=TRACKER.replace("running 10:30", "done 10:30"), lanes=lanes),
+                            r">Cut the release</(?:a|div)>")
         for tracker, changes in (
-                (TRACKER.replace("running 10:30", "done 10:30"), []),
                 (TRACKER.replace("| build | review |", "| build | main |"), []),
                 (TRACKER, [change("!3", state="merged", issues=("#9",))])):
             with self.subTest(tracker=tracker, changes=changes):
@@ -593,6 +595,30 @@ class HomeProjectUrlTest(unittest.TestCase):
         bare = replace(self.sources, changes={}, issues={})
         card = card_named(rb.build_columns(self.tasks, LANES, KANBAN, bare, NOW), "Ship it")
         self.assertEqual(card.refs, (("#8", fragment.issue_href("gitlab:example.com/o/app#8")),))
+
+
+class ForeignProjectUrlTest(unittest.TestCase):
+    """#416: a card naming another project on the home host uses that identity's task page, not `/issues/<n>`."""
+
+    HOME = backlog.Backlog(host="https://example.com", project="o/app")
+    CELL = "https://example.com/acme/web/-/issues/8"
+    IDENTITY = "gitlab:example.com/acme/web#8"
+
+    def card(self, issues: dict) -> columns.Card:
+        sources = bs.Sources({}, issues, {}, (), {}, self.HOME)
+        tracker = TRACKER.replace("## Decisions", f"| Ship it | Ship | Robin | waiting | 09:00 |  | S | build | review | {self.CELL} | c |\n\n## Decisions")
+        return card_named(rb.build_columns(rb.parse_tracker(tracker).tasks, LANES, KANBAN, sources, NOW), "Ship it")
+
+    def test_the_name_and_the_ref_open_the_other_projects_issue(self) -> None:
+        # Main routes verified foreign identities through issue_href, not the forge URL (#1173).
+        known = {self.IDENTITY: bs.Issue(self.IDENTITY, self.CELL, "Locale", "open", ())}
+        expected = ((self.IDENTITY, fragment.issue_href(self.IDENTITY)),)
+        for issues in ({}, known):
+            with self.subTest(cached=bool(issues)):
+                card = self.card(issues)
+                self.assertEqual(card.refs, expected)
+                self.assertEqual(card.href, fragment.issue_href(self.IDENTITY))
+                self.assertNotEqual(card.href, "/issues/8")
 
 
 class CardLinkTest(unittest.TestCase):
@@ -913,6 +939,121 @@ class EpicsOnTheBoardTest(unittest.TestCase):
         cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         self.assertIn('title="milestones: 1 late">1 late</span>', rb.render(TRACKER, cfg, NOW, lanes=LANES, sources=sources))
         self.assertNotIn("milestones:", rb.render(TRACKER, cfg, NOW, lanes=LANES, sources=SOURCES))
+
+
+class BuildFollowsFlowTest(unittest.TestCase):
+    """#887: Build cards use Flow stages and numeric issue order, with main's done-card rule."""
+
+    LANES = {"build": st.Lane(("design", "plan", "main")), "fix": st.Lane(("design", "plan", "pr", "main"))}
+
+    def page(self, rows: str, log: str = "", sources=bs.EMPTY, kanban=None) -> str:
+        tracker = f"""# Tracker 2026-09-16
+
+## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+{rows}
+## Log
+
+{log}
+"""
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        return rb.render(tracker, cfg, NOW, lanes=self.LANES, kanban=kanban, sources=sources)
+
+    def placed(self, html: str) -> dict[str, list[str]]:
+        figure = re.search(r'<figure class="columns".*?</figure>', html, re.S).group(0)
+        out = {}
+        for label, body in re.findall(r'<section class="columns-col[^"]*" aria-label="([^"]+)">(.*?)</section>', figure, re.S):
+            out[label.split(",", 1)[0]] = re.findall(r'class="columns-card-name"[^>]*>([^<]*)<', body)
+        return out
+
+    def notes(self, html: str) -> dict[str, str]:
+        return dict(re.findall(
+            r'class="gantt-name">([^<]*)</span></span><span class="gantt-track">.*?</span><span class="gantt-note">([^<]*)</span>',
+            html, re.S))
+
+    def test_open_cards_follow_the_log_and_sort_by_issue_number(self) -> None:
+        # Tracker order is #10 then #2. Both moved to plan, so plan holds #2 then #10. A cell with no move stays.
+        # No issue number sorts after the numbered cards; equal numbers keep tracker order. A stage no lane has stays on the cell.
+        rows = """| Later | Later item | Robin | open | 09:00 |  | S | build | design | #10 | c |
+| Earlier | Earlier item | Robin | open | 09:00 |  | S | build | design | #2 | c |
+| Stays | Stays item | Robin | open | 09:00 |  | S | build | design | #4 | c |
+| Odd | Odd item | Robin | open | 09:00 |  | S | build | design | #12 | c |
+| Plain | Plain item | Robin | open | 09:00 |  | S | build | plan |  | c |
+| Zed | Zed item | Robin | open | 09:00 |  | S | build | plan | #7 | c |
+| Abe | Abe item | Robin | open | 09:00 |  | S | build | plan | #7 | c |
+"""
+        log = "- 10:00 stage: Later → plan\n- 11:00 stage: Earlier → plan\n- 12:00 stage: Odd → kitchen\n"
+        html = self.page(rows, log)
+        cols = self.placed(html)
+        self.assertEqual(cols["plan"], ["Earlier", "Zed", "Abe", "Later", "Plain"])
+        self.assertEqual(cols["design"], ["Stays", "Odd"])
+        self.assertNotIn("pr", cols)
+        self.assertEqual(self.notes(html)["Earlier"].split(" · ")[0], "plan")
+        self.assertEqual(self.notes(html)["Later"].split(" · ")[0], "plan")
+
+    def test_main_done_card_rule_uses_the_same_effective_stage_as_flow(self):
+        rows = "| Finished | Finished item | unassigned | done 09:00–10:00 | 09:00 | | S | build | design | #3 | |\n"
+        landed = self.page(rows, "- 09:00 stage: Finished → design\n- 10:00 stage: Finished → main\n")
+        self.assertEqual(self.placed(landed)["main"], ["Finished"])
+        self.assertEqual(self.notes(landed)["Finished"].split(" ")[0], "merged")
+        # A stale main cell cannot keep a done card in a stage column when Flow puts it at plan.
+        earlier = self.page(rows.replace("| design |", "| main |"), "- 09:00 stage: Finished → design\n- 10:00 stage: Finished → plan\n")
+        self.assertEqual([name for names in self.placed(earlier).values() for name in names], [])
+        self.assertEqual(self.notes(earlier)["Finished"].split(" · ")[0], "plan")
+
+    def test_a_logged_pr_draws_in_the_following_column(self) -> None:
+        rows = "| Review it | Review item | Robin | open | 09:00 |  | S | fix | design | #6 | c |\n"
+        cols = self.placed(self.page(rows, "- 10:00 stage: Review it → pr\n"))
+        self.assertNotIn("pr", cols)
+        self.assertEqual(cols["main"], ["Review it"])
+        self.assertEqual(cols["design"], [])
+
+    def test_a_launcher_line_places_the_card_until_a_stage_line(self) -> None:
+        rows = "| Built | Write the build | Robin | open | 09:00 |  | S | fix | design | #11 | c |\n"
+        started = "- 10:00 one-shot w1 started: claude, task Write the build\n- 11:00 one-shot w1: completed; awaiting integration\n"
+        self.assertEqual(self.placed(self.page(rows, started))["main"], ["Built"])
+        stayed = "- 09:30 stage: Built → plan\n" + started
+        self.assertEqual(self.placed(self.page(rows, stayed))["plan"], ["Built"])
+
+    def test_merged_today_cards_stay_the_tail_of_main_newest_first(self) -> None:
+        rows = """| Landed | Landed item | Robin | done | 09:00 |  | S | build | main | #5 | c |
+| Also | Also item | Robin | open | 09:00 |  | S | build | main | #1 | c |
+"""
+        newer = change("!70", state="merged", merged_at=NOW - timedelta(hours=1), issues=("#20",), title="Newer merge")
+        older = change("!71", state="merged", merged_at=NOW - timedelta(hours=3), issues=("#21",), title="Older merge")
+        sources = replace(bs.EMPTY, home=SOURCES.home, changes={c.ref: c for c in (older, newer)})
+        self.assertEqual(self.placed(self.page(rows, sources=sources))["main"],
+                         ["Also", "Landed", "Newer merge", "Older merge"])
+
+    def test_store_item_without_a_stage_uses_its_last_segment_in_build_and_flow(self):
+        import shutil
+        from test_m6_store_board import make_store_workspace, KEY
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        db.upsert_item(KEY, title="Store fallback", workflow="build", stage="")
+        db.record_segment(KEY, "plan", 1, (NOW - timedelta(minutes=2)).isoformat(),
+                          ended_at=(NOW - timedelta(minutes=1)).isoformat(), outcome="done")
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        html = rb.render("", cfg, NOW, lanes=self.LANES, db=task_forge.page_data(db))
+        self.assertEqual(self.placed(html)["plan"], ["Store fallback"])
+        self.assertEqual(self.placed(html)["design"], [])
+        self.assertTrue(self.notes(html)["Store fallback"].endswith("plan"))
+
+    def test_a_hold_and_drift_use_the_logged_stage(self) -> None:
+        rows = "| Moved | Moved item | Robin | open | 09:00 |  | S | build | design | #2 | c |\n"
+        log = "- 10:00 stage: Moved → plan\n"
+        kanban = st.Kanban(("stage::design", "stage::plan"), "needs-human", {"design": 0, "plan": 1})
+        sources = replace(bs.EMPTY, home=SOURCES.home, issues={"#2": bs.Issue("#2", "https://forge/i/2", "Moved", "open", ("stage::plan",))})
+        figure = self.page(rows, log, sources, kanban).split('<figure class="columns"', 1)[1].split("</figure>", 1)[0]
+        self.assertNotIn('data-cat="hold"', figure)
+        self.assertNotIn('data-cat="drift"', figure)
+        # A hold stage expects the hold label, so this case only checks the flag follows the logged stage.
+        held = self.page(rows, log, sources, replace(kanban, hold_stages=("plan",)))
+        figure = held.split('<figure class="columns"', 1)[1].split("</figure>", 1)[0]
+        self.assertIn('data-cat="hold"', figure)
 
 
 class StoreKeyCardTest(unittest.TestCase):

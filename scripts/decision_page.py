@@ -53,7 +53,8 @@ from urllib.parse import quote, urlsplit
 import board_sources
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
 from clock import leading
-from decision_actions import DecisionState, OPEN_STATES, addresses, state_of, states, tab_counts as store_tab_counts
+from decision_actions import (DecisionState, OPEN_STATES, addresses, current_rows, state_of, states,
+                              tab_counts as store_tab_counts, waits_on_owner)
 from fragment import DECISIONS_ANCHOR, FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
 from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
@@ -366,6 +367,23 @@ def answer_key(d: dict) -> str:
     return (a.get("key") or "") if isinstance(a, dict) else (a or "")
 
 
+def tracker_answer(root: Path | None, slug: str) -> Row | None:
+    """The latest Decisions row naming `decision-<slug>` across the workspace's daily trackers, or None. A tracker
+    that cannot be read raises (OSError, ConfigError, ValueError): the caller decides whether that fails closed."""
+    if root is None or not slug:
+        return None
+    cfg = read_config(root)
+    rows = [Row(d, leading(t, d, cfg.zone), item, words)
+            for d, path in daily_trackers(root, cfg)
+            for t, item, words in decision_rows(path.read_text())]
+    return Context(datetime.now(cfg.zone), tuple(rows)).answer(slug)
+
+
+def is_answered(d: dict, slug: str = "", root: Path | None = None) -> bool:
+    """True when `d` carries an answer or a tracker Decisions row names `decision-<slug>`."""
+    return bool(d.get("answer")) or tracker_answer(root, slug) is not None
+
+
 def _saved_html(d: dict, when) -> str:
     """The saved answer: its option, the user's words, and when it was saved."""
     a = saved(d)
@@ -373,6 +391,18 @@ def _saved_html(d: dict, when) -> str:
     key = f'<span><span class="key">{escape(a["key"])}</span>{escape(title)}</span>' if a.get("key") else ""
     words = f'<span class="words">“{markdown_inline(str(a["words"]).strip())}”</span>' if str(a.get("words") or "").strip() else ""
     return f'{key}{words}<span class="saved">answered, saved {when(datetime.fromisoformat(a["at"]))}</span>'
+
+
+def _answered_html(d: dict, when, chosen: str = "", row: Row | None = None, link: Linker = Linker()) -> str:
+    """The recorded answer. A page save keeps its markup until a Decisions row takes it up."""
+    if row is None and saved(d):
+        return _saved_html(d, when)
+    title = next((o.get("title", "") for o in d["options"] if o["key"] == chosen), "")
+    key = f'<span><span class="key">{escape(chosen)}</span>{escape(title)}</span>' if chosen else ""
+    raw = row.words.strip().strip('"“”').strip() if row is not None else ""
+    words = f'<span class="words">“{_md(raw, link)}”</span>' if raw else ""
+    stamp = f'<span class="saved">answered {when(row.when)}</span>' if row and row.when else '<span class="saved">answered</span>'
+    return f"{key}{words}{stamp}"
 
 
 def _answer_form(slug: str, cls: str, opts: str, back: str = "") -> str:
@@ -408,22 +438,35 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
             + f'></span><span>{md(t["text"])}</span></div>' for t in d["timeline"])
         left.append(_section("How it got here", f'    <div class="card timeline">\n{steps}\n    </div>'))
     page = saved(d)
+    keys = [o["key"] for o in d["options"]]
+    fmt = (lambda t: ctx.when(t)) if ctx else (lambda t: f"{t:%H:%M}")
+    # A Decisions row outranks a page-saved answer, as index() does.
+    row = ctx.answer(slug) if ctx else None
+    chosen = ctx.key(row, keys) if row else answer_key(d)
+    answered = bool(chosen or row or page)
     opts = []
     for o in d["options"]:
         tag = '<span class="tag">recommended</span>' if o["key"] == d["recommended"] else ""
-        on = " checked" if (selected == o["key"] if refusal else page and page.get("key") == o["key"]) else ""
-        opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value="{escape(o["key"])}"{on}> {escape(o["key"])}</span>'
-                    f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </label>')
+        if answered:
+            opts.append(f'      <div class="opt"><span class="k">{escape(o["key"])}</span>'
+                        f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </div>')
+        else:
+            on = " checked" if (selected == o["key"] if refusal else False) else ""
+            opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value="{escape(o["key"])}"{on}> {escape(o["key"])}</span>'
+                        f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </label>')
     # The write-in is the next option: same look, key "" (a words-only save), the next letter after the real ones.
     wi_key = chr(ord("A") + len(d["options"]))
-    on = " checked" if (not selected if refusal else page and page.get("key") == "") else ""
-    draft_value = f' value="{escape(draft)}"' if refusal else ""
-    opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value=""{on}> {wi_key}</span>'
-                f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer"{draft_value}>'
-                f'<button type="submit">save</button></span>\n      </label>')
-    fmt = (lambda t: ctx.when(t)) if ctx else (lambda t: f"{t:%H:%M}")
-    done = f'    <div class="card answered">{_saved_html(d, fmt)}</div>\n' if page else ""
-    right.append(_section("Options", done + "    " + _answer_form(slug, "options", "\n" + "\n".join(opts), back) + "\n    </form>"))
+    if answered:
+        done = f'    <div class="card answered">{_answered_html(d, fmt, chosen, row, link)}</div>\n'
+        options = done + '    <div class="options">\n' + "\n".join(opts) + "\n    </div>"
+    else:
+        on = " checked" if (not selected if refusal else False) else ""
+        draft_value = f' value="{escape(draft)}"' if refusal else ""
+        opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value=""{on}> {wi_key}</span>'
+                    f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer"{draft_value}>'
+                    f'<button type="submit">save</button></span>\n      </label>')
+        options = "    " + _answer_form(slug, "options", "\n" + "\n".join(opts), back) + "\n    </form>"
+    right.append(_section("Options", options))
     right.append(_section("Recommendation", f'    <div class="card prose">{markdown_blocks(d["why"], link.resolve)}</div>'))
     right.append(_section("If you don't answer", f'    <div class="card default prose">{markdown_blocks(d["default"], link.resolve)}</div>'))
     if d.get("references"):
@@ -441,13 +484,9 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
             rows.append(f'      <span class="cap">{escape(r.get("kind") or r.get("label", ""))}</span><span>{what}</span>'
                         f'<span class="st">{status}</span>')
         right.append(_section("References", '    <div class="card refs">\n' + "\n".join(rows) + "\n    </div>"))
-    keys = [o["key"] for o in d["options"]]
     sources = f" from {md(d['sources'])}" if d.get("sources") else ""
     at = ctx.asked(slug, d, mtime) if ctx else None
     asked = f"asked {ctx.when(at)}" if at else f"asked {d['asked']}" if d.get("asked") else None
-    row = ctx.answer(slug) if ctx and not answer_key(d) else None
-    chosen = answer_key(d) or (ctx.key(row, keys) if row else "")
-    answered = bool(chosen or row or page)
     eyebrow = " · ".join([escape(x) for x in ("Decision", d.get("topic"), _day(day), asked) if x]
                          + ['<a href="/decisions">decisions</a>', '<a href="/">board</a>'])
     chip = f"ANSWERED · {escape(chosen)}" if chosen else "ANSWERED" if answered else "PENDING"
@@ -470,8 +509,9 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
             + where
             + '  <div class="cols">\n  <div class="col">\n' + "".join(left) + '  </div>\n  <div class="col">\n'
             + "".join(right) + "  </div>\n  </div>\n"
-            + f'\n  <p class="foot">Prepared by the coordinator{sources}. Answer here or in chat: '
-            + ", ".join(keys) + f", or {wi_key} in your own words.</p>\n</main>\n{ANSWER_JS}</body>\n</html>\n")
+            + f'\n  <p class="foot">Prepared by the coordinator{sources}.'
+            + ("" if answered else " Answer here or in chat: " + ", ".join(keys) + f", or {wi_key} in your own words.")
+            + f"</p>\n</main>\n{'' if answered else ANSWER_JS}</body>\n</html>\n")
 
 
 def forge(root: Path) -> Backlog | GitHubBacklog | None:
@@ -853,7 +893,7 @@ def store_page(rows, row_id: int, ctx: Context, navigation: dict | None = None) 
         done = (f'<div class="card answered"><span><span class="key">{escape(d.decided_by or "—")}</span>'
                 f'{escape(d.answer or d.note or d.status)}</span><span class="saved">{escape(d.status)} {when(d.answered_at or d.asked_at)}</span></div>')
     form = store_decision_form(d, f"/decisions/{page}") if d.status in OPEN_STATES | {"answered"} else ""
-    waits = escape(ctx.user or "the owner") if d.status in OPEN_STATES else f"no one: answered by {escape(d.decided_by or 'the engine')}"
+    waits = escape(ctx.user or "the owner") if waits_on_owner(history[0]) else f"no one: answered by {escape(d.decided_by or 'the engine')}"
     steps = []
     for r in history:
         st = state_of(r)
@@ -908,7 +948,8 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
         opened = {i.issue_key for i in db.items() if getattr(i, "forge_state", "open") != "closed"}
         store_states = states(db.decisions())
         pending_store = sorted(
-            ((d, _stamp(d.asked_at, ctx.now)) for d in store_states if d.status in OPEN_STATES and d.issue_key in opened),
+            ((state_of(r), _stamp(state_of(r).asked_at, ctx.now)) for r in current_rows(db.decisions())
+             if waits_on_owner(r) and r.issue_key in opened),
             key=lambda item: (-(item[1].timestamp() if item[1] else 0), -item[0].id),
         )
         rows.extend(_store_pending_row(d, asked, ctx, ids.get(d.id, d.id)) for d, asked in pending_store)
@@ -926,6 +967,9 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
         topic = f'<span class="topic">{escape(d["topic"])}</span>' if d.get("topic") else ""
         if saved(d):
             opts = f'<span class="stack">{_saved_html(d, ctx.when)}</span>'
+        elif key := answer_key(d):
+            title = next((o.get("title", "") for o in d["options"] if o["key"] == key), "")
+            opts = f'<span class="stack"><span><span class="key">{escape(key)}</span>{escape(title)}</span></span>'
         else:
             opts = "".join(f'<label class="o"><input type="radio" name="key" value="{escape(o["key"])}"><span class="key">{escape(o["key"])}</span>'
                            f'{escape(o.get("title", ""))}{"<span class=\"tag\">recommended</span>" if o["key"] == d["recommended"] else ""}</label>'
@@ -1086,7 +1130,7 @@ code{font-family:ui-monospace,monospace;font-size:.88em;background:var(--ref-bg)
 .options{display:flex;flex-direction:column;background:var(--surface);border-top:3px solid var(--brass);border-radius:5px;padding:4px 14px;box-shadow:0 2px 6px color-mix(in srgb,var(--fg) 8%,transparent)}
 .opt{display:grid;grid-template-columns:44px minmax(0,1fr);gap:2px 8px;padding:8px 6px;margin:0 -6px;width:calc(100% + 12px);border-radius:3px}
 .opt+.opt{border-top:1px dotted var(--line)}
-.opt:hover{background:var(--bg)}
+label.opt:hover{background:var(--bg)}
 label.opt,label.o{cursor:pointer} label.o:hover{border-color:var(--brass)}
 .opt .k{font:700 16px/1.3 ui-monospace,monospace;color:var(--muted)}
 .opt input,.o input{accent-color:var(--brass);margin:0 4px 0 0}
@@ -1185,7 +1229,7 @@ ANSWER_JS = """<script>
 document.querySelectorAll('form[action^="/decisions/"]').forEach(function (f) {
   function send() {
     fetch(f.action, {method: 'POST', body: new URLSearchParams(new FormData(f))})
-      .then(function (r) { if (r.ok) location.reload(); });
+      .then(function (r) { if (r.ok || r.status === 409) location.reload(); });
   }
   f.addEventListener('change', function (e) { if (e.target.name === 'key' && e.target.value) send(); });
   f.addEventListener('submit', function (e) { e.preventDefault(); send(); });

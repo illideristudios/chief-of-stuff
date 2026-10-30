@@ -402,6 +402,20 @@ class InitWorkspaceTest(unittest.TestCase):
         self.assertIn("project group/repo; token env MY_GITLAB_TOKEN", text)
         self.assertNotIn("token value", text)
 
+    def test_preserved_settings_with_a_missing_or_invalid_policy_overlay_refuse(self):
+        path = self.root / "chief-of-stuff.toml"
+        path.write_text(_engine_ready_kanban(["00 - PLAN"], "HOLD") + '\n[policy]\noverlay = "missing.toml"\n')
+        code, _, err = self.run_init()
+        self.assertEqual(code, 1)
+        self.assertIn("missing.toml", err)
+        self.assertFalse((self.root / "CLAUDE.md").exists())
+        (self.root / "policy.toml").write_text("[stages.review.policy]\narchitekt = false\n")
+        path.write_text(_engine_ready_kanban(["00 - PLAN"], "HOLD") + '\n[policy]\noverlay = "policy.toml"\n')
+        code, _, err = self.run_init()
+        self.assertEqual(code, 1)
+        self.assertIn("architekt", err)
+        self.assertFalse((self.root / "CLAUDE.md").exists())
+
     def test_invalid_values_refuse_without_writing(self):
         for extra in (("--daily-dir", "../outside"), ("--agent", "bad name:task"),
                       ("--github-repo", "bad"), ("--board-port", "70000"),

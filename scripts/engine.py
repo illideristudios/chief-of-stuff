@@ -44,6 +44,7 @@ import readiness
 import reconcile
 import release_selection
 import runtimes
+import self_update
 import settings
 import shell_setup
 import slots
@@ -55,7 +56,7 @@ import worker
 import worker_health
 from forge_port import ForgeError
 from reconcile import OP_DECISION_COMMENT, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN
-from workspace import read_engine_status, worktrees_dir, write_engine_status
+from workspace import read_engine_status, settings_path, worktrees_dir, write_engine_status
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 TRIO_PASS_BUDGET_S = 480  # #927: trio calls stop here in one pass; above TIMEOUT_S so a slow vote leaves room for two more
@@ -837,7 +838,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                   account=workers.claude_as_profile,
                                   hold_observations=tuple((row["issue_key"], row.get("human_review")) for row in snapshots)),
                    finish=partial(_finish_worker, forge, store, policies=policies),
-                   require_green=require_green, teardown_command=teardown_command)
+                   require_green=require_green, teardown_command=teardown_command,
+                   transcript_max_bytes=workers.transcript_max_bytes)
     if is_dataclass(facts) and facts.unreadable:
         # Unreadable orphans under recovery are quarantined at launch; Close must not hold on them either.
         unreadable = tuple(k for k in facts.unreadable if "recovery" not in _resume(store, k))
@@ -1275,6 +1277,38 @@ def _prepare_handoff(release: Path) -> Path | None:
         return None
 
 
+def _follow_main(root: Path) -> None:
+    """Install each new origin/main as the release when the engine runs installed on its own repository (the owner, 2026-10-27)."""
+    if supervisor.RELEASE.parent.name != "versions":
+        return  # run from a checkout: there is no installed `current` to move
+    try:
+        if (release_selection.selected_release(root, supervisor) != supervisor.RELEASE
+                or _pending_explicit_install(root)):
+            return  # let the selected explicit install or rollback hand off first
+
+        @contextlib.contextmanager
+        def install_lock():
+            with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+                if (release_selection.selected_release(root, supervisor) != supervisor.RELEASE
+                        or _pending_explicit_install(root)):
+                    raise supervisor.ServiceError("release selection changed during fetch")
+                yield
+
+        upstream = json.loads((supervisor.RELEASE / ".claude-plugin/plugin.json").read_text()).get("repository", "")
+        # Lock order is engine.lock -> supervisor.lock, as in _prepare_handoff; `current` is every workspace's.
+        # The fetch runs before it, so the machine-wide lock is held only for the install.
+        result = self_update.follow_main(root, supervisor.RELEASE.parent.parent, supervisor.state_dir(root) / "main-release",
+                                         upstream, lock=install_lock)
+    except supervisor.ServiceError:
+        return  # another workspace or the CLI holds the lock; a later pass installs
+    except Exception as exc:
+        print(f"engine: cannot install origin/main: {exc}", file=sys.stderr, flush=True)
+        return
+    if result is not None:
+        print(f"engine: installed origin/main as {Path(result['release']).name}; plugin {result['plugin']}",
+              file=sys.stderr, flush=True)
+
+
 def _handoff(release: Path, python: Path, root: Path, interval: float, once: bool) -> None:
     release_selection.validate_handoff(root, release, supervisor)
     argv = release_selection.isolated_release_argv(python, release / "scripts/engine.py",
@@ -1391,6 +1425,11 @@ def main(argv: list[str] | None = None) -> int:
                 _handoff(installed, python, root, args.interval, args.once)
                 return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
+            try:
+                supervisor.record_engine_start(
+                    root, datetime.now(timezone.utc).astimezone().isoformat(), os.getpid())
+            except OSError as exc:
+                print(f"engine: could not record start for bake: {exc}", file=sys.stderr, flush=True)
             prior = read_engine_status(root)
             mode = "once" if args.once else "service"
             release = str(supervisor.RELEASE)
@@ -1431,11 +1470,7 @@ def main(argv: list[str] | None = None) -> int:
                     selected = next(iter(config.repos.values()))
                 if not selected and config.repos:
                     raise ValueError("no [repos] clone matches the workspace backlog")
-                launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
-                                 clone=root / selected if selected else root,
-                                 claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
-                                 require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown,
-                                 launcher=config.workers.worker_launcher, t3_providers=config.workers.t3_providers)
+                launch_config = config
                 model = model_port.Port(partial(_judge, claude_as_profile=config.workers.claude_as_profile),
                                         rotation=config.models.get("trio", ()), pick=config.model_picks.get("trio", "first"),
                                         launchable=_judges)
@@ -1486,10 +1521,27 @@ def main(argv: list[str] | None = None) -> int:
                                             mode=mode, last_error=last_error, error_kind=error_kind, release=release)
                     failed = False
                     try:
+                        # Every launch in this pass shares rules and stage defaults, even if the file changes.
+                        reloaded_config = settings.load(root, settings_path(text))
+                        if reloaded_config.kanban is None:
+                            raise settings.SettingsError(f"{settings_path(text)}: no [kanban] stage labels configured")
+                        dispatch_prompt.validate_worker_rules(root, reloaded_config, policies)
+                        launch_config = reloaded_config
+                    # Validation can also raise ValueError or OverflowError, which settings.load does not wrap.
+                    except Exception as exc:
+                        print(f"engine: settings reload failed; keeping last good snapshot: {exc}",
+                              file=sys.stderr, flush=True)
+                    try:
+                        launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
+                                         clone=root / selected if selected else root, config=launch_config,
+                                         launcher=launch_config.workers.worker_launcher,
+                                         t3_providers=launch_config.workers.t3_providers)
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
                                  clone=root / selected if selected else root,
-                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency, model=model,
-                                 require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
+                                 launch=launch, workers=launch_config.workers,
+                                 max_concurrency=launch_config.workers.max_concurrency, model=model,
+                                 require_green=launch_config.workers.require_green_tests,
+                                 teardown_command=launch_config.workers.teardown)
                     except Exception as exc:
                         failed = True
                         last_attempt_at = datetime.now(timezone.utc)
@@ -1519,6 +1571,7 @@ def main(argv: list[str] | None = None) -> int:
                             release=release,
                         )
                     time.sleep(args.interval)
+                    _follow_main(root)
                     installed = release_selection.selected_release(root, supervisor)
                     if (installed != supervisor.RELEASE or
                             _pending_explicit_install(root)):

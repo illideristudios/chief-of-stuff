@@ -118,6 +118,7 @@ class Workers:
     teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
     stall: Stall = field(default_factory=Stall)
     failure_limit: int = 2
+    transcript_max_bytes: int = 1024 * 1024  # retained event JSON bytes per attempt; the first capture pins it
 
 
 @dataclass(frozen=True)
@@ -377,6 +378,9 @@ def _workers(table) -> Workers:
     worker_launcher = table.get("worker_launcher", "cli")
     if worker_launcher not in ("cli", "t3"):
         raise SettingsError("[workers] worker_launcher must be `cli` or `t3`")
+    transcript_max_bytes = table.get("transcript_max_bytes", 1024 * 1024)
+    if type(transcript_max_bytes) is not int or transcript_max_bytes <= 0:
+        raise SettingsError("[workers] transcript_max_bytes must be a positive integer")
     providers = table.get("t3_providers", {})
     if not isinstance(providers, dict) or not all(
             CLAUDE_AS_PROFILE.fullmatch(k) and isinstance(v, str) and T3_INSTANCE.fullmatch(v) for k, v in providers.items()):
@@ -389,7 +393,7 @@ def _workers(table) -> Workers:
         and "(via " not in rule and len(rule) <= 2400
         and not any(unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"} for c in rule) for rule in rules
     ):
-        raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without control or Unicode format characters '
+        raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without Unicode Cc, Cf, Zl, or Zp characters '
                             'or "(via " markers, each at most 2400 characters')
     if len(rules) > RULES_MAX or sum(map(len, rules)) > RULES_TOTAL_CAP:
         raise SettingsError(f"[workers] rules must be at most {RULES_MAX} rules and {RULES_TOTAL_CAP} characters in all")
@@ -402,8 +406,10 @@ def _workers(table) -> Workers:
             raise SettingsError(f"[workers] {key} must be a nonempty, single-line command without control characters")
         commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, worker_launcher=worker_launcher, t3_providers=providers, require_green_tests=green, rules=tuple(rules),
-                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit, **commands)
+                   claude_as_profile=profile, worker_launcher=worker_launcher, t3_providers=providers,
+                   require_green_tests=green, rules=tuple(rules),
+                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit,
+                   transcript_max_bytes=transcript_max_bytes, **commands)
 
 
 def _repos(table) -> dict[str, str]:
@@ -582,7 +588,8 @@ def _policy_overlay(table, root: Path) -> str:
     path = table.get("overlay", "")
     if not isinstance(path, str) or not path.strip() or "\0" in path:
         raise SettingsError('[policy] overlay: a policy TOML path, relative to the workspace root')
-    if not (Path(root) / path).resolve().is_relative_to(Path(root).resolve()):
+    # An absolute path discards `root` when joined, so one that happens to sit inside the root is still not relative.
+    if Path(path).is_absolute() or not (Path(root) / path).resolve().is_relative_to(Path(root).resolve()):
         raise SettingsError(f"[policy] overlay: {path!r} is outside the workspace root")
     return path
 
@@ -654,11 +661,13 @@ def load_policy(path: Path = POLICY) -> policy.Policies:
 
 def workspace_policy_data(root: Path, overlay: str = "") -> dict:
     """The shipped policy's tables with the workspace's `[policy] overlay` merged over them (#827). A named overlay
-    that is not a file is refused, never a silent fallback to the shipped policy."""
+    that is missing, absolute, or resolves outside the workspace is refused, never a silent fallback."""
     data = _policy_toml(POLICY, str(POLICY))
     if not overlay:
         return data
     path = Path(root) / overlay
+    if Path(overlay).is_absolute() or not path.resolve().is_relative_to(Path(root).resolve()):
+        raise policy.PolicyError(f"[policy] overlay {overlay}: outside the workspace root")
     if not path.is_file():
         raise policy.PolicyError(f"[policy] overlay {overlay}: no such file")
     return policy.overlay(data, _policy_toml(path, overlay), f"[policy] overlay {overlay}")

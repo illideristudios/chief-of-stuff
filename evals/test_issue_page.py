@@ -18,7 +18,7 @@ import tempfile
 import threading
 import unittest
 from dataclasses import replace
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from html import unescape
 from pathlib import Path
 from unittest import mock
@@ -32,6 +32,8 @@ import one_shot  # noqa: E402
 import pages as pg  # noqa: E402
 import render_board as rb  # noqa: E402
 import task_forge  # noqa: E402
+from backlog_ref import Backlog  # noqa: E402
+from tracker import issue_key  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
 import tracker_write as tw  # noqa: E402
 from test_flow_chart import BoardTest, CT, KANBAN, LANES, NOW, TODAY, TODAY_TRACKER, YESTERDAY, at, flow_launch_tracker, merged  # noqa: E402
@@ -66,14 +68,6 @@ TODAY_START = f"""# Tracker
 | Cache warmup | Warm the pool | unassigned | open | {YESTERDAY} |  | S | build | implement | #111 | c |
 | Tidy config | Tidy | Robin | open | {TODAY} |  | S |  |  |  | c |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Review r1 | `src/a/` |
-| Verify r1 | `src/d/` |
-| Fix r1 | `src/b/` |
-| Warm the pool | `src/c/` |
 
 ## Log
 
@@ -795,11 +789,6 @@ WORK_YESTERDAY = f"""# Tracker
 
 {HEAD}| Upload size limit | {LONG} | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Upload size limit | `src/upload/` |
 
 ## Log
 
@@ -812,12 +801,6 @@ WORK_TODAY = f"""# Tracker
 {HEAD}| Upload size limit | {LONG} | unassigned | open | {YESTERDAY} |  | M | build | review | #109 | c |
 | Review round 1 | {LONG_REVIEW} | unassigned | open | {TODAY} |  | S | build | review | #109 | c |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Upload size limit | `src/upload/` |
-| Review round 1 | none; read-only review of `src/upload/` |
 
 ## Log
 
@@ -1088,13 +1071,16 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
         # person it waits on; the board's Flow and the task page read the one cause.
         cfg = BoardTest().cfg()
         src = sources()
+        # The cell says pr. The hold follows the stage Flow keeps, so the Log says pr too (#887).
+        tracker = TODAY_START.replace("- 00:01 opened the day\n",
+                                      "- 00:01 opened the day\n- 00:05 stage: Upload size limit → pr\n")
         for kanban, refs, cause in ((KANBAN, {}, "Robin"), (replace(KANBAN, hold_stages=("pr",)), {}, "pr"),
                                     (replace(KANBAN, hold_stages=("pr",)), {"#109": None}, "decision")):
             with self.subTest(cause=cause):
-                board = self.flow_rows(lambda: rb.render(TODAY_START, cfg, self.NOW2, lanes=LANES, tracker_day=TODAY,
+                board = self.flow_rows(lambda: rb.render(tracker, cfg, self.NOW2, lanes=LANES, tracker_day=TODAY,
                                                          kanban=kanban, stage_log=[(YESTERDAY, YESTERDAY_TRACKER)],
                                                          sources=src, pending_refs=refs))
-                task = self.flow_rows(lambda: ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, TODAY_START)],
+                task = self.flow_rows(lambda: ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, tracker)],
                                                         src, self.NOW2, LANES, cfg, kanban=kanban, pending_refs=refs))
                 self.assertEqual(board["Upload size limit"][1].note, f"needs input · {cause}")
                 self.assertEqual(task["Upload size limit"][1].note, f"needs input · {cause}")
@@ -1106,11 +1092,6 @@ DONE_MIDNIGHT_TRACKER = f"""# Tracker
 
 {HEAD}| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Upload size limit | `src/upload/` |
 
 ## Log
 
@@ -1136,6 +1117,281 @@ def flow_section(html: str) -> str:
     assert start, "no Flow section"
     after = next((m.start() for m in re.finditer(r"<h2[^>]*>\s*(?!Flow\b)", html[start.end():])), None)
     return text(html[start.start():start.end() + after if after is not None else len(html)])
+
+
+class ClosedIssueHeaderTest(unittest.TestCase):
+    """#886: closed forge issues whose tracker rows are done match the board header, not OPEN."""
+
+    HOME = Backlog("https://labs.example.test", "team/app")
+    URL = "https://labs.example.test/team/app/-/issues/109"
+
+    def cfg(self):
+        # render() scopes forge facts through for_home(cfg.backlog); keep it on the closed issue's home.
+        return replace(BoardTest().cfg(), backlog=self.HOME)
+
+    def closed_sources(self) -> tuple[bs.Sources, bs.Issue]:
+        closed_at = at(TODAY, "01:00").astimezone(timezone.utc)
+        key = issue_key(self.URL, self.HOME)
+        issue = replace(ISSUE, ref=key, url=self.URL, state="closed", closed_at=closed_at)
+        return bs.Sources({}, {key: issue}, {}, (), {}, home=self.HOME), issue
+
+    def header_chip(self, html: str) -> str:
+        header = re.search(r"<header\b.*?</header>", html, re.S)[0]
+        return re.search(r'<span class="chip[^"]*">([^<]+)</span>', header)[1]
+
+    def render_page(self, src: bs.Sources, trackers: list) -> str:
+        return ip.render(109, trackers, src, NOW, LANES, self.cfg())
+
+    def test_done_tracker_and_closed_issue_show_done_or_closed_not_open(self):
+        src, _ = self.closed_sources()
+        tracker = DONE_TRACKER.replace("#109", self.URL)
+        chip = self.header_chip(self.render_page(src, [(TODAY, tracker)]))
+        self.assertNotRegex(chip, r"(?i)^(open|waiting|running|needs input)$")
+        self.assertRegex(chip, r"(?i)^(done|closed)$")
+
+    def test_render_passes_sources_home_to_flow_chart_build(self):
+        src, _ = self.closed_sources()
+        with mock.patch.object(fc, "build", wraps=fc.build) as build:
+            self.render_page(src, [(TODAY, DONE_TRACKER)])
+        self.assertIs(build.call_args.kwargs.get("home"), self.HOME)
+
+    def test_the_board_and_task_page_agree_on_a_closed_issues_flow_status(self):
+        src, issue = self.closed_sources()
+        tracker = DONE_TRACKER.replace("#109", self.URL)
+        cfg = self.cfg()
+        board_rows = ForgeMergedTaskPageTest.flow_rows(
+            lambda: rb.render(tracker, cfg, NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
+                               stage_log=[(YESTERDAY, YESTERDAY_TRACKER)], sources=src))
+        task_html = self.render_page(src, [(TODAY, tracker)])
+        task_chip = re.search(r'<span class="chip (\w+)">', re.search(r"<header\b.*?</header>", task_html, re.S)[0])[1]
+        status, row = board_rows["Upload size limit"]
+        self.assertEqual((status, row.note), ("closed", f"closed {at(TODAY, '01:00'):%H:%M}"))
+        card = next(c for col in rb.build_columns(rb.parse_tracker(tracker).tasks, LANES, KANBAN, src, NOW, {})
+                    for c in col.cards if c.name == "Upload size limit")
+        self.assertEqual(task_chip, card.kind)
+        refs = text(section(task_html, "References"))
+        self.assertRegex(refs, r"(?i)\bclosed\b")
+
+    def test_an_open_held_issue_keeps_needs_input_even_when_a_change_merged(self):
+        # #886 must not treat forge_ends "merged" as a finished header while the issue is still open and held —
+        # the board and engine-health pages keep NEEDS INPUT (#936).
+        merged_at = at(TODAY, "01:00").astimezone(timezone.utc)
+        src = sources(replace(MR, state="merged", merged_at=merged_at, approved=True, pipeline="passed"))
+        today = today_tracker()  # #109 waits on Robin (held)
+        chip = self.header_chip(page(109, src=src, today=today))
+        self.assertRegex(chip, r"(?i)^needs input$")
+        self.assertNotRegex(chip, r"(?i)^(merged|closed|done)$")
+
+    def test_open_store_human_review_keeps_needs_input_when_a_change_merged(self):
+        # Exact #936 / engine-health shape: open forge issue, human_review hold, PR already merged.
+        import shutil
+        from test_m6_store_board import KEY, make_store_workspace
+
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        db.upsert_item(KEY, workflow="build", stage="review", forge_state="open",
+                       title="Upload size limit", human_review=True)
+        merged_at = (NOW - timedelta(minutes=15)).astimezone(timezone.utc)
+        src = bs.Sources(
+            fetched={"kanban": NOW, "merge requests": NOW, "workers": NOW},
+            issues={
+                KEY: bs.Issue("#12", "https://github.com/example/repo/issues/12",
+                              "Upload size limit", "open", ("Needs input",)),
+                "#12": bs.Issue("#12", "https://github.com/example/repo/issues/12",
+                                "Upload size limit", "open", ("Needs input",)),
+            },
+            changes={
+                "#21": bs.Change("#21", "https://github.com/example/repo/pull/21", "Upload size limit",
+                                 "merged", False, "passed", True, 1, merged_at,
+                                 "main", ("src/upload.py",), (KEY, "#12")),
+            },
+            workers=(),
+            errors={},
+            home=bs.backlog.GitHubBacklog("example/repo"),
+        )
+        html = ip.render(KEY, [], src, NOW, LANES, db=task_forge.page_data(db))
+        chip = self.header_chip(html)
+        self.assertRegex(chip, r"(?i)^needs input$")
+        self.assertNotRegex(chip, r"(?i)^(merged|closed|done)$")
+
+
+# 17:16 yesterday plus 8h25m is 01:41 today; an hour later is 02:41. One minute of work is 17:16–17:17.
+OPEN_NOW = at(TODAY, "01:41")
+OPEN_LATER = at(TODAY, "02:41")
+ATTEMPT_TREE = "worktree `trees/upload` (feat/upload)"
+SIDE_TREE = "worktree `trees/side` (feat/side)"
+
+
+def _tracker(rows: str, log: str = "") -> str:
+    return f"""# Tracker
+
+## Tasks
+
+{HEAD}{rows}
+
+## Log
+
+{log}"""
+
+
+def _launch(path: Path, item: str, worker: str, tree: str, start: str, end: str | None, status: str) -> None:
+    one_shot.record_launch(path, item, worker, tree, "claude", "opus", start)
+    if end is not None:
+        one_shot.update_tracker(path, item, worker, "Robin", status, "attempt ended", "src/upload/limits.py", end)
+
+
+def ended_attempts(runs: tuple[tuple[str, str, str], ...], log: str = "",
+                   final: tuple[str, str] | None = None) -> str:
+    """One open issue, each run `(start, end, status)` on Cap uploads. `final` rewrites the last owner cell."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "tracker.md"
+        path.write_text(_tracker(
+            f"| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |\n",
+            log))
+        for start, end, status in runs:
+            if "| Robin | waiting |" in path.read_text():
+                path.write_text(path.read_text().replace("| Robin | waiting |", "| unassigned | open |"))
+            _launch(path, "Cap uploads", "impl-1", ATTEMPT_TREE, start, end, status)
+        text_out = path.read_text()
+    if final:
+        text_out = text_out.replace(*final)
+    return text_out
+
+
+def overlapping_attempts() -> str:
+    """Two ended workers on one issue, 17:16–18:16 and 17:46–18:16, so the second hour overlaps."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "tracker.md"
+        path.write_text(_tracker(
+            f"| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |\n"
+            f"| Side pass | Side item | unassigned | open | {YESTERDAY} |  | S | build | implement | #109 | c |\n",
+        ))
+        _launch(path, "Cap uploads", "impl-1", ATTEMPT_TREE, "17:16", "18:16", "human_review")
+        _launch(path, "Side item", "impl-2", SIDE_TREE, "17:46", "18:16", "human_review")
+        return path.read_text()
+
+
+def worked_line(html: str) -> str:
+    got = flow_section(html)
+    found = re.search(r"Worked .+? waiting", got)
+    if not found:
+        raise AssertionError(f"no worked line in {got!r}")
+    return found.group(0)
+
+
+def open_page(tracker: str, now: datetime, *, pending: bool = False, issue: bs.Issue = ISSUE,
+              day: date | None = None) -> str:
+    refs = {"#109": None} if pending else frozenset()
+    return ip.render(109, [(day or YESTERDAY, tracker)], sources(issue=issue), now, LANES, BoardTest().cfg(), pending_refs=refs)
+
+
+class OpenTaskWaitingTest(unittest.TestCase):
+    """(#913) Elapsed for an open task runs to the render clock, so time after the last worker counts as waiting.
+    A close still freezes the total. Worker outcome, a hold, and a forecast do not."""
+
+    def test_a_failed_attempt_counts_the_wait_after_it_ends(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_the_same_open_task_counts_another_hour_when_rendered_later(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_LATER, pending=True)),
+                         "Worked 1m of 9h25m elapsed · 9h24m waiting")
+
+    def test_a_completed_attempt_does_not_freeze_an_open_task(self):
+        tracker = ended_attempts((("17:16", "17:17", "done"),))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_a_hold_without_a_pending_decision_still_counts_idle_time(self):
+        # Waiting on a person, and an open row with no owner, neither of which has an unanswered decision.
+        held = ended_attempts((("17:16", "17:17", "human_review"),))
+        free = ended_attempts((("17:16", "17:17", "human_review"),),
+                              final=("| Robin | waiting |", "| unassigned | open |"))
+        for name, tracker in (("held", held), ("free slot", free)):
+            with self.subTest(name=name):
+                self.assertEqual(worked_line(open_page(tracker, OPEN_NOW)),
+                                 "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_a_stage_move_at_the_worker_end_does_not_stop_an_open_task(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),),
+                                 log="- 17:00 stage: Upload size limit → implement\n- 17:17 stage: Upload size limit → review\n")
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_waiting_includes_the_gap_and_the_time_after_the_last_attempt(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"), ("18:00", "18:10", "human_review")))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 11m of 8h25m elapsed · 8h14m waiting")
+
+    def test_overlapping_workers_count_once_and_idle_time_after_them_still_waits(self):
+        self.assertEqual(worked_line(open_page(overlapping_attempts(), OPEN_NOW, pending=True)),
+                         "Worked 1h00m of 8h25m elapsed · 7h25m waiting")
+
+    def test_a_worker_still_running_counts_as_work_through_now(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tracker.md"
+            path.write_text(_tracker(
+                f"| Upload size limit | Cap uploads | unassigned | open | {TODAY} |  | M | build | implement | #109 | c |\n",
+                ))
+            _launch(path, "Cap uploads", "impl-1", ATTEMPT_TREE, "00:41", None, "human_review")
+            tracker = path.read_text()
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, day=TODAY)),
+                         "Worked 1h00m of 1h00m elapsed · 0m waiting")
+        self.assertEqual(worked_line(open_page(tracker, OPEN_LATER, day=TODAY)),
+                         "Worked 2h00m of 2h00m elapsed · 0m waiting")
+
+    def test_a_close_after_the_worker_ends_includes_the_wait_and_then_freezes(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),))
+        closed = replace(ISSUE, state="closed", closed_at=at(YESTERDAY, "20:00").astimezone(timezone.utc))
+        line = "Worked 1m of 2h44m elapsed · 2h43m waiting"
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, issue=closed)), line)
+        self.assertEqual(worked_line(open_page(tracker, OPEN_LATER, issue=closed)), line)
+
+    def test_a_task_with_no_launches_has_no_worked_line(self):
+        tracker = _tracker(
+            f"| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |\n",
+            "- 17:00 stage: Upload size limit → implement\n")
+        self.assertNotIn("Worked", flow_section(open_page(tracker, OPEN_NOW)))
+
+
+class StoreOpenTaskWaitingTest(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        from test_m6_store_board import make_store_workspace
+        self.root, self.db = make_store_workspace()
+        self.addCleanup(self.db.engine.dispose)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.key = "github:example/repo#109"
+        self.db.upsert_item(self.key, title="Upload size limit", stage="review")
+
+    def page(self, now=OPEN_NOW):
+        return ip.render(self.key, [], bs.EMPTY, now, LANES, db=task_forge.page_data(self.db))
+
+    def attempt(self, outcome):
+        self.db.record_segment(self.key, "implement", 1, runtime="codex", model="worker",
+                            started_at=at(YESTERDAY, "17:16").isoformat())
+        self.db.end_segment(self.key, "implement", 1, at(YESTERDAY, "17:17").isoformat(), outcome)
+
+    def test_ended_workers_leave_open_store_tasks_counting_waiting_through_now(self):
+        self.attempt("human_review")
+        for outcome in ("human_review", "failed", "done"):
+            with self.subTest(outcome=outcome):
+                self.db.record_segment(self.key, "implement", 1, at(YESTERDAY, "17:16").isoformat(),
+                                       ended_at=at(YESTERDAY, "17:17").isoformat(), outcome=outcome)
+                self.assertEqual(worked_line(self.page()), "Worked 1m of 8h25m elapsed · 8h24m waiting")
+                self.assertEqual(worked_line(self.page(OPEN_LATER)), "Worked 1m of 9h25m elapsed · 9h24m waiting")
+
+    def test_closed_store_task_freezes_at_its_last_worker_end(self):
+        self.attempt("done")
+        self.db.upsert_item(self.key, forge_state="closed")
+        for now in (OPEN_NOW, OPEN_LATER):
+            self.assertEqual(worked_line(self.page(now)), "Worked 1m of 1m elapsed · 0m waiting")
+
+    def test_no_workers_has_no_worked_line(self):
+        self.assertNotIn("Worked", self.page())
 
 
 class DoneClockAfterMidnightTest(unittest.TestCase):

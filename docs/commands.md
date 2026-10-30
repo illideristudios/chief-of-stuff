@@ -200,34 +200,232 @@ options:
 ### `health`
 
 ```text
-usage: probe_health.py [-h] [--config CONFIG] [--timeout TIMEOUT]
+usage: chief-of-stuff health [-h] [--config CONFIG] [--timeout TIMEOUT]
 
-Check settings, runtimes and Health: targets; advise about a missing settings file (exit code
-unaffected).
+On open or resume, check workspace settings, the Claude runtime, and Health: targets.
+
+Use it when the question is that preflight: whether the Settings: file loads, whether
+Claude is on the login PATH when a [models] rotation names it, whether workspace files
+need (advice), and whether each Health: URL answers. A non-zero exit with empty stderr is
+the count of failed checks, which an agent can branch on without parsing.
 
 options:
-  -h, --help         show this help message and exit
-  --config CONFIG    workspace CLAUDE.md holding the block
-  --timeout TIMEOUT  seconds per target
+  -h, --help         flag, default: off. Print this help text on stdout and exit 0.
+  --config CONFIG    path, default: CLAUDE.md. File whose ## Coordinator block is read; its parent
+                     is the workspace root for the Settings: path and for (advice) commands.
+  --timeout TIMEOUT  float seconds, default: 3.0. Per-target HTTP GET timeout only; does not bound
+                     the settings load or the Claude login-PATH lookup (resolve uses 15 seconds).
+
+When not to use:
+  To see which worker processes are alive, use chief-of-stuff processes
+  (processes); health does not read PIDs.
+  To create a file that an (advice) line names, use chief-of-stuff init
+  (init); health prints the command and does not run it.
+  To audit tasks against worktrees and issues, use chief-of-stuff audit
+  (audit).
+
+Output:
+  Plain text lines on stdout (not TOON and not JSON; no structured fields).
+  Stderr is empty unless the exit is a usage fault (exit 2). Lines are emitted
+  on stdout in this order when present:
+
+  1. Settings probe (only when a top-level "- Settings:" bullet in
+     ## Coordinator names a path; a repeated key's last bullet wins; without
+     that bullet no settings line is printed and the file is not read):
+     - "settings <name> ok" when the file loads cleanly.
+     - "settings <name> absent, defaults" when the named file is not there.
+     - "settings <name> invalid: <why>" when the file cannot be read or fails
+       TOML/schema validation (<why> is one line, names <name> once, and carries
+       no machine-specific absolute path).
+
+  2. Claude runtime probe (only when the settings file loaded and a [models]
+     rotation names claude; checked once via claude_adapter.available() on the
+     login shell PATH; only claude is checked; codex, cursor, and agy are not
+     probed):
+     - "runtimes claude ok" when claude is found on the login PATH.
+     - "runtimes claude missing" when claude is not found.
+     - "runtimes not checked: <why>" when the login shell fails (redacts
+       directory prefixes from paths and says neither ok nor missing).
+     No line is emitted when claude is not named or when settings did not load.
+
+  3. Workspace file advice lines (zero or more, from WORKSPACE_FILES, printed
+     whether or not ## Coordinator has a Settings: line, after any settings and
+     runtimes lines and before targets):
+     - "workspace file <name> missing (advice); <command>"
+     - "workspace file <name> not a file (advice); move it aside, then <command>"
+       (directory, broken symlink, fifo, or other non-regular file)
+     - "workspace file <name> unreadable (advice); <why>"
+     Each advice line starts with "workspace file <name>" and contains
+     "(advice)". Advice lines are not failed checks: an (advice) line does not
+     change the exit code. <name> is the configured Settings: path, or
+     chief-of-stuff.toml when ## Coordinator names none; a custom path that is a
+     regular file does not also advise the default name. <command> has {root}
+     replaced by the shell-quoted resolved workspace directory (currently
+     "chief-of-stuff init --help"). Model guidance is never advised and health
+     does not install it. A missing --config file is a usage fault on stderr,
+     not an advice line. A Settings: name with a NUL (ValueError) gets the
+     settings invalid line and no duplicate advice line.
+
+     Advice against failed checks and absent, defaults:
+     - "settings <name> absent, defaults" is neither a failed check nor an
+       advice line; nothing was validated, defaults apply, and it never says ok.
+     - Missing configured settings file: "settings <name> absent, defaults" (0)
+       plus "workspace file <name> missing (advice); ..." (0) -> 0 failed checks.
+     - Directory or non-regular file at the Settings: path: "settings <name>
+       invalid: ..." (1) plus "workspace file <name> not a file (advice); ..."
+       (0) -> 1 failed check.
+     - Unreadable Settings: path: "settings <name> invalid: ..." (1) plus
+       "workspace file <name> unreadable (advice); <why>" (0) -> 1 failed check.
+
+  4. Health: target probes (each "- Health: <name> <url> [status]" line inside
+     ## Coordinator, in block order, or "no Health: targets in the
+     ## Coordinator block"):
+     - "<name> <url> <status> ok" when the HTTP GET status equals the expected
+       status (default 200).
+     - "<name> <url> <status>, expected <expect>" on any other HTTP status,
+       including 4xx/5xx responses.
+     - "<name> <url> unreachable (<ExceptionType>: <detail>)" when the request
+       fails without an HTTP status (timeout, connection refused, DNS, TLS).
+     Every target gets a line even when it fails. Probe requests send GET with
+     "User-Agent: chief-of-stuff/probe"; the printed <url> strips query strings
+     and credentials. Only http and https URLs are valid targets; a malformed
+     Health: line inside ## Coordinator prints to stderr and exits 2 after steps
+     1-3 have already printed to stdout.
+
+Exit codes:
+  0  No failed checks (or -h/--help). Includes settings ok, settings absent
+     (absent, defaults), claude ok, claude not named, no Health: targets, all
+     targets ok, and any (advice) lines. Stderr is empty.
+  N  (1 or more, with empty stderr) N failed checks: +1 if settings are invalid
+     or unreadable; +1 for "runtimes claude missing" or "runtimes not checked"
+     (however many rotations named claude); +1 per target that is not ok.
+     Advice lines and absent, defaults add 0. Exit 2 with empty stderr means two
+     failed checks, not a usage fault.
+  2  (with non-empty stderr) Usage fault. Any failed-check count already
+     computed is discarded. Causes: argparse error (unknown flag, non-float
+     --timeout); --config is not a file ("no config at <path>", stdout empty);
+     --config is not valid UTF-8 ("<path>: not UTF-8 (<reason>)", stdout empty);
+     a Health: line in ## Coordinator is not "<name> <http(s)-url> [int]"
+     (stdout may already hold settings, runtimes, and advice lines).
+
+Side effects:
+  Reads only. No preview or --dry-run and no --commit exist, because nothing is
+  written.
+
+  Reads: the --config file; the settings file via the settings loader when
+  Settings: names one; stat/lstat on WORKSPACE_FILES paths; Claude's binary on
+  the login shell PATH when a [models] rotation names claude; one HTTP/HTTPS GET
+  per Health: target.
+
+  Writes: none. Not the store, not the forge, not the workspace files, not the
+  probed services. Advice does not run init.
+
+Examples:
+  chief-of-stuff health --config ~/cedar-desk/CLAUDE.md
+  chief-of-stuff health --config ~/cedar-desk/CLAUDE.md --timeout 1
+  chief-of-stuff health
 ```
 
 ### `pages`
 
 ```text
-usage: pages.py [-h] [--ensure] [--root ROOT] [--dir DIR] [--port PORT]
-                [{serve,supervise,install,uninstall,status}]
+usage: chief-of-stuff pages [-h] [--ensure] [--root ROOT] [--dir DIR] [--port PORT]
+                            [{serve,supervise,install,uninstall,status}]
 
 Serve the workspace's pages locally: the board and any page a session writes beside it.
 
+The pages are routes: `/` the board, `/workers` the running workers and today's ends, `/decisions` the list,
+`/decisions/<slug>` an authored decision page, `/decisions/<id>` (digits only) a store decision's page rendered
+from the store (#945), `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
+and diff. `/workers/` and `/decisions/` are the same pages as the bare routes (#988); other directory URLs stay 404
+(#340). A missing `/favicon.ico` answers 204 so the browser console stays clean; a real icon in the pages dir is
+served. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
+`issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the file's own name is a 404.
+A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the settings TOML, the decision JSON,
+`.sources.json`) is newer than its last render, or differs in bytes from what that render read, and `/workers` on every GET (it reads the session logs too), and a thread refreshes `.sources.json` from the forge every minute. An open tab
+reloads itself when the file changes.
+
+    chief-of-stuff pages [--ensure] [--root R]            # start it unless it is already serving; print status only
+    chief-of-stuff pages serve --dir D --port P --root R  # what --ensure starts, detached
+    chief-of-stuff pages install|uninstall|status [--root R]  # the independent board LaunchAgent (#935)
+    chief-of-stuff pages supervise [--root R]             # what that LaunchAgent runs: ensure, every POLL seconds
+    chief-of-stuff pages --board [--date D] [--root R]    # what `chief-of-stuff board` runs: write the board file, no server
+
+A decision page posts the user's answer to `POST /decisions/<slug>` (`key` and/or `words`, form-encoded).
+The server saves it as the decision JSON's `answer` ({key, words, at}) for the coordinator's next pass, and
+redirects back to the page, which then shows the decision answered.
+
+The `## Coordinator` block's `Board:` line names both halves: `URL http://127.0.0.1:<port>/` and
+``dir `<pages dir>` ``. It listens on 127.0.0.1 only, and it answers only requests whose Host is
+127.0.0.1 or localhost. `/` is today's board once today's tracker exists, else the newest one; `/all` lists every other file a session
+wrote there. Binding to loopback does not stop a page elsewhere from rebinding its own
+name to 127.0.0.1, but that page still sends its own name as the Host.
+
 positional arguments:
   {serve,supervise,install,uninstall,status}
+                        string; default omitted (ensure); serve is the internal foreground server,
+                        supervise the LaunchAgent's loop, install|uninstall|status manage that
+                        LaunchAgent
 
 options:
   -h, --help            show this help message and exit
-  --ensure              start the server unless it is serving; print status only
-  --root ROOT           workspace root holding CLAUDE.md (default: the current directory)
-  --dir DIR
-  --port PORT
+  --ensure              flag; default off; ensure the server (also the bare command's behavior)
+  --root ROOT           path; default . when ensuring, none with serve; workspace holding
+                        CLAUDE.md
+  --dir DIR             path; default none; required with serve, ignored otherwise; pages
+                        directory
+  --port PORT           integer; default none; required with serve, ignored otherwise; listen port
+
+When not to use:
+  To open the board for the user, use a browser: nothing here ever opens it. To write the board file without a
+  server, use chief-of-stuff board. To write a decision page, use chief-of-stuff decision. Agents do not run
+  serve: --ensure starts it detached.
+
+Output:
+  Text, not TOON or JSON, except status (a TOON record). Ensuring prints exactly one stdout status line, never
+  the URL: pages: serving (the same or a newer version already answers), pages: started, or pages: restarted
+  (an older pages server was replaced). install and uninstall print one line saying what changed. status prints
+  the board and the engine separately: board state, port, pid, whether the LaunchAgent exists, whether a
+  supervisor holds the board. serve and supervise print no status line; a detached serve appends its stdout and
+  stderr to <root>/.chief-of-stuff/pages.log. Failures print pages: not served - <reason> (ensuring) or
+  pages: <reason> (install, uninstall, status) on stderr; usage faults print usage and an error on stderr.
+
+Exit codes:
+  0  serving, started or restarted; install, uninstall or status succeeded; help printed; serve and
+     supervise run until stopped (SIGTERM or SIGINT end supervise with 0).
+  1  ensuring failed: missing Board line or unreadable config, a foreign server owns the port, an older server
+     cannot be identified or stopped, the new server did not come up, or a connection was denied (often a sandbox).
+  2  usage fault (unknown argument, serve without --dir and --port, --port not an integer), or install,
+     uninstall or status failed (pages: <reason> on stderr).
+
+Side effects:
+  Ensuring reads the Board line, probes HEAD http://127.0.0.1:<port>/all and, for an older server, reads
+  <pages dir>/.pid and checks that process's command line. It creates the pages and log directories, appends
+  <root>/.chief-of-stuff/pages.log, writes .pid only after a new server answers, and may SIGTERM an older pages
+  serve on that port. It never switches to another port.
+  install needs macOS and a Board line; it writes the board LaunchAgent under the supervisor lock and loads it; uninstall removes the agent and
+  leaves a running page server serving until it stops or the Mac restarts; status writes nothing. supervise
+  checks the server every few seconds and restarts it (what the LaunchAgent runs).
+  The server binds only to 127.0.0.1 and accepts only a 127.0.0.1 or localhost Host. Routes: / is today's board
+  once today's tracker exists, else the newest board; /workers (and /workers/) the running workers and today's
+  ends; /decisions (and /decisions/) the list; /decisions/<slug> an authored decision; /decisions/<id> (digits)
+  a store decision rendered from the store; /issues/<n> and /issues/<n>/source; /all every other non-hidden
+  file a session wrote there. Rendered HTML files are served only through their routes, not their filenames.
+  A GET (and HEAD) re-renders a page when its sources change in time or bytes; /workers renders on every GET.
+  Rendering writes HTML into the pages directory, keeping unchanged files; an open tab reloads itself. A render
+  failure keeps the last good page with an error banner. A background thread reads forge and worker facts at
+  start and about every 60 seconds and writes <pages dir>/.sources.json.
+  POST /decisions/<slug> (form: key and/or words) writes that decision JSON's answer {key, words, at}. POST / (a
+  store decision's form) records an answer, reversal or re-route as an intent row that the engine alone
+  applies: the request never touches the forge or a card. POST /workers/sessions/<n>/messages records a message
+  for that worker session in the store (same-origin form only). Only this machine's own pages may post.
+  No forge writes and no --commit, preview or dry run: writes happen as the server runs.
+
+Examples:
+  chief-of-stuff pages --ensure --root ~/work/field-notes
+  chief-of-stuff pages status --root ~/work/field-notes
+  chief-of-stuff pages install --root ~/work/field-notes
+  chief-of-stuff pages --help
 ```
 
 ### `decisions`
