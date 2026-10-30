@@ -151,6 +151,26 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("References", page)
 
 
+class WriteIfChangedTest(unittest.TestCase):
+    """write_if_changed keeps an unchanged page's mtime (#330) by comparing exact bytes (#338)."""
+
+    def test_a_page_that_differs_only_by_trailing_whitespace_is_rewritten(self):
+        # Must fail against a mutant that compares with rstrip(): trailing spaces are a real change.
+        path = Path(tempfile.mkdtemp()) / "page.html"
+        path.write_bytes(b"<p>x</p>\n")
+        os.utime(path, (1_000_000, 1_000_000))
+        dp.write_if_changed(path, "<p>x</p>\n  ")
+        self.assertEqual(path.read_bytes(), b"<p>x</p>\n  ")
+        self.assertNotEqual(path.stat().st_mtime, 1_000_000)
+
+    def test_exact_same_bytes_keep_the_mtime(self):
+        path = Path(tempfile.mkdtemp()) / "page.html"
+        path.write_bytes(b"<p>x</p>\n")
+        os.utime(path, (1_000_000, 1_000_000))
+        dp.write_if_changed(path, "<p>x</p>\n")
+        self.assertEqual(path.stat().st_mtime, 1_000_000)
+
+
 class ParseTest(unittest.TestCase):
     def test_holds_and_references_must_be_lists(self):
         # #228 review: a hold is read on every board and task page, so a wrong type is an unreadable decision, not a crash.
@@ -333,17 +353,17 @@ class OwnershipTest(unittest.TestCase):
                 out = refs("src/app.py:1", GH, root, at=pin)
                 self.assertIn("src/app.py:1", out)
                 self.assertNotIn("blob/", out)
-        with mock.patch("decision_page.git_trees.git", return_value=(128, "fatal")):
+        with mock.patch("git_trees.git", return_value=(128, "fatal")):
             out = refs("src/app.py:1", GH, root)
         self.assertIn("src/app.py:1", out)
         self.assertNotIn("blob/", out)
-        with mock.patch("decision_page.git_trees.git", side_effect=subprocess.TimeoutExpired("git", 1)):
+        with mock.patch("git_trees.git", side_effect=subprocess.TimeoutExpired("git", 1)):
             page = dp.render(dp.parse(decision(references=[{"kind": "code", "value": "src/app.py:1", "label": "pool"}])),
                              "2026-09-25", GH, root)
         self.assertIn("src/app.py:1", page)
         self.assertIn("pool", page)
         self.assertNotIn("blob/", page)
-        with mock.patch("decision_page.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 1)):
+        with mock.patch("git_trees.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 1)):
             page = dp.render(dp.parse(decision(references=[{"kind": "code", "value": "src/app.py:1", "label": "pool"}])),
                              "2026-09-25", GH, root)
         self.assertIn("src/app.py:1", page)
@@ -485,8 +505,8 @@ class OwnershipTest(unittest.TestCase):
             {"kind": "code", "value": "src/app.py:1", "label": "pinned", "at": sha},
             {"kind": "doc", "value": "docs/note.md:2", "label": "the note"},
         ])
-        with mock.patch("decision_page.git_trees.git", counting_git), \
-                mock.patch("decision_page.subprocess.run", counting_run):
+        with mock.patch("git_trees.git", counting_git), \
+                mock.patch("git_trees.subprocess.run", counting_run):
             page = dp.render(dp.parse(decision(**body)), "2026-09-25", GH, root)
             self.assertEqual(calls, {"ls": 3, "cfg": 1}, page)
             self.assertIn("blob/HEAD/src/app.py#L1", page)
@@ -848,6 +868,118 @@ class IndexTest(unittest.TestCase):
             self.assertEqual(mine["light"][token], board["light"][token])
 
 
+class StoreIndexTest(unittest.TestCase):
+    """Issue #895: on an engine workspace (store.db present), decisions.html lists open store decisions in PENDING and
+    today's answered store decisions in COMPLETED, matching decision_actions.tab_counts."""
+
+    def setUp(self):
+        import store
+        import task_forge
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.pages = self.tmp / "pages"
+        self.pages.mkdir()
+        self.db_path = self.tmp / "store.db"
+        store.migrate(self.db_path)
+        self.store = store.Store(self.db_path)
+        self.addCleanup(self.store.engine.dispose)
+        self.page_data = lambda: task_forge.page_data(self.store)
+
+    def test_pending_store_decisions_render_and_match_tab_counts(self):
+        import decision_actions
+        self.store.upsert_item("github:example/repo#10", title="Auth flow", stage="implement", forge_state="open")
+        self.store.upsert_item("github:example/repo#11", title="Closed item", stage="merge", forge_state="closed")
+        self.store.add_decision("github:example/repo#10", "scope", "Split auth token refresh?",
+                                asked_at="2026-09-26T01:15:00-05:00")
+        self.store.add_decision("github:example/repo#10", "plan", "Approve rollout gate?",
+                                asked_at="2026-09-26T01:45:00-05:00",
+                                record={"status": "blocked", "blocked_reason": "awaiting owner"})
+        self.store.add_decision("github:example/repo#11", "scope", "Stale question on closed issue?",
+                                asked_at="2026-09-26T01:50:00-05:00")
+        data = self.page_data()
+        nav = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+        self.assertEqual(nav["decisions"], 2)
+
+        dp.write_all(self.pages, dp.Context(NOW), "2026-09-26", db=data, navigation=nav)
+        page = (self.pages / "decisions.html").read_text()
+        pending, done = page.split("COMPLETED")
+        self.assertIn("2 pending", page)
+        self.assertIn("PENDING · 2", page)
+        self.assertIn('<span class="badge" title="2 pending">2</span>', page)
+        self.assertLess(pending.index("Approve rollout gate?"), pending.index("Split auth token refresh?"))
+        self.assertIn("BLOCKED · awaiting owner", pending)
+        self.assertIn('href="/issues/github%3Aexample%2Frepo%2310"', pending)
+        self.assertIn("example/repo#10", pending)
+        self.assertIn('<form method="post" action="/" class="decision-form">', pending)
+        # #1124: blocked means an intent failed permanently and a newer answer clears it, so it keeps its form.
+        blocked_row = re.search(r'<div class="row pend" data-status="blocked">.*?</div>', pending, re.S)
+        self.assertIsNotNone(blocked_row)
+        self.assertIn('<form method="post" action="/" class="decision-form">', blocked_row.group(0))
+        self.assertNotIn("Answered · engine waiting", page)
+        self.assertNotIn("Stale question on closed issue?", page)
+        self.assertIn("0 completed today", page)
+        self.assertIn(" · 0</h2>", done)
+
+    def test_completed_store_decisions_answered_today_in_workspace_zone_appear_under_completed(self):
+        self.store.upsert_item("github:example/repo#10", title="Auth flow", stage="implement", forge_state="open")
+        # 2026-09-26T06:40:00Z is 01:40 CDT on 2026-09-26 in America/Chicago.
+        self.store.add_decision("github:example/repo#10", "permission", "Permission requested for Bash",
+                                answer="allow", decided_by="trio", asked_at="2026-09-26T00:30:00-05:00",
+                                record={"status": "answered", "answered_at": "2026-09-26T06:40:00Z"})
+        self.store.add_decision("github:example/repo#10", "design", "Use volume service?",
+                                answer="option A", decided_by="user", asked_at="2026-09-26T01:00:00-05:00",
+                                record={"status": "answered", "answered_at": "2026-09-26T01:20:00-05:00"})
+        # 2026-09-26T03:30:00Z is 22:30 CDT on 2026-09-25 in America/Chicago (yesterday).
+        self.store.add_decision("github:example/repo#10", "scope", "Yesterday in Chicago",
+                                answer="yes", decided_by="trio", asked_at="2026-09-25T22:00:00-05:00",
+                                record={"status": "answered", "answered_at": "2026-09-26T03:30:00Z"})
+        data = self.page_data()
+        page, _ = dp.index(self.pages, dp.Context(NOW), "2026-09-26", db=data)
+        done = page.split("COMPLETED")[1]
+        self.assertIn("0 pending", page)
+        self.assertIn("2 completed today", page)
+        self.assertIn(" · 2</h2>", done)
+        self.assertLess(done.index("Permission requested for Bash"), done.index("Use volume service?"))
+        for text in ("Permission requested for Bash", "allow", "trio", "Use volume service?", "option A", "user",
+                     'href="/issues/github%3Aexample%2Frepo%2310"', "example/repo#10"):
+            with self.subTest(text=text):
+                self.assertIn(text, done)
+        self.assertNotIn("Yesterday in Chicago", done)
+        self.assertNotIn("<form", done)  # #924: an answered row is read-only
+
+    def test_store_rows_label_the_home_repo_short_and_a_foreign_one_by_name(self):
+        """#903: a row for the workspace backlog reads `#N`; another project names itself. The href stays the full key."""
+        from fragment import issue_href
+        own, foreign = "github:team/app#9", "github:o/n#4"
+        for key, question in ((own, "Ship?"), (foreign, "Wait?")):
+            self.store.upsert_item(key, title=question, stage="implement", forge_state="open")
+            self.store.add_decision(key, "scope", question, asked_at=NOW.isoformat())
+        page, _ = dp.index(self.pages, dp.Context(NOW, forge=GitHubBacklog("team/app")), NOW.date().isoformat(),
+                           db=self.page_data())
+        self.assertIn(f'href="{escape(issue_href(own))}">#9</a>', page)
+        self.assertIn(f'href="{escape(issue_href(foreign))}">o/n#4</a>', page)
+        self.assertNotIn(">github:", page)
+
+    def test_a_store_decision_shows_its_recorded_default_and_an_old_row_says_none_was_recorded(self):
+        """#1128: "If you don't answer" is the default recorded with the decision, on its page and in the list."""
+        key = "github:example/repo#10"
+        self.store.upsert_item(key, title="Auth flow", stage="implement", forge_state="open")
+        new = self.store.add_decision(key, "scope", "Approve this file ownership?", None, "zach", asked_at=NOW.isoformat(),
+                                      record={"default": "Not written: nothing is written unapproved.",
+                                              "status": "blocked", "blocked_reason": "awaiting owner"})
+        old = self.store.add_decision(key, "design", "Split the parser?", asked_at=NOW.isoformat())
+        rows = self.page_data().decision_rows
+        page = dp.store_page(rows, new.id, dp.Context(NOW))
+        fallback = page.split("If you don't answer")[1]
+        self.assertIn("Not written: nothing is written unapproved.", fallback)
+        self.assertNotIn("awaiting owner", fallback)
+        self.assertNotIn("worker waits", page)
+        self.assertIn("default not recorded", dp.store_page(rows, old.id, dp.Context(NOW)).split("If you don't answer")[1])
+        listed, _ = dp.index(self.pages, dp.Context(NOW), NOW.date().isoformat(), db=self.page_data())
+        self.assertIn('<span class="fallback">Not written: nothing is written unapproved.</span>', listed)
+        self.assertIn('<span class="fallback">default not recorded</span>', listed)
+
+
 class DerivedPageTest(unittest.TestCase):
     """The decision page applies the same derivations when its JSON does not carry them."""
 
@@ -973,6 +1105,15 @@ class MainTest(unittest.TestCase):
                 code, _, err = self.run_main("--root", str(root), "--from", str(root / "d.json"), "--name", name)
                 self.assertEqual(code, 2)
                 self.assertIn("name", err)
+        self.assertFalse((root / "pages").exists())
+
+    def test_a_name_of_digits_alone_is_refused_as_reserved_for_store_decision_ids(self):
+        """#945: /decisions/<digits> is a store decision's page, so an authored slug is never digits alone."""
+        root = self.workspace()
+        code, _, err = self.run_main("--root", str(root), "--from", str(root / "d.json"), "--name", "42")
+        self.assertEqual(code, 2)
+        self.assertIn("digit-only names are reserved for store decision ids", err)
+        self.assertNotIn("is not lowercase letters", err)
         self.assertFalse((root / "pages").exists())
 
     def test_no_board_line_means_no_page(self):
@@ -1112,7 +1253,8 @@ class ModuleGraphTest(unittest.TestCase):
         (self.root / "cos.toml").write_text(graph)
         change = bs.Change(key, self.url, "Warm pool", "open", False, "passed", False, 0, None, "main", ("agent/b.py",), (),
                            head=self.head)
-        bs._write(self.pages / bs.CACHE, bs.Sources({}, {}, {key: change}, (), {}))
+        home = Backlog("https://gl.example.test", "grp/app") if gitlab else GitHubBacklog("o/app")
+        bs._write(self.pages / bs.CACHE, bs.Sources({}, {}, {key: change}, (), {}, home))
         if references is None:
             references = [{"kind": kind, "value": key[0] + "57"}, {"kind": kind, "value": key, "label": "Warm pool"}]
         (self.pages / "decision-warm-pool.json").write_text(json.dumps(decision(references=references)))
@@ -1155,10 +1297,13 @@ class ModuleGraphTest(unittest.TestCase):
         self.assertEqual(Path(run["rules"]).resolve(), (self.clone / "docs" / "architecture.md").resolve())
         out = Path(run["out"]).resolve()
         self.assertEqual(out.name, "page.html")
-        # The cache is keyed by the head and the settings that draw it, under a dotdir the server never serves.
+        # The comparison identity hashes the head, base and settings under a dotdir the server never serves.
         cache, *key, _ = out.relative_to(self.pages.resolve()).parts
         self.assertTrue(cache.startswith("."), "the cache is a dotdir, which the server never serves")
-        self.assertTrue(any(self.head in part for part in key), "the cache path names the head")
+        self.assertEqual(len(key), 1)
+        self.assertRegex(key[0], r"^[0-9a-f]{64}$")
+        [saved] = (self.pages / ".graphs" / ".comparisons").iterdir()
+        self.assertEqual(json.loads(saved.read_text()), {"base": self.base, "key": key[0]})
 
     def test_a_gitlab_mr_is_drawn_from_its_merge_request_ref(self):
         self.workspace(gitlab=True)
@@ -1314,7 +1459,7 @@ class ModuleGraphTest(unittest.TestCase):
                 self.assertNotIn("unavailable", section)
         [run] = self.runs()
         self.assertEqual(run["max_nodes"], "12")
-        [out] = (self.pages / ".graphs").iterdir()
+        out = Path(run["out"]).parent
         self.assertEqual(sorted(f.name for f in out.glob("*.mmd")), ["page.mmd"])
         self.assertNotIn("views=", (out / "summary.txt").read_text())
 
@@ -1326,7 +1471,7 @@ class ModuleGraphTest(unittest.TestCase):
         self.assertNotIn('<pre class="mermaid">', section)
         for text in ("unavailable", "Errno", "page.mmd"):
             with self.subTest(text=text):
-                self.assertNotIn(text, page)
+                self.assertNotIn(text, section)
 
     def test_a_change_touching_only_excluded_modules_says_so_without_an_error(self):
         self.fake(views=[])
@@ -1336,7 +1481,7 @@ class ModuleGraphTest(unittest.TestCase):
                 page = self.page()
                 self.assert_nothing_outside_the_excluded_set(page, self.section(page))
         self.assertEqual(len(self.runs()), 1)
-        [out] = (self.pages / ".graphs").iterdir()
+        out = Path(self.runs()[0]["out"]).parent
         self.assertEqual(list(out.glob("*.mmd")), [])
         self.assertTrue((out / "summary.txt").read_text().endswith("views=0"))
 
@@ -1348,7 +1493,7 @@ class ModuleGraphTest(unittest.TestCase):
         cache = self.pages / bs.CACHE
         sources = bs.load(self.pages)
         change = replace(sources.changes["#58"], issues=("#109",))
-        bs._write(cache, bs.Sources({}, {}, {"#58": change}, (), {}))
+        bs._write(cache, replace(sources, changes={"#58": change}))
         (self.root / "daily").mkdir()
         today = datetime.now(ZoneInfo("America/Chicago")).date()  # the workspace's day, not the host's
         (self.root / "daily" / f"{today}-tracker.md").write_text(

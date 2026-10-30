@@ -5,7 +5,7 @@
   "graders": [
     {
       "name": "reads the dispatch skill before the first launch, worktree, models call or tracker write",
-      "rule": "The Tasks item is the whole ask — write it so a session that reads only that row knows what it is for and what finished looks like, because that is the text the session receives.",
+      "rule": "The Tasks item is the whole ask \u2014 write it so a session that reads only that row knows what it is for and what finished looks like, because that is the text the session receives.",
       "type": "tool_used",
       "tool": "Read",
       "input_match": "\"file_path\": \"[^\"\\n]*skills/dispatch/SKILL\\.md\"",
@@ -44,11 +44,8 @@
       "max": 0
     },
     {
-      "name": "no git or railway attempt",
-      "type": "tool_used",
-      "tool": "Bash",
-      "input_match": "\\b(railway|git (commit|add|push|merge))\\b",
-      "max": 0
+      "name": "only allowlisted PATH git reads",
+      "type": "path_git_write"
     },
     {
       "name": "Log times are this move's clock reads",
@@ -58,5 +55,6 @@
     }
   ],
   "max_turns": 12,
-  "timeout_seconds": 300
+  "timeout_seconds": 300,
+  "superseded_by": "autonomy-interactive-dispatch"
 }
