@@ -417,7 +417,7 @@ class LeadCountsTest(unittest.TestCase):
                 db.upsert_item("github:example/repo#111", title="Closed", forge_state="closed")
                 row = db.add_decision("github:example/repo#110", "scope", "Open choice", decided_by="owner")
                 db.add_decision("github:example/repo#110", "design", "Answered choice", answer="yes", decided_by="user")
-                db.add_decision("github:example/repo#111", "scope", "Closed issue choice")
+                db.add_decision("github:example/repo#111", "scope", "Closed issue choice", decided_by="owner")
             finally:
                 db.engine.dispose()
             server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)

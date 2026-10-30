@@ -2,9 +2,9 @@
 """A task's change as source and diff, `/issues/<n>/source` (Source48.dc.html, "Source & diff — task !48"): the change's
 files with +additions −deletions, a NEW / CHANGED / REMOVED badge and the other open changes on the same file, then
 each file's diff against the merge base, unified or split (a radio pair; CSS shows the one picked), with each review
-thread inline under the line it is on. The diff is read from the `[graph]` table's clone, fetched as the
-module graph fetches it; without the table the page lists the files from the sources cache. pages.py renders it on
-request into `issue-<n>-source.html`.
+thread inline under the line it is on. The diff is read from the `[graph]` table's clone when configured,
+otherwise from a workspace root that is a git repository, fetched as the module graph fetches it. With neither,
+the page lists the cached files. pages.py renders it on request into `issue-<n>-source.html`.
 """
 
 from __future__ import annotations
@@ -322,9 +322,10 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     compare = note = ""
     files: list[File] = []
     if change:
-        if graph and pages and root:
+        clone = root / graph.clone if root is not None and graph else root
+        if pages and clone and (graph or (clone / ".git").exists()):
             try:
-                base, text, stale = diff_result(change, root / graph.clone, pages)
+                base, text, stale = diff_result(change, clone, pages)
                 files = parse(text)
                 compare = f"{escape(change.base)}@{escape(base[:7])} → {escape(change.head[:7])}"
                 if stale:
@@ -345,7 +346,8 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     for f in files:
         chips = (f'<span class="chip {f.badge}">{f.badge}</span>' if f.badge else "") + "".join(
             f'<span class="chip also">ALSO {escape(r)}</span>' for r in shared.get(f.path, ()))
-        items.append(f'      <li><a href="#{escape(anchor(f.path))}">{escape(f.path)}</a><span class="d">{_count(f.add, f.dele)}</span>'
+        path_cell = (f'<a href="#{escape(anchor(f.path))}">{escape(f.path)}</a>' if f.rows else escape(f.path))
+        items.append(f'      <li>{path_cell}<span class="d">{_count(f.add, f.dele)}</span>'
                      f'<span class="b">{chips}</span></li>')
     tables, notes = [], list(notes or ())
     for f in files:
