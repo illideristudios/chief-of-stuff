@@ -193,8 +193,8 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                   live_keys: frozenset[str] = frozenset(), live_tasks: set[Task] | frozenset[Task] = frozenset(),
                   ambiguous_numbers: set[int] | None = None,
                   threads: dict[str, str] | None = None, moves: list | None = None) -> list[columns.Column]:
-    """The Build board: a column per lane stage, a card per task at the stage Flow keeps for it. A done task whose
-    unmerged cell is not its lane's last stage draws no card unless a worker is still live. Task cards sort by issue number. Sources add each card's changes
+    """The Build board: a card at the stage Flow keeps, with done cards only in main.
+    Task cards sort by issue number. Sources add each card's changes
     and marks, and a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
     held = hold_causes(tasks, kanban, sources, lanes, frozenset(), moves) if held is None else held
@@ -260,18 +260,11 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
 
-    def on_board(task: Task) -> bool:
-        if not (task.lane.strip() and task.stage.strip()):
-            return False
-        lane = lanes.get(task.lane.strip())
-        # Hide ended unmerged work; verified live workers and forge completion still remain visible.
-        live = task.issue in live_keys or task in live_tasks
-        merged = any(c.state == "merged" for c in task_changes(task, sources))
-        return not (task.kind == "done" and not live and not merged and lane and lane.stages
-                    and task.stage.strip() != lane.stages[-1])
-
-    laned = [t for t in tasks if on_board(t)]
-    at = {t: effective_stage(t, sources, lanes, moves, tasks) for t in laned}
+    candidates = [t for t in tasks if t.lane.strip() and t.stage.strip()]
+    stages = {t: effective_stage(t, sources, lanes, moves, tasks) for t in candidates}
+    # Main's done-card rule (#1153/#1154), applied to the same stage Build and Flow display.
+    laned = [t for t in candidates if t.kind != "done" or stages[t] == "main"]
+    at = {t: stages[t] for t in laned}
     order = list(dict.fromkeys(stage_order(lanes) + list(at.values())))
     # No PR column: a card at `pr` draws in the stage after it, normally review.
     into = {"pr": order[order.index("pr") + 1]} if "pr" in order[:-1] else {}

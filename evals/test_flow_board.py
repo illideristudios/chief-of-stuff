@@ -513,8 +513,10 @@ class CardFactsTest(unittest.TestCase):
     def test_finished_tasks_have_no_looping_mark(self):
         log = "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n- 11:00 stage: Cut the release → fix\n"
         lanes = {"build": st.Lane(("implement", "review", "fix", "merge", "main"))}
+        # A done task draws no card at all outside `main` (#1153), so it carries no mark.
+        self.assertNotRegex(self.cols([], log, tracker=TRACKER.replace("running 10:30", "done 10:30"), lanes=lanes),
+                            r">Cut the release</(?:a|div)>")
         for tracker, changes in (
-                (TRACKER.replace("running 10:30", "done 10:30"), []),
                 (TRACKER.replace("| build | review |", "| build | main |"), []),
                 (TRACKER, [change("!3", state="merged", issues=("#9",))])):
             with self.subTest(tracker=tracker, changes=changes):
@@ -916,7 +918,7 @@ class EpicsOnTheBoardTest(unittest.TestCase):
 
 
 class BuildFollowsFlowTest(unittest.TestCase):
-    """#887: a Build card uses the stage Flow keeps, done tasks leave an earlier column, and cards sort by issue number."""
+    """#887: Build cards use Flow stages and numeric issue order, with main's done-card rule."""
 
     LANES = {"build": st.Lane(("design", "plan", "main")), "fix": st.Lane(("design", "plan", "pr", "main"))}
 
@@ -967,32 +969,15 @@ class BuildFollowsFlowTest(unittest.TestCase):
         self.assertEqual(self.notes(html)["Earlier"].split(" · ")[0], "plan")
         self.assertEqual(self.notes(html)["Later"].split(" · ")[0], "plan")
 
-    def test_an_early_done_task_leaves_the_lanes_and_one_at_main_stays(self) -> None:
-        # A clock gives the Flow row a segment; a done task with none stops on its move and draws no bar.
-        rows = """| Early done | Early item | Robin | done 09:00–10:30 | 09:00 |  | S | build | design | #3 | c |
-| Landed | Landed item | Robin | done | 09:00 |  | S | build | main | #5 | c |
-"""
-        html = self.page(rows, "- 10:00 stage: Early done → plan\n")
-        cols = self.placed(html)
-        self.assertNotIn("Early done", [name for names in cols.values() for name in names])
-        self.assertEqual(cols["main"], ["Landed"])
-        tiles = dict(re.findall(r'<span class="panels-label">([A-Z ]+)</span><b class="panels-count">(\d+)</b>', html))
-        self.assertEqual(tiles["ALL"], "2")
-        self.assertEqual(self.notes(html)["Early done"].split(" · ")[0], "plan")
-
-    def test_a_done_cell_keeps_a_verified_live_worker_visible(self):
-        task = rb.Task("Still running", "worker", "done", "09:00", "", "",
-                       name="Live task", issue="#3", lane="build", stage="design")
-        cols = rb.build_columns([task], self.LANES, live_keys=frozenset({"#3"}))
-        cards = [card for col in cols for card in col.cards]
-        self.assertEqual([card.name for card in cards], ["Live task"])
-        self.assertIn("running", [mark.text for mark in cards[0].marks])
-
-    def test_a_merged_done_task_with_a_stale_cell_keeps_its_terminal_card(self):
-        rows = "| Merged task | Merged item | unassigned | done | 09:00 | | S | build | design | #3 | |\n"
-        merged = change("!70", state="merged", merged_at=NOW, issues=("#3",))
-        src = replace(bs.EMPTY, home=SOURCES.home, changes={merged.ref: merged})
-        self.assertIn("Merged task", self.placed(self.page(rows, sources=src))["main"])
+    def test_main_done_card_rule_uses_the_same_effective_stage_as_flow(self):
+        rows = "| Finished | Finished item | unassigned | done 09:00–10:00 | 09:00 | | S | build | design | #3 | |\n"
+        landed = self.page(rows, "- 09:00 stage: Finished → design\n- 10:00 stage: Finished → main\n")
+        self.assertEqual(self.placed(landed)["main"], ["Finished"])
+        self.assertEqual(self.notes(landed)["Finished"].split(" ")[0], "merged")
+        # A stale main cell cannot keep a done card in a stage column when Flow puts it at plan.
+        earlier = self.page(rows.replace("| design |", "| main |"), "- 09:00 stage: Finished → design\n- 10:00 stage: Finished → plan\n")
+        self.assertEqual([name for names in self.placed(earlier).values() for name in names], [])
+        self.assertEqual(self.notes(earlier)["Finished"].split(" · ")[0], "plan")
 
     def test_a_logged_pr_draws_in_the_following_column(self) -> None:
         rows = "| Review it | Review item | Robin | open | 09:00 |  | S | fix | design | #6 | c |\n"

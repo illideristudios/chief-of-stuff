@@ -8,7 +8,7 @@ On the board that filed this issue the cell is `design` for all 18 tasks, so the
 
 One rule for where a laned task's card goes. A task with a blank lane or stage still draws no card.
 
-1. A `done` task whose lane has stages and whose stage cell is not that lane's last stage draws no Build card. It stays in the tracker, the tiles, and the Flow charts. A `done` task already at the lane's last stage stays a card there, which is what the current fixtures assert. Merged-today cards are unchanged and still append to `main` in merge-time order, after the task cards, so a pile of old done work cannot push them into the fold.
+1. Done-card filtering is supplied by main via PR #1154: a `done` task draws only when its effective stage is `main`. This supersedes this plan's original lane-end rule; there is no separate live-worker or custom-lane-end exception. The task stays in the tracker, tiles, and Flow charts. Merged-today cards are unchanged and still append to `main` in merge-time order, after the task cards, so a pile of old done work cannot push them into the fold.
 2. Any other laned task draws in the column of the stage Flow would use for it: the last Log move `flow_chart.build` keeps for that task (a `stage:` line, or a launcher line from before the first `stage:` line), when that stage is a stage of some lane. Otherwise the card stays on the tracker cell. The existing `pr` fold still applies after that choice, so a `pr` card draws in the next column and there is still no `pr` column.
 3. Within a column, task cards sort by `tracker.issue_number` ascending. A card with no issue number sorts after the numbered ones, and equal numbers keep the tracker's order. Merged-today cards are not part of this sort.
 
@@ -22,15 +22,14 @@ TDD. Add the failing cases to `evals/test_flow_board.py` before editing producti
 
 - Two open tasks, cell `design`, Log moves to `plan`, tracker order `#10` then `#2`. Both cards are in `plan`, in order `#2` then `#10`. `design` does not hold them.
 - An open task with no Log move stays on its cell.
-- A `done` task at `design` on a lane that ends at `main` has no Build card. A `done` task whose cell is already `main` still has one, in `main`.
+- Main's grader and eval cases own done-card removal. Stage-parity coverage checks that its filter uses the stage Flow keeps, including moves into or out of `main`.
 - A logged `pr` still draws in the following column.
 - Merged-today cards remain the tail of `main`, newest first.
 
-`python3 -m unittest evals/test_flow_board.py evals/test_columns.py evals/test_board_flow_design.py` is the check. Those last two pin a done-at-`main` card and must stay green. If either goes red, the new rule is wrong; do not weaken them to hide a card that is already at the lane's end.
+`python3 -m unittest evals/test_flow_board.py evals/test_columns.py evals/test_board_flow_design.py` is the check. Those last two pin a done-at-`main` card and must stay green. If either goes red, the new rule is wrong; do not weaken them to hide a card whose effective stage is `main`.
 
 ## Risks
 
 - A stage cell edited without `chief-of-stuff log --stage` loses to an older Log line. Flow already works that way. The official writer updates the cell and the Log together.
 - A launcher line from before any `stage:` line can place a card at `implement`, `pr`, or `review`. That is the same move Flow draws. Ignoring launcher lines would leave those two views apart.
-- Leaving early `done` tasks off the lanes, rather than moving them to `main`, is the choice. Moving them would bury merged-today cards past the three-card fold. The issue allows either.
-- A `done` task on a lane that has no stage list still draws at its cell. `render` without lanes is that case, and the sha-on-the-card test depends on it.
+- PR #1154 now covers all done-card hiding from this plan. This branch adds numeric sorting, Build/Flow stage parity, and the store's last-segment stage fallback.
