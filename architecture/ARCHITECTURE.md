@@ -732,7 +732,7 @@ The engine has a heartbeat, in both of two forms (owner, 2026-10-29).
 The heartbeat's status is computed once and delivered to sinks (#1179).
 - **One status, two forms.** `heartbeat.status` (Use Cases) classifies each item as running, stalled, parked, done, or done on assumptions, from plain facts. It gives one short line, short enough for a thread title (`chief · N running · N stalled · N parked · N done · N assumed · tick HH:MM`), and one longer summary that names the age of the last tick and each stalled and parked item with its reason. Whether a running worker is stalled is `worker_health.silence`'s call, not a second judgement in the heartbeat.
 - **A sink is where the heartbeat shows.** `heartbeat.Sink` is the seam, and `heartbeat.deliver` hands the status to every sink. A sink that fails is reported as `name: reason` and never stops the other sinks or the engine. The engine delivers after each pass and writes each failure to its engine log.
-- **The file sink is the one built.** `heartbeat_store.FileSink` writes the status to the engine state directory, and the board and the report read it there. A T3 thread-title sink (form A) and a pinned-board sink (form B) plug in at the same seam. Neither is built, and both need the engine's MCP client, which waits on the owner's approval (section 19). Until then the file carries the heartbeat, which is the design's fallback when the rename fails.
+- **The file sink is the one built.** `heartbeat_store.FileSink` writes the status to the engine state directory, and the board and the report read it there. A T3 thread-title sink (form A) and a pinned-board sink (form B) plug in at the same seam. Neither is built (`heartbeat_store.sinks` returns the file sink alone, `scripts/heartbeat_store.py:69-72`). Both need an MCP client into T3. One now exists in the T3 launcher (`t3_adapter._mcp`, section 13), merged without the owner's approval, and whether it stays is the owner's open decision (section 19), so no sink is built on it until then. Until then the file carries the heartbeat, which is the design's fallback when the rename fails.
 - **The report page.** The page server renders `/report` (`heartbeat_page.py`) from the delivered file. It lists done, done on assumptions, and parked, each item linked to its worker's thread or, without one, to its issue page, under the heartbeat's line and summary. It reads and never acts.
 
 ```
@@ -749,7 +749,7 @@ The stall watcher is a small, non-model watcher in the engine (call, T3 design �
 - **Waiting is not stalled.** A pending request count above zero is a worker waiting: the coordinator answers it as section 17 describes, and it counts as a stall only when it stays unanswered past a threshold. A worker waiting on an architectural decision or a split trio waits without expiry, because those waits are section 15's own.
 - **Silence is suspected, never proof.** A worker whose liveness is unknown, or whose thread could not be read, is not judged stalled.
 - **Recovery follows section 15's outcomes** (call), and a relaunch after a stall counts as a failure. `[workers.stall] action` is `wait` (the default) or `restart`. With `restart`, the engine stops a stalled local process, releases its slot only once termination is verified, and relaunches it, up to `max_restarts` (default 2) per issue. The stalled attempt is recorded as a failure, and `[workers] failure_limit` (default 2) failures on an issue park it.
-- **A T3 thread is not restarted.** A stalled worker launched through T3 is treated as `wait` even when `restart` is configured, because the `t3` CLI has no cancel or interrupt (section 13). It stays a suspected stall until the owner approves a cancellation mechanism (section 19).
+- **A T3 thread is not restarted.** A stalled worker launched through T3 is treated as `wait` even when `restart` is configured (`scripts/engine.py:751-752`). The `t3` CLI has no cancel or interrupt. The launcher's MCP client can now interrupt a thread's run (`t3_adapter.cancel`, section 13), but the stall path does not use it: `worker.stop` still refuses a T3 record (`scripts/worker.py:125`), and the interrupt runs only when a T3 start could not be verified. The worker stays a suspected stall until the stall path stops it through that interrupt, which waits on the owner keeping the client (section 19; `compliance.md` row C33).
 - **The judgement is pure.** `worker_health.stall` (Use Cases) sits beside `worker_health.silence`, the stall judgement already there, and is fed the worker's evidence as plain facts (liveness, last activity, pending requests and since when, a decision wait). The engine gathers the facts, acts on the verdict, and the page server displays it (architect, by section 1: one stall judgement, not two).
 
 ```
@@ -767,8 +767,8 @@ Mx := the issue reached max_restarts      Fl := the stall counts as a failure
 5.  Uk → ¬St                            [#1163: silence is suspected, never proof]
 6.  St → Rc                             [call, T3 design §10]
 7.  St ∧ Rs ∧ ¬T3 ∧ ¬Mx → Rl ∧ Fl       [#1163: bounded local recovery; section 15: a stall relaunch is a failure]
-8.  St ∧ T3 → ¬Rl                       [#1163: the t3 CLI has no cancel; section 13]
-∴   every stall is detected without a model turn and recovered by the unattended outcomes; a waiting worker is answered, not relaunched; and a T3 worker is held as waiting until a cancel exists (8)
+8.  St ∧ T3 → ¬Rl                       [scripts/engine.py:751-752 and scripts/worker.py:125: the stall path does not use the launcher's interrupt; C33]
+∴   every stall is detected without a model turn and recovered by the unattended outcomes; a waiting worker is answered, not relaunched; and a T3 worker is held as waiting until the stall path uses the interrupt (8)
 ```
 
 An unattended run ends with a report to the owner: done, done on assumptions, and parked (architectural, failed twice, or a split trio, with what was tried). `/report` is that report's page. An append-only action log backs it, and the engine's store is its natural home; where it lives is the builder's. The mockup `design/since-you-last-looked-laptop.html` appears to be its surface, and the builder confirms it. The engine records no marker today for an architectural park, a split trio, or an assumption the trio made, so the heartbeat infers each from other records (`compliance.md` row C32).
@@ -787,6 +787,7 @@ These are unsettled. Nothing in this document settles them, and work that depend
 - The names of modes beyond auto, deferred until the system is tried (section 9).
 - Deep-link behaviour in the real app, which needs a click in the desktop app (section 18).
 - Interrupting and renaming a thread from outside T3. The `t3` CLI has neither; both are MCP tools that need an outside-agent login and an MCP client in the engine (section 18, heartbeat A; and cancel, section 13). That client is a new dependency, so it is adopted only on the owner's approval.
+- **The owner's decision: keep or revert the T3 MCP client.** The client exists: `t3_adapter._mcp` (section 13) was added by commit 4191858d and merged through pull request 1198, the review of the T3 launcher, without the owner's approval that the item above requires. It adds no package, since `httpx2` and `mcp` were already pinned (`requirements.txt:10`, `:16`), but the approval was of the client, not of its packages. It is used to recover a lost start's thread and to interrupt an unverified start, and for nothing else. This document records it as built and decides nothing about it. Until the owner keeps it, nothing more is built on it: not the stall interrupt (`compliance.md` row C33) and not the rename or the heartbeat sinks (row C35).
 - A cross-project meta dashboard, deferred (section 12).
 - Dependencies between issues in different projects, which section 12 leaves uncovered (`compliance.md` row C29).
 - Whether the worker guard should deny destructive and credential commands it allows today. On main at 11c445c5, `guard_commands.denial_reason` gives no reason for `git reset --hard`, `git clean -fdx`, `rm -rf /` or reading `~/.ssh/id_rsa`, so a Claude worker may run each. Section 15 keeps the guard as automation that confines merges, protected pushes and stage writes to the engine, and removes every guard rule whose job is a hard stop. Neither settles whether denying a destructive or credential command is a hard stop or a safety check, so this is the owner's question, not a decision (sections 13 and 15).
@@ -794,21 +795,21 @@ These are unsettled. Nothing in this document settles them, and work that depend
 Answered by the spike notes of pull request 1188 (#1178, T3 0.1.3) and now stated in section 13: named-agent launch parity (the agent's prompt and tools apply, the rotation entry's model wins); how a T3 worker reaches the engine's report and ask server and which runtime mode it runs under (in-tree `.mcp.json`, T3's default `auto` mode); and how T3's worktrees and the engine's reconcile (each engine worktree is registered as a T3 project). Two spike points stay untested: a plugin-qualified agent name in the tree's `agent` setting, and an agent whose `tools:` list must also admit the engine's MCP tools.
 
 Decided but not built yet, after #1178. Each is required by the section named, and the code does not meet it yet:
-- Live messages to a T3 worker: `worker.deliver_messages` fails them as "started without live messaging"; `t3 thread send` would carry them (section 13).
-- Thread links on the issue pages and the workers page; only the board links the thread (sections 13 and 18).
-- Mapping the engine's `[workers] claude_as_profile` to a T3 provider instance; every T3 worker runs under T3's default `claudeAgent` (sections 10 and 13).
 - Codex, Cursor and Antigravity under T3; only Claude entries launch through it, since each other runtime needs its own channel file there (section 13, call).
-- Cancelling the thread itself; cancel stops the runner, not the thread, until the MCP client above is approved (section 13). A stalled T3 worker is therefore held as a wait (section 18; `compliance.md` row C33).
+- Stopping a stalled T3 worker. The launcher can interrupt a thread's run, but only an unverified start uses it, and the stall path still holds a T3 worker as a wait (sections 13 and 18; `compliance.md` row C33). It waits on the owner's decision above.
 - The heartbeat's thread-title and pinned-board sinks (section 18; `compliance.md` row C35).
 
-Built since: a T3 worker's liveness and stall evidence come from its thread (`t3_adapter.observe` reads the thread's status, update time and pending request count), not from the runner process. A thread that cannot be read is unknown evidence, never a stall (sections 13 and 18).
+Built since: a T3 worker's liveness and stall evidence come from its thread (`t3_adapter.observe` reads the thread's status, update time and pending request count), not from the runner process. A thread that cannot be read is unknown evidence, never a stall (sections 13 and 18). Live messages to a T3 worker go through `t3 thread send` and are recorded delivered only as far as T3 can show; `[workers.t3_providers]` maps the worker's Claude account to its T3 provider instance; and the board, the issue pages and the workers page link each worker's thread (section 13; pull request 1198 and commit b3abfa7c). The owner's view of the decision graph is built (section 17).
 
 ```
-Mc := an MCP client is added to the engine      Ap := the owner approved it as a new dependency
-In := a thread can be interrupted from the engine      Rn := a thread can be renamed from the engine
-1.  Mc → Ap          [the owner's rule: every new library, package or tool is confirmed before adoption]
-2.  In ∨ Rn → Mc     [#1178: the t3 CLI has no interrupt or rename; both are MCP tools]
-∴   In ∨ Rn → Ap: neither the thread cancel nor heartbeat A's rename is built before the owner approves the client
+Mc := the engine has an MCP client into T3      Ap := the owner approved it as a new dependency      Kp := the owner keeps it
+In := the stall path interrupts a thread      Rn := a thread is renamed from the engine      Bd := something more is built on the client
+1.  Mc → Ap               [the owner's rule: every new library, package or tool is confirmed before adoption]
+2.  Mc                    [scripts/t3_adapter.py:323-353; commit 4191858d, pull request 1198]
+3.  ¬Ap                   [no approval of the client is recorded]
+4.  In ∨ Rn → Mc          [#1178: the t3 CLI has no interrupt or rename; both are MCP tools]
+5.  Bd → Kp               [this section: work that depends on an open item waits for the owner's answer]
+∴   1 is broken by 2 and 3, so whether Mc stands is the owner's decision (keep or revert); until Kp, neither In nor Rn is built on it (4, 5)
 ```
 
 ```
