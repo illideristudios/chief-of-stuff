@@ -2,8 +2,11 @@
 """Serve the workspace's pages locally: the board and any page a session writes beside it.
 
 The pages are routes: `/` the board, `/workers` the running workers and today's ends, `/decisions` the list,
-`/decisions/<slug>` a decision page, `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
-and diff. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
+`/decisions/<slug>` an authored decision page, `/decisions/<id>` (digits only) a store decision's page rendered
+from the store (#945), `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
+and diff. `/workers/` and `/decisions/` are the same pages as the bare routes (#988); other directory URLs stay 404
+(#340). A missing `/favicon.ico` answers 204 so the browser console stays clean; a real icon in the pages dir is
+served. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
 `issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the file's own name is a 404.
 A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the settings TOML, the decision JSON,
 `.sources.json`) is newer than its last render, or differs in bytes from what that render read, and `/workers` on every GET (it reads the session logs too), and a thread refreshes `.sources.json` from the forge every minute. An open tab
@@ -11,6 +14,8 @@ reloads itself when the file changes.
 
     python3 pages.py --ensure [--root R]              # start it unless it is already serving; print status only
     python3 pages.py serve --dir D --port P --root R  # what --ensure starts, detached
+    python3 pages.py install|uninstall|status [--root R]  # the independent board LaunchAgent (#935)
+    python3 pages.py supervise [--root R]             # what that LaunchAgent runs: ensure, every POLL seconds
 
 A decision page posts the user's answer to `POST /decisions/<slug>` (`key` and/or `words`, form-encoded).
 The server saves it as the decision JSON's `answer` ({key, words, at}) for the coordinator's next pass, and
@@ -26,22 +31,31 @@ name to 127.0.0.1, but that page still sends its own name as the Host.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
+import email.utils
+import errno
 import functools
 import hashlib
+import hmac
+import secrets
+import uuid
 import http.server
 import io
 import json
 import os
 import re
+import select
 import signal
+import string
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from stat import S_ISREG
 from html import escape
@@ -49,8 +63,12 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import forge
 import page_reload
+import release_selection
 import supervisor
-from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
+from backlog_ref import GitHubBacklog
+from workspace import (ENGINE_STATUS_FILE, LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers,
+                       engine_health, looked_before, pages_address, read_config, read_engine_status, record_look,
+                       unrecord_look, with_workspace_decision_deadlines)
 
 SERVER = "chief-of-stuff-pages"
 PID = ".pid"
@@ -59,29 +77,132 @@ REFRESH = 60  # seconds between forge reads
 POLL = 5  # seconds between healthy server checks
 RETRY_MIN = 1
 RETRY_MAX = 60
-RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
+RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|report\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
-ISSUE = re.compile(r"/issues/([a-z0-9_.-]+:[A-Za-z0-9_./-]+#\d+|\d+)(/source)?")
+WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
+WORKER_MESSAGE = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})/messages")
+MAX_WORKER_MESSAGE = 8 * 1024
+MAX_WORKER_FORM = MAX_WORKER_MESSAGE * 3 + 1024
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
+MAX_RESPONSE = 16 * 1024 * 1024  # bound the snapshot held while preparing a response
+# Each process permits four active static snapshots, including slow downloads.
+# Reserve 256 MiB on the temporary filesystem and account for the full size of
+# every active snapshot (conservatively double-counting bytes already written).
+MAX_STATIC_SNAPSHOT_SLOTS = 4
+STATIC_FREE_RESERVE = 256 * 1024 * 1024
+STATIC_SNAPSHOT_SLOTS = 0
+STATIC_RESERVED_BYTES = 0
+STATIC_SNAPSHOT_GUARD = threading.Lock()
+
+
+def issue_route(path: str) -> tuple[str, bool] | None:
+    """Parse an issue route in linear time, retaining the full forge identity and source suffix."""
+    if not path.startswith("/issues/"):
+        return None
+    key = path[len("/issues/"):]
+    source = key.endswith("/source")
+    if source:
+        key = key[:-len("/source")]
+    if key.isdecimal():
+        return key, source
+    namespace, colon, rest = key.partition(":")
+    repo, hashmark, number = rest.partition("#")
+    if (colon and namespace and all(c in string.ascii_lowercase + string.digits + "_.-" for c in namespace)
+            and hashmark and repo and all(c in string.ascii_letters + string.digits + "_./:-" for c in repo)
+            and number.isdecimal()):
+        return key, source
+    return None
+
+
+def _static_free_bytes(file):
+    stats = os.fstatvfs(file.fileno())
+    return stats.f_bavail * stats.f_frsize
+
+
+class StaticSnapshot:
+    def __init__(self, size):
+        global STATIC_SNAPSHOT_SLOTS, STATIC_RESERVED_BYTES
+        self.file = None
+        self.slot = False
+        self.reserved = 0
+        with STATIC_SNAPSHOT_GUARD:
+            if STATIC_SNAPSHOT_SLOTS >= MAX_STATIC_SNAPSHOT_SLOTS:
+                raise OSError(errno.ENOSPC, "static snapshot slots exhausted")
+            STATIC_SNAPSHOT_SLOTS += 1
+            self.slot = True
+        try:
+            self.file = tempfile.TemporaryFile()
+            with STATIC_SNAPSHOT_GUARD:
+                if _static_free_bytes(self.file) < STATIC_FREE_RESERVE + STATIC_RESERVED_BYTES + size:
+                    raise OSError(errno.ENOSPC, "insufficient temporary space for static snapshot")
+                STATIC_RESERVED_BYTES += size
+                self.reserved = size
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        global STATIC_SNAPSHOT_SLOTS, STATIC_RESERVED_BYTES
+        if self.slot:
+            try:
+                if self.file is not None:
+                    self.file.close()
+            finally:
+                with STATIC_SNAPSHOT_GUARD:
+                    STATIC_RESERVED_BYTES -= self.reserved
+                    STATIC_SNAPSHOT_SLOTS -= 1
+                    self.slot = False
+                    self.reserved = 0
+
+    def read(self, size):
+        return self.file.read(size)
+
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
 # An answer saved mid-render of another page (the board) can leave that page stale until the next forge refresh.
 PAGE_LOCKS: dict[str, threading.Lock] = {}
 PAGE_LOCKS_GUARD = threading.Lock()
-# Each page's last render by this server: (when it started, ns; the file's time after it; the sha256 of the
-# sources' bytes it consumed). Apart from the file's time, which is only when its bytes last changed (the
-# Last-Modified a tab reloads on). A page with no record, or whose file changed since (an older release's, an
-# editor's), is judged by its file's time; a None file time marks it stale. The digest decides freshness where
-# the record is this server's own render of this file: this filesystem's mtime clock reads behind the wall
-# clock by more than a render takes under load, so no mtime comparison can order a source saved just after a
-# render began against that render — the bytes can.
-RENDERED_AT: dict[str, tuple[int, int | None, str]] = {}
+# A server render records its start, the output file identity, and its input digest. An external
+# atomic replacement is never assumed current, even when its timestamp is newer than every source.
+RENDERED_AT: dict[str, tuple[int, tuple[int, int, int] | None, str]] = {}
+
+
+def _file_identity(path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = path.stat()
+        return stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns
+    except OSError:
+        return None
 
 
 def page_lock(path: Path | str) -> threading.Lock:
     """The lock one page's renders and its answer saves take, so neither overlaps another of the same page."""
     with PAGE_LOCKS_GUARD:
         return PAGE_LOCKS.setdefault(str(path), threading.Lock())
+
+
+@contextlib.contextmanager
+def publication_lock(root: Path | None, path: Path | str):
+    """Serialize one page's publication and answer saves across threads and server processes."""
+    with page_lock(path):
+        if root is None:
+            yield
+        else:
+            key = hashlib.sha256(os.fsencode(Path(path).resolve())).hexdigest()
+            with supervisor.lock(root.resolve() / ".chief-of-stuff" / "page-locks" / key, wait=True):
+                yield
+
+
+class ResponseTooLarge(Exception):
+    pass
+
+
+class ResponseSnapshot(io.BytesIO):
+    """Bound the entire prepared response, including headers, before sending any bytes."""
+    def write(self, data):
+        if self.tell() + len(data) > MAX_RESPONSE:
+            raise ResponseTooLarge
+        return super().write(data)
 
 
 def _plugin_version() -> str:
@@ -92,16 +213,13 @@ def _plugin_version() -> str:
 
 
 VERSION = _plugin_version()
+# Installed release paths are content-addressed; capture the resolved path once so `current` moving
+# cannot change the identity advertised by an already-running server.
+RELEASE_ID = hashlib.sha256(os.fsencode(Path(__file__).resolve().parent.parent)).hexdigest()[:24]
 # The renderer's own code counts as a source: a release upgrade changes it, not the sources.
 import fragment  # light (html, re, pathlib); the renderers stay lazy for --ensure
 
 RENDERER_MTIME_NS = max(p.stat().st_mtime_ns for p in (*Path(__file__).resolve().parent.glob("*.py"), fragment.THEME_PATH) if p.is_file())
-
-
-def _version(server_header: str) -> tuple[int, ...]:
-    """The version a Server header names; a server from before versions were sent is (0,)."""
-    m = re.match(rf"{SERVER}/(\d+(?:\.\d+)*)", server_header)
-    return tuple(int(x) for x in m[1].split(".")) if m else (0,)
 
 
 class PagesError(RuntimeError):
@@ -110,17 +228,21 @@ class PagesError(RuntimeError):
 
 def _sources(root: Path, cfg, pages_dir: Path, day: str) -> list[Path]:
     return [root / "CLAUDE.md", *([root / cfg.settings_path] if cfg.settings_path else []), root / cfg.log_path(day),
-            root / "store.db", root / "store.db-wal", *(path for _, path in daily_trackers(root, cfg)), *pages_dir.glob("decision-*.json"),
+            root / "store.db", root / "store.db-wal", supervisor.state_dir(root) / ENGINE_STATUS_FILE,
+            *(path for _, path in daily_trackers(root, cfg)), *pages_dir.glob("decision-*.json"),
             pages_dir / CACHE]
 
 
-def _digest(sources: list[Path]) -> str:
-    """sha256 of the sources' bytes, for a render record: content, not times, says whether a render's inputs changed."""
+def _digest(sources: list[Path], extra: str = "") -> str:
+    """sha256 of the sources' bytes and live state token, for a render record: content, not times, says whether a render's inputs changed."""
     h = hashlib.sha256()
     for p in sources:
         if p.is_file():
             h.update(str(p).encode())
             h.update(p.read_bytes())
+    if extra:
+        h.update(b"\0engine\0")
+        h.update(extra.encode())
     return h.hexdigest()
 
 
@@ -129,6 +251,27 @@ def today_board(root: Path) -> str | None:
     cfg = read_config(root)
     day = datetime.now(cfg.zone).date().isoformat()
     return f"{day}-board.html" if (root / cfg.tracker_path(day)).is_file() or (root / "store.db").is_file() else None
+
+
+def board_name(root: Path, pages_dir: Path) -> str | None:
+    """The board `/` serves: today's if available, otherwise the latest rendered board."""
+    name = today_board(root)
+    if name is not None:
+        return name
+    boards = sorted(pages_dir.glob("*-board.html"))
+    return boards[-1].name if boards else None
+
+
+def workspace_label(root: Path) -> str:
+    """The name a served page carries: the Backlog repository or project the workspace's config names, else the root
+    folder's name marked as such (no Backlog line, or a config that does not read) so it is not taken for a project."""
+    try:
+        backlog = read_config(root).backlog
+    except (ConfigError, OSError):
+        backlog = None
+    if backlog is None:
+        return f"{root.name} (folder)"
+    return (backlog.repo if isinstance(backlog, GitHubBacklog) else backlog.project).rpartition("/")[2]
 
 
 def _page_data(root: Path):
@@ -152,15 +295,181 @@ def write_board(root: Path, day: str | None = None, *, now: datetime | None = No
 
 
 def _navigation(root: Path, pages_dir: Path, data):
+    """Shared tab lead counts. Store rows when present; otherwise the tracker's counts. An unavailable source
+    omits its keys (do not invent zeros); a known zero stays in the dict and draws no badge (#965)."""
     import decision_actions
-    if data is None:
+    if data is not None:
+        # Resumes keep exhausted retries in Workers, not Dispatch (#963 / #965).
+        import decision_page
+        try:
+            day = datetime.now(read_config(root).zone).date().isoformat()
+        except (ConfigError, OSError):
+            day = ""
+        ctx = decision_page.context(root, day)
+        if ctx is not None:
+            return decision_page.store_navigation(data, decision_page.entries(pages_dir, ctx))
+        counts = decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+        if any(pages_dir.glob("decision-*.json")):
+            counts.pop("decisions", None)
+        return counts
+    return _tracker_navigation(root, pages_dir)
+
+
+def _tracker_navigation(root: Path, pages_dir: Path) -> dict:
+    """Coordinator lead counts from the tracker behind the board served at `/`.
+
+    No tracker or settings: every count is unavailable.
+
+    Loads the same since/flow lookback window the board uses so Since/Epics match when the store is absent.
+    """
+    import board_sources
+    import decision_page
+    import flow_chart
+    import task_forge
+    from settings import SettingsError, load as load_settings
+    try:
+        cfg = read_config(root)
+    except (ConfigError, OSError):
         return {}
-    return decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+    now = datetime.now(cfg.zone).replace(second=0, microsecond=0)
+    trackers = daily_trackers(root, cfg)
+    name = board_name(root, pages_dir)
+    if name is not None:
+        try:
+            tracker_day = date.fromisoformat(name[:10])
+        except ValueError:
+            return {}
+        tracker = root / cfg.tracker_path(tracker_day.isoformat())
+        if not tracker.is_file():
+            return {}
+    elif trackers:
+        tracker_day, tracker = trackers[-1]
+    else:
+        return {}
+    tracker_text = tracker.read_text()
+    cfg = with_workspace_decision_deadlines(root, cfg, tracker_text, tracker_day)
+    try:
+        settings = load_settings(root, cfg.settings_path)
+    except (SettingsError, OSError):
+        return {}
+    looked = looked_before(pages_dir)
+    since_day = looked.astimezone(cfg.zone).date() if looked else now.date()
+    reach = (now - flow_chart.WINDOWS[-1][1]).date()
+    bound = min(reach, since_day)
+    earlier = []
+    for d, path in reversed(trackers):
+        if d >= tracker_day:
+            continue
+        if d < bound:
+            break
+        earlier.append((d, path.read_text()))
+    earlier.reverse()
+    ctx = decision_page.decision_context(root, tracker_day, now)
+    pending_refs = decision_page.held_refs(decision_page.entries(pages_dir, ctx), ctx)
+    return task_forge.tab_counts(
+        tracker_text, cfg, now, settings.lanes, settings.kanban, board_sources.load(pages_dir),
+        pending_refs, looked, earlier, slots=settings.workers.max_concurrency or 1, tracker_day=tracker_day)
 
 
 def _issue_identity(name: str, source: bool = False):
     token = name[len("issue-"):-len("-source.html") if source else -5]
     return bytes.fromhex(token[1:]).decode() if token.startswith("k") else int(token)
+
+
+def _worker_config_dir(root: Path, data, segment_id: int) -> Path | None:
+    """Recover the Claude config directory from this exact attempt's recorded launch command."""
+    seg = next((s for s in data.segments() if getattr(s, "id", None) == segment_id), None)
+    if seg is None:
+        return None
+    number = seg.issue_key.rpartition("#")[2]
+    if (not number.isdecimal() or not re.fullmatch(r"[A-Za-z0-9_-]+", seg.stage)
+            or type(seg.attempt) is not int or seg.attempt < 1):
+        return None
+    data_for_issue = data.resume(seg.issue_key)
+    runs = data_for_issue.get("runs") if isinstance(data_for_issue, dict) else None
+    run = runs.get(f"{seg.stage}-{seg.attempt}") if isinstance(runs, dict) else None
+    if not isinstance(run, dict) or not all(isinstance(run.get(k), str) and run[k] for k in ("tree", "session_id", "run_dir")):
+        return None
+    expected = supervisor.state_dir(root) / "runs" / f"{int(number)}-{seg.stage}-{seg.attempt}"
+    try:
+        if Path(run["run_dir"]).resolve() != expected.resolve():
+            return None
+        path = expected / "command.json"
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as stream:
+            stat = os.fstat(stream.fileno())
+            if not S_ISREG(stat.st_mode) or stat.st_size > MAX_PAGE:
+                return None
+            command = json.load(stream)
+        if not isinstance(command, dict):
+            return None
+        env = command.get("env")
+        explicit_home = env.get("CLAUDE_CONFIG_DIR") if isinstance(env, dict) else None
+        home = command.get("config_dir", explicit_home)
+        if explicit_home is not None and explicit_home != home:
+            return None
+        if (command.get("session_id") != run["session_id"] or not isinstance(command.get("cwd"), str)
+                or Path(command["cwd"]).resolve() != Path(run["tree"]).resolve()
+                or not isinstance(home, str) or not Path(home).is_absolute()):
+            return None
+        return Path(home)
+    except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError):
+        return None
+
+
+def _worker_identity(data, segment_id: int):
+    seg = next((s for s in data.segments() if s.id == segment_id), None)
+    if seg is None:
+        return None, None
+    resume = data.resume(seg.issue_key)
+    runs = resume.get("runs") if isinstance(resume, dict) else None
+    run = runs.get(f"{seg.stage}-{seg.attempt}") if isinstance(runs, dict) else None
+    return seg, run if isinstance(run, dict) else None
+
+
+def _message_token(server, host: str, seg, session_id: str) -> str:
+    identity = json.dumps([host, seg.id, seg.issue_key, seg.stage, seg.attempt, session_id], separators=(",", ":"))
+    return hmac.new(server.message_secret, identity.encode(), hashlib.sha256).hexdigest()
+
+
+def _message_available(root, seg, run, home) -> str:
+    import claude_adapter
+    import worker
+    if seg.ended_at:
+        return "This worker has finished; messages cannot be delivered."
+    if seg.runtime != "claude":
+        return "Live messaging is not available for this runtime."
+    if not run or not isinstance(run.get("session_id"), str) or not run["session_id"] or home is None:
+        return "Messaging unavailable: this attempt's identity could not be verified."
+    try:
+        from workspace import worktrees_dir
+        tree = Path(run["tree"]).resolve()
+        trees = (root / worktrees_dir((root / "CLAUDE.md").read_text())).resolve()
+        if tree == trees or not tree.is_relative_to(trees):
+            return "Messaging unavailable: this attempt's identity could not be verified."
+        expected = worker._run_dir(root, seg.issue_key, seg.stage, seg.attempt)
+        if Path(run.get("run_dir", "")).resolve() != expected.resolve() or not claude_adapter.messaging(expected):
+            return "This worker was started without live messaging."
+        if (expected / claude_adapter.MAILBOX / "closed").exists() or (expected / "exit.json").exists():
+            return "This worker has finished accepting messages."
+        if (type(run.get("runner_pid")) is not int or run["runner_pid"] <= 0
+                or not isinstance(run.get("runner_identity"), str) or not run["runner_identity"]):
+            return "Messaging unavailable: the worker process could not be verified."
+        if not worker._runner_live(run, expected):
+            return "This worker has finished accepting messages."
+    except (OSError, ValueError, TypeError, RuntimeError, KeyError):
+        return "Messaging unavailable: this attempt's identity could not be verified."
+    return ""
+
+
+def inside(pages_dir: Path | str, name: str) -> Path | None:
+    """`name` resolved in pages_dir, or None when it resolves outside it (a `..`, a symlink out): the realpath-and-prefix
+    guard CodeQL's py/path-injection recognises, for every path built from a request."""
+    base = os.path.realpath(pages_dir)
+    checked = os.path.realpath(os.path.join(base, name))
+    if not checked.startswith(base + os.sep):
+        return None
+    return Path(checked)
 
 
 def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()) -> str:
@@ -169,6 +478,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
     where it is."""
     # The renderers are imported here, not at the top, to keep `pages.py --ensure` light.
     import decision_page
+    import heartbeat_page
     import issue_page
     import render_board
     import source_page
@@ -177,21 +487,21 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
     # directly in pages_dir, and everything after uses the checked path (and the name taken from it), not the raw one.
     if not RENDERED.fullmatch(name):
         return ""
-    base = os.path.realpath(pages_dir)
-    checked = os.path.realpath(os.path.join(base, name))
-    if not checked.startswith(base + os.sep):
+    target = inside(pages_dir, name)
+    if target is None:
         return ""
-    target = Path(checked)
     name = target.name
     key = str(pages_dir / name)  # what the handler's page_lock and RENDERED_AT use, so the locks and records agree
     try:
         cfg = read_config(root)
         today = datetime.now(cfg.zone).date().isoformat()
-        if name.startswith("decision-"):
+        store_decision = name.startswith("decision-") and name[len("decision-"):-5].isdigit()  # a store id (#945)
+        if name.startswith("decision-") and not store_decision:
             if not (pages_dir / f"{name[:-5]}.json").is_file():
                 return ""
-            day = today
-        elif name.startswith("issue-") or name == "workers.html":
+            days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
+            day = today if (root / "store.db").is_file() or today in days or not days else days[-1]
+        elif store_decision or name.startswith("issue-") or name in ("workers.html", "report.html"):
             day = today
         elif name == "decisions.html":
             days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
@@ -200,41 +510,51 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             day = name[:10]
             if not (root / cfg.tracker_path(day)).is_file() and not (root / "store.db").is_file():
                 return ""
-        with page_lock(key):  # checked under the lock: a request that waited finds the page already rendered
-            sources = [*_sources(root, cfg, pages_dir, day),
-                       *([pages_dir / LOOKED_BEFORE] if name.endswith("-board.html") else []), fragment.THEME_PATH]
+        shows_engine = name.endswith("-board.html") or (name.startswith("issue-") and not name.endswith("-source.html"))
+        with publication_lock(root, key):  # check and record the identity under the cross-process lock
+            board = board_name(root, pages_dir) if not name.endswith("-board.html") else None
+            if (name == "decisions.html" or (name.startswith("decision-") and not store_decision)) and board:
+                day = board[:10]
+            sources = [*_sources(root, cfg, pages_dir, day), pages_dir / LOOKED_BEFORE, fragment.THEME_PATH]
+            if board:
+                sources.append(pages_dir / board)
             newest = max(RENDERER_MTIME_NS, max((p.stat().st_mtime_ns for p in sources if p.is_file()), default=0))
-            mtime = target.stat().st_mtime_ns if target.is_file() else 0
-            digest = _digest(sources)
+            identity = _file_identity(target)
+            engine_token = ""
+            if shows_engine and (status := read_engine_status(root)) is not None:
+                now_min = datetime.now(cfg.zone).replace(second=0, microsecond=0)
+                engine_token = repr(engine_health(status, now_min, cfg.zone))
+            digest = _digest(sources, extra=engine_token)
             record = RENDERED_AT.get(key)
-            rendered = record[0] if record and record[1] in (mtime, None) else mtime
-            if rendered >= newest and name != "workers.html":
+            if record and identity is not None and record[1] == identity and record[0] >= newest and name not in ("workers.html", "report.html"):
                 # The filesystem's mtime clock reads behind the wall clock by more than a render takes under load
                 # here, so a source saved after that render began can carry an mtime from before it. Where the
-                # record is this server's render of this file, the sources' bytes settle it: fresh only if they
-                # are still exactly what that render consumed. A source touched without a change keeps the mtime
-                # path's one confirming render — it re-renders, records the same digest, and the polls after it
-                # are fresh.
-                if not (record and record[1] == mtime and record[2] != digest):
+                # The digest includes engine liveness, which can change without a file write.
+                if record[2] == digest:
                     return ""
             started = time.time_ns()
             with slots:
-                if name.startswith("decision-"):
-                    decision_page.write(root, pages_dir, name[len("decision-"):-5], day)
-                else:
-                    data = _page_data(root)
-                    if name == "workers.html" or name.startswith("issue-"):
-                        navigation = _navigation(root, pages_dir, data)
-                        if name == "workers.html":
-                            workers_page.write(root, pages_dir, db=data, navigation=navigation)
-                        elif name.endswith("-source.html"):
-                            source_page.write(root, pages_dir, _issue_identity(name, source=True),
-                                              db=data, navigation=navigation)
-                        else:
-                            issue_page.write(root, pages_dir, _issue_identity(name), db=data, navigation=navigation)
+                data = _page_data(root)
+                if name == "report.html":
+                    heartbeat_page.write(root, pages_dir)
+                elif name.startswith("decision-") and not store_decision:
+                    decision_page.write(root, pages_dir, name[len("decision-"):-5], day,
+                                        navigation=_navigation(root, pages_dir, data))
+                elif name == "workers.html" or name.startswith(("issue-", "decision-")):
+                    navigation = _navigation(root, pages_dir, data)
+                    if store_decision:
+                        decision_page.write_store(root, pages_dir, int(name[len("decision-"):-5]), day,
+                                                  db=data, navigation=navigation)
+                    elif name == "workers.html":
+                        workers_page.write(root, pages_dir, db=data, navigation=navigation)
+                    elif name.endswith("-source.html"):
+                        source_page.write(root, pages_dir, _issue_identity(name, source=True),
+                                          db=data, navigation=navigation)
                     else:
-                        render_board.write(root, day, db=data)
-            RENDERED_AT[key] = started, target.stat().st_mtime_ns if target.is_file() else 0, digest  # only after a render that did not raise
+                        issue_page.write(root, pages_dir, _issue_identity(name), db=data, navigation=navigation)
+                else:
+                    render_board.write(root, day, db=data, target="decisions" if name == "decisions.html" else "board")
+            RENDERED_AT[key] = started, _file_identity(target), digest  # only after a render that did not raise
         return ""
     except Exception as e:  # any renderer failure: the server keeps serving the last good page
         return f"{type(e).__name__}: {e}"
@@ -258,8 +578,51 @@ class Refresher(threading.Thread):
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
-    server_version = f"{SERVER}/{VERSION}"
+    server_version = f"{SERVER}/{VERSION} release-{RELEASE_ID}"
     banner = ""
+
+    def _refusal(self, status, message, *, answer=None, state=None, retry=None, words_name="answer", link=None,
+                 link_label="Reload the decision"):
+        """A transient recovery page; never write a submitted draft or raw exception to a page file."""
+        import decision_page
+        details = ""
+        if state is not None:
+            details = (f'<div class="card"><h2>{escape(state.prompt)}</h2>'
+                       f'<p>Current status: <b>{escape(state.status)}</b></p>'
+                       f'<p><a href="/decisions/{state.id}">View the current decision</a></p></div>')
+        if link:
+            details += f'<p><a href="{escape(link)}">{escape(link_label)}</a></p>'
+        if answer is not None:
+            field = f'<label>Your draft <textarea name="{words_name}" rows="4">{escape(answer)}</textarea></label>'
+            if retry:
+                action, hidden, extra = retry
+                fields = ''.join(f'<input type="hidden" name="{escape(k)}" value="{escape(str(v))}">' for k, v in hidden.items())
+                details += f'<form method="post" action="{escape(action)}">{fields}{field}{extra}<button type="submit">Try again</button></form>'
+            else:
+                details += f'<div class="card">{field}<p>Copy your draft before opening another page.</p></div>'
+        page = (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+                f'<title>Unable to continue</title>{decision_page.HEAD_OPEN}{fragment.theme()}{decision_page.PAGE_CSS}'
+                '<style>.refusal{max-width:860px;margin:24px auto;padding:0 20px}.refusal textarea{display:block;'
+                'width:100%;box-sizing:border-box;margin:8px 0;font:inherit;background:var(--bg);color:var(--fg);'
+                'border:1px solid var(--line)}.refusal .notice{border-left:4px solid var(--brass);padding:12px}</style>'
+                '</head><body><main class="refusal">'
+                f'{fragment.tab_bar("Decisions", 0, True)}<header class="top"><div><h1>Unable to continue</h1></div></header>'
+                f'<div class="card notice" role="alert">{escape(message)}</div>{details}'
+                '<p><a href="/">Board</a> · <a href="/workers">Workers</a> · <a href="/decisions">Decisions</a></p>'
+                '</main></body></html>').encode("utf-8")
+        self._send_transient(status, page)
+
+    def _send_transient(self, status, page):
+        """Send an in-memory page, never cached or injected with the auto-reloader."""
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(page)
 
     def _allowed(self) -> bool:
         """Refuse a foreign Host or a dotfile; map `/` to today's (else the newest) board, `/all` to the listing and
@@ -271,6 +634,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return False
         path = re.split(r"[?#]", self.path, maxsplit=1)[0]
         decoded = unquote(path)
+        # #988: browsers and pasted links often keep the trailing slash on the tab routes; serve them as the bare path.
+        # Other directory URLs, including lookalikes (`/workers//`, `/Workers/`), stay refused (#340).
+        if decoded in ("/workers/", "/decisions/"):
+            path = decoded = decoded[:-1]
         if "\0" in decoded or (decoded != "/" and decoded.endswith("/")):  # #340: null or a directory URL, `%2F` too
             self.send_error(404)
             return False
@@ -285,7 +652,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             name = None
             if root is not None:
                 try:
-                    name = today_board(root)
+                    name = board_name(root, Path(self.directory))
                 except Exception:  # an unreadable CLAUDE.md: fall back to the newest board on disk
                     pass
             boards = sorted(Path(self.directory).glob("*-board.html"))
@@ -299,20 +666,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.path = "/" + (name or boards[-1].name)
         elif path == "/all":
             self.path = "/"
-        elif path in ("/workers", "/decisions"):
+        elif path == "/favicon.ico":
+            # #988: a missing icon is 204 (no console 404); a real file in the pages dir is served. Host and path
+            # checks above still apply — this does not open a way around them.
+            icon = self._page("favicon.ico")
+            if icon is not None and icon.is_file():
+                try:
+                    if S_ISREG(icon.stat().st_mode):
+                        self.path = "/favicon.ico"
+                        return True
+                except OSError:
+                    pass
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+        elif path in ("/workers", "/decisions", "/report"):
             self.path = f"{path}.html"
         elif path.startswith("/decisions/"):
             m = ROUTE.fullmatch(path)
-            if not m or not (Path(self.directory) / f"decision-{m[1]}.json").is_file():
-                self.send_error(404, "no such decision")
+            # A path of digits is a store decision, rendered below or a 404; any other is an authored page's JSON.
+            source = self._page(f"decision-{m[1]}.json") if m and not m[1].isdigit() else None
+            if not (m and m[1].isdigit()) and (source is None or not source.is_file()):
+                self._refusal(404, "No such decision. Return to the decisions list or board.")
                 return False
             self.path = f"/decision-{m[1]}.html"
         elif decoded.startswith("/issues/"):
-            m = ISSUE.fullmatch(decoded)
-            if not m:
-                self.send_error(404, "no such issue")
+            route = issue_route(decoded)
+            if route is None:
+                self._refusal(404, "No such issue. Check the address or return to the board.")
                 return False
-            self.path = "/" + fragment.issue_page_name(m[1], bool(m[2]))
+            self.path = "/" + fragment.issue_page_name(*route)
         elif RENDERED.fullmatch(Path(self.translate_path(path)).name.casefold()):
             # A rendered page is a route only. casefold: long s and a case-insensitive disk reach it too (#335).
             self.send_error(404)
@@ -322,7 +706,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # A look is recorded before `fresh`, so the board counts from the look before, and taken back when the
             # board cannot render; one lock around it all, so two tabs loading at once cannot interleave it.
             pages = Path(self.directory)
-            with page_lock(pages / LAST_LOOKED) if look else contextlib.nullcontext():
+            with publication_lock(root, pages / LAST_LOOKED) if look else contextlib.nullcontext():
                 prior = None
                 if look:
                     with contextlib.suppress(OSError):
@@ -331,10 +715,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if self.banner and prior is not None:
                     with contextlib.suppress(OSError):
                         unrecord_look(pages, prior)
-        if name.startswith("issue-") and not self.banner and not (Path(self.directory) / name).is_file():
-            self.send_error(404, "no task names this issue")  # issue_page.write removes the page then
+        if name.startswith("issue-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
+            self._refusal(404, "No task names this issue. Return to the board or Workers.")
+            return False
+        if name.startswith("decision-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
+            self._refusal(404, "No such decision. Return to the decisions list or board.")
             return False
         return True
+
+    def _page(self, name: str) -> Path | None:
+        """`inside` this server's pages directory: every path the handler builds from the request goes through here."""
+        return inside(self.directory, name)
 
     def _poke(self):
         """Wake the refresher when the cache is older than its interval; the GET never waits for it."""
@@ -351,8 +742,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _send_html(self, body: bool):
         """An HTML page with the shared reload check; with the banner set, the last good page plus one line saying the
         render failed (never a blank 500). HEAD's length is GET's, and Last-Modified stays the file's own.
-        A page over MAX_PAGE is refused without reading; HEAD without a banner never reads (#333)."""
+        A page over MAX_PAGE is refused without reading; HEAD without a banner never reads (#333), except a rendered
+        page of a rooted server, which carries the workspace's name (#967) and so needs its bytes to count."""
         path = Path(self.translate_path(self.path))
+        root = getattr(self.server, "root", None)
+        label = workspace_label(root) if root is not None and RENDERED.fullmatch(path.name) else None
         try:
             stat = path.stat()
             if not S_ISREG(stat.st_mode):
@@ -360,7 +754,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if stat.st_size > MAX_PAGE:
                 return self.send_error(413, f"a page is at most {MAX_PAGE} bytes")
             stamp = stat.st_mtime
-            if not body and not self.banner:
+            if not body and not self.banner and label is None:  # a labelled page's length needs its bytes
                 with path.open("rb"):  # GET would read it: an unreadable page is GET's 404, not a 200
                     pass
                 # The injected HTTP date is fixed length; count the snippet without reading the file.
@@ -381,6 +775,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     f'font:14px/1.4 system-ui,sans-serif">not re-rendered: {escape(self.banner)}</p>').encode()
             page = re.sub(rb"<body[^>]*>", lambda m: m[0] + note, page, count=1) if b"<body" in page else note + page
         last_modified = self.date_time_string(stamp)
+        if label is not None:
+            from page_common import identify  # not at the top: it loads the markdown parser, which `--ensure` does not need
+            page = identify(page, label)
         page = page_reload.inject(page, last_modified)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -393,14 +790,235 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _is_html(self) -> bool:
         return bool(self.banner) or unquote(urlsplit(self.path).path).lower().endswith(".html")
 
+    def _serve(self, body: bool):
+        # Classify before _allowed, which may render and publish dynamic pages.
+        path = unquote(urlsplit(self.path).path)
+        dynamic = (path in ("/", "/all", "/workers", "/workers/", "/decisions", "/decisions/", "/report")
+                   or path.startswith(("/workers/sessions/", "/decisions/", "/issues/"))
+                   or path.lower().endswith(".html"))
+
+        def static():
+            finish = self._send_static(body)
+            return finish() if finish is not None else None
+
+        def prepare():
+            if not dynamic:
+                if self._allowed():
+                    return static
+                return None
+            root = getattr(self.server, "root", None)
+            if root:
+                import decision_page
+                lock = decision_page.page_render_lock(root, shared=True)
+            else:
+                lock = contextlib.nullcontext()
+            with lock:
+                if self._allowed():
+                    match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
+                    if match:
+                        self._send_worker_session(int(match[1]), body)
+                    elif self._is_html():
+                        self._send_html(body)
+                    elif self.path == "/":  # /all is the bounded directory listing
+                        if body:
+                            super(Handler, self).do_GET()
+                        else:
+                            super(Handler, self).do_HEAD()
+                    else:
+                        return static
+        self._snapshot_response(prepare)
+
+    def _snapshot_response(self, prepare):
+        """Prepare bounded bytes before writing to a potentially stalled socket."""
+        socket_output = self.wfile
+        snapshot = ResponseSnapshot()
+        self.wfile = snapshot
+        stream = None
+        try:
+            try:
+                stream = prepare()
+                if callable(stream):
+                    stream = stream()  # the publication lock has been released
+            except ResponseTooLarge:
+                snapshot = ResponseSnapshot()
+                self.wfile = snapshot
+                self._headers_buffer = []
+                self.send_error(413, f"a response is at most {MAX_RESPONSE} bytes")
+        finally:
+            self.wfile = socket_output
+        try:
+            socket_output.write(snapshot.getvalue())
+            if stream is not None:
+                file, remaining = stream
+                while remaining:
+                    chunk = file.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    socket_output.write(chunk)
+                    remaining -= len(chunk)
+        finally:
+            if stream is not None:
+                stream[0].close()
+
+    def _open_static(self, path):
+        """Open a resolved in-tree file without following a changed symlink during traversal."""
+        base = self.server.static_root
+        resolved = inside(base, os.path.relpath(path, self.directory))
+        if resolved is None:
+            raise OSError("outside pages directory")
+        try:
+            parts = resolved.relative_to(base).parts
+        except ValueError:
+            raise OSError("pages directory changed") from None
+        if not parts or any(part.startswith(".") for part in parts):
+            raise OSError("hidden path")
+        directory = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            stat = os.fstat(directory)
+            if (stat.st_dev, stat.st_ino) != self.server.static_root_identity:
+                raise OSError("pages directory changed")
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+        return os.fdopen(fd, "rb")
+
+    def _send_static(self, body):
+        # Descriptor traversal pins the checked inode even if its pathname changes.
+        # Static file I/O does not hold the dynamic-page publication lock.
+        path = self.translate_path(self.path)
+        file = None
+        try:
+            file = self._open_static(path)
+            stat = os.fstat(file.fileno())
+            if not S_ISREG(stat.st_mode):
+                raise OSError("not a regular file")
+        except OSError as error:
+            if file is not None:
+                file.close()
+            resource = error.errno in (errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.ENOSPC, errno.EIO)
+            self.send_error(503 if resource else 404, "Static file unavailable" if resource else "File not found")
+            return None
+
+        def finish():
+            snapshot = None
+            try:
+                if "If-Modified-Since" in self.headers and "If-None-Match" not in self.headers:
+                    try:
+                        modified_since = email.utils.parsedate_to_datetime(self.headers["If-Modified-Since"])
+                        if modified_since.tzinfo is None:
+                            modified_since = modified_since.replace(tzinfo=timezone.utc)
+                        last_modified = datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0)
+                        if modified_since.tzinfo is timezone.utc and last_modified <= modified_since:
+                            self.send_response(304)
+                            self.end_headers()
+                            return None
+                    except (TypeError, IndexError, OverflowError, ValueError):
+                        pass
+                if body:
+                    # Copy with a reserved temporary-space allowance.
+                    # Detect in-place edits before sending any headers or body.
+                    snapshot = StaticSnapshot(stat.st_size)
+                    remaining = stat.st_size
+                    while remaining:
+                        chunk = file.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError("file changed during snapshot")
+                        if snapshot.file.write(chunk) != len(chunk):
+                            raise OSError(errno.ENOSPC, "short snapshot write")
+                        remaining -= len(chunk)
+                    after = os.fstat(file.fileno())
+                    if (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                        raise ValueError("file changed during snapshot")
+                    snapshot.file.seek(0)
+                file.close()
+                self.send_response(200)
+                self.send_header("Content-Type", self.guess_type(path))
+                self.send_header("Content-Length", str(stat.st_size))
+                self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
+                self.end_headers()
+                if snapshot is not None:
+                    result = snapshot, stat.st_size
+                    snapshot = None  # ownership passes to _snapshot_response
+                    return result
+                return None
+            except ValueError:
+                self.send_error(503, "Static snapshot changed; retry")
+                return None
+            except OSError:
+                self.send_error(503, "Static snapshot unavailable")
+                return None
+            finally:
+                file.close()
+                if snapshot is not None:
+                    snapshot.close()
+        return finish
+
     def do_GET(self):
-        if self._allowed():
-            self._send_html(True) if self._is_html() else super().do_GET()
+        self._serve(True)
+
+    def _send_worker_session(self, segment_id: int, body: bool):
+        """Render a recorded engine attempt in memory; never publish transcript HTML into the pages directory."""
+        import session_logs
+        import workers_page
+        from workspace import worktrees_dir
+
+        root = getattr(self.server, "root", None)
+        if root is None:
+            return self.send_error(404, "no such worker session")
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        values = query.get("cursor", [])
+        cursor = None
+        if values:
+            if len(values) != 1 or not re.fullmatch(r"[0-9]{1,20},[0-9]{1,20},[0-9]{1,20},[a-f0-9]{64}", values[0]):
+                return self.send_error(400, "invalid transcript cursor")
+            device, inode, offset, digest = values[0].split(",")
+            cursor = session_logs.Cursor(int(device), int(inode), int(offset), digest)
+        try:
+            data = _page_data(root)
+            if data is None:
+                return self.send_error(404, "no such worker session")
+            trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
+            home = _worker_config_dir(root, data, segment_id)
+            seg, run = _worker_identity(data, segment_id)
+            if seg is None:
+                return self.send_error(404, "no such worker session")
+            reason = _message_available(root, seg, run, home)
+            session_id = run.get("session_id") if run else None
+            messages = []
+            if isinstance(session_id, str) and session_id and (root / "store.db").is_file():
+                import store_access
+                db = store_access.migrated_store(root)
+                try:
+                    messages = db.worker_messages(seg.issue_key, stage=seg.stage, attempt=seg.attempt, session_id=session_id)
+                finally:
+                    db.engine.dispose()
+            token = _message_token(self.server, self.headers["Host"], seg, session_id) if not reason else ""
+            page = workers_page.render_session(data, segment_id, trees, config_dir=home, cursor=cursor,
+                                               messages=messages, message_reason=reason, csrf=token,
+                                               request_id=str(uuid.uuid4()))
+        except Exception:
+            return self.send_error(500, "could not read worker session")
+        if page is None:
+            return self.send_error(404, "no such worker session")
+        from page_common import identify
+        payload = identify(page.encode("utf-8", errors="replace"), workspace_label(root))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if body:
+            self.wfile.write(payload)
 
     def _post_store_decision(self, form: dict[str, list[str]]):
         """Record a person's answer, reversal or re-route. A reversal or re-route is an intent on its own row, and
         the engine alone applies it: this request never touches the forge, a card, or another intent."""
         import decision_actions
+        import decision_escalation
         import sqlite3
         import store_access
         import trio_gate
@@ -412,10 +1030,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         root = getattr(self.server, "root", None)
         dec_id = form.get("decision_id", [""])[0].strip()
+        draft = form.get("answer", [""])[0]
         if root is None or not dec_id.isdigit():
-            return self.send_error(404, "no such decision")
+            return self._refusal(404, "No such decision. Your answer was not saved.", answer=draft)
         action = form.get("action", ["answer"])[0].strip()
-        text = form.get("answer", [""])[0].strip()
+        text = draft.strip()
         target_stage = form.get("target_stage", [""])[0].strip()
         now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
         try:  # #827: the workspace's own policy, overlay included, as the engine runs it
@@ -425,16 +1044,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_error(503, f"workspace policy unreadable: {exc}")
 
         db = None
+        current = None
         try:
             db = store_access.migrated_store(root)
 
             def record():
                 """Append the person's row, with any comment for the engine to post, in one short write transaction."""
+                nonlocal current
                 dec = db.decision(int(dec_id))
                 if dec is None:
                     return (404, "no such decision")
                 # Rows are append-only: the form names the row it was rendered from, and a newer one refuses it.
-                if decision_actions.latest(db.decisions(dec.issue_key)).get(decision_actions.identity(dec)).id != dec.id:
+                latest = decision_escalation.latest(db.decisions(dec.issue_key)).get(decision_escalation.identity(dec))
+                current = decision_actions.state_of(latest)
+                if latest.id != dec.id:
                     return (409, "the decision changed since this page was rendered")
                 item = db.item(dec.issue_key)
                 data = db.resume(dec.issue_key) or {}
@@ -452,11 +1075,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 with db.transaction():
                     error = record()
             except decision_actions.BadRequest as exc:
-                return self.send_error(400, str(exc))
+                known = {"an answer must contain text", "unknown decision action", "a reversal must contain text",
+                         "unknown target stage"}
+                message = str(exc) if str(exc) in known else "The selected stage cannot run a worker."
+                retry = None
+                if action in {"answer", "reverse", "reroute", "re-route"}:
+                    extra = (f'<label>Target stage <input type="text" name="target_stage" value="{escape(target_stage)}"></label>'
+                             if action in {"reroute", "re-route"} else "")
+                    hidden = {"decision_id": int(dec_id), "action": action}
+                    back = re.fullmatch(r"/decisions/(\d+)", form.get("back", [""])[0])
+                    if back:
+                        hidden["back"] = f"/decisions/{int(back[1])}"
+                    retry = ("/", hidden, extra)
+                return self._refusal(400, f"Your response was not saved: {message}.", answer=draft, state=current, retry=retry)
             except ValueError as exc:
-                return self.send_error(409, str(exc))
+                known = {"decision is already closed", "only an answered decision can be reversed",
+                         "a target stage is required", "a reversal must contain text", "an answer must contain text"}
+                message = str(exc) if str(exc) in known else "the decision cannot accept this action"
+                return self._refusal(409, f"Your response was not saved: {message}.", answer=draft, state=current)
             if error is not None:
-                return self.send_error(*error)
+                status, message = error
+                return self._refusal(status, f"Your response was not saved: {message}.", answer=draft, state=current)
         except (ServiceError, sqlite3.OperationalError, OperationalError) as exc:
             return self.send_error(503, f"store unavailable: {exc}")
         finally:
@@ -465,12 +1104,88 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         for page in Path(self.directory).iterdir():
             if RENDERED.fullmatch(page.name):
                 RENDERED_AT[str(page)] = 0, None, ""
+        # Back to the decision's own page when its form came from there (#945), else the list (#895). The header is
+        # built from the parsed digits, so no request text reaches it (CodeQL's py/http-response-splitting).
+        back = re.fullmatch(r"/decisions/(\d+)", form.get("back", [""])[0])
         self.send_response(303)
-        self.send_header("Location", "/")
+        self.send_header("Location", f"/decisions/{int(back[1])}" if back else "/decisions")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _post_worker_message(self, segment_id: int):
+        import store_access
+        root = getattr(self.server, "root", None)
+        if root is None:
+            return self.send_error(404)
+        host = self.headers.get("Host", "")
+        # Require the exact origin, including hostname and port; a missing Origin is not a browser authorization.
+        if (len(self.headers.get_all("Host", [])) != 1 or len(self.headers.get_all("Origin", [])) != 1
+                or self.headers.get("Origin") != f"http://{host}"):
+            return self.send_error(403, "origin required")
+        if self.headers.get_content_type() != "application/x-www-form-urlencoded" or self.headers.get("Transfer-Encoding"):
+            return self.send_error(400, "invalid form")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,8}", lengths[0]):
+            return self.send_error(411, "content length required")
+        size = int(lengths[0])
+        if size > MAX_WORKER_FORM:
+            self.close_connection = True
+            return self.send_error(413, "message form is too large")
+        try:
+            self.connection.settimeout(5)
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                return self.send_error(400, "incomplete form")
+            form = parse_qs(raw.decode("utf-8", "strict"), keep_blank_values=True, max_num_fields=3, strict_parsing=True, errors="strict")
+            if set(form) != {"csrf", "request_id", "message"} or any(len(v) != 1 for v in form.values()):
+                raise ValueError
+            text, request_id, token = (form[k][0] for k in ("message", "request_id", "csrf"))
+            if not text.strip() or len(text.encode("utf-8")) > MAX_WORKER_MESSAGE:
+                return self._refusal(400, "Message must contain text and fit within 8 KiB.", answer=text,
+                                     link=f"/workers/sessions/{segment_id}", link_label="Return to the worker")
+            if str(uuid.UUID(request_id)) != request_id:
+                raise ValueError
+        except (UnicodeError, ValueError, OSError):
+            return self.send_error(400, "invalid form")
+        db = None
+        try:
+            db = store_access.migrated_store(root)
+            import task_forge
+            with db.transaction():
+                data = task_forge.page_data(db)
+                seg, run = _worker_identity(data, segment_id)
+                if seg is None or not run or not isinstance(run.get("session_id"), str):
+                    return self.send_error(404, "no such worker session")
+                session_id = run["session_id"]
+                if not re.fullmatch(r"[0-9a-f]{64}", token) or not hmac.compare_digest(
+                        token, _message_token(self.server, host, seg, session_id)):
+                    return self.send_error(403, "invalid attempt authorization")
+                prior = next((m for m in db.worker_messages(seg.issue_key, stage=seg.stage, attempt=seg.attempt,
+                                                             session_id=session_id) if m.request_id == request_id), None)
+                if prior is None:
+                    reason = _message_available(root, seg, run, _worker_config_dir(root, data, segment_id))
+                    if reason:
+                        return self._refusal(409, reason, answer=text, link=f"/workers/sessions/{segment_id}", link_label="Return to the worker")
+                try:
+                    db.queue_worker_message(seg.issue_key, seg.stage, seg.attempt, session_id, text, request_id=request_id)
+                except ValueError:
+                    return self._refusal(409, "This message was not saved: the attempt or request changed.", answer=text,
+                                         link=f"/workers/sessions/{segment_id}", link_label="Return to the worker")
+        except Exception:
+            return self._refusal(503, "The message could not be saved. Check its status before trying again.", answer=text,
+                                 link=f"/workers/sessions/{segment_id}", link_label="Return to the worker")
+        finally:
+            if db is not None:
+                db.engine.dispose()
+        self.send_response(303)
+        self.send_header("Location", f"/workers/sessions/{segment_id}")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_POST(self):
+        self._snapshot_response(self._post)
+
+    def _post(self):
         """Save the user's answer beside the decision. Only this machine's own pages may post: the Host and, when a
         browser sends one, the Origin must be this server's."""
         port = self.server.server_address[1]
@@ -479,6 +1194,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.headers.get("Host", "") not in own or (origin is not None and origin not in [f"http://{h}" for h in own]):
             return self.send_error(403, "not a page of this server")
         route_path = re.split(r"[?#]", self.path, maxsplit=1)[0]
+        message_route = WORKER_MESSAGE.fullmatch(route_path)
+        if message_route:
+            return self._post_worker_message(int(message_route[1]))
         if route_path == "/":
             try:
                 size = int(self.headers["Content-Length"])
@@ -487,12 +1205,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if size > MAX_BODY:
                 self.close_connection = True
                 return self.send_error(413, f"an answer is at most {MAX_BODY} bytes")
-            form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"))
+            form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"), keep_blank_values=True)
             return self._post_store_decision(form)
         m = ROUTE.fullmatch(route_path)
-        source = Path(self.directory) / f"decision-{m[1]}.json" if m else None
-        if source is None or not source.is_file():
-            return self.send_error(404, "no such decision")
+        source = self._page(f"decision-{m[1]}.json") if m else None
         try:
             size = int(self.headers["Content-Length"])
         except (TypeError, ValueError):
@@ -500,16 +1216,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if size > MAX_BODY:
             self.close_connection = True
             return self.send_error(413, f"an answer is at most {MAX_BODY} bytes")
-        form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"))
-        key, words = form.get("key", [""])[0], form.get("words", [""])[0].strip()
+        form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"), keep_blank_values=True)
+        draft = form.get("words", [""])[0]
+        key, words = form.get("key", [""])[0], draft.strip()
+        if source is None or not source.is_file():
+            return self._refusal(404, "No such decision. Your answer was not saved.", answer=draft, words_name="words")
         import decision_page
-        with page_lock(Path(self.directory) / f"decision-{m[1]}.html"):
+        with publication_lock(getattr(self.server, "root", None), Path(self.directory) / f"decision-{m[1]}.html"):
             try:
                 d = decision_page.parse(json.loads(source.read_text()))
-            except decision_page.BAD as e:
-                return self.send_error(409, f"the decision does not read: {e}")
+            except decision_page.BAD:
+                return self._refusal(409, "The decision cannot be read. Your answer was not saved; try reloading it later.",
+                                     answer=draft, words_name="words", link=f"/decisions/{m[1]}")
             if (key and key not in [o["key"] for o in d["options"]]) or not (key or words):
-                return self.send_error(400, "an answer is one of the options' keys, or words")
+                root = getattr(self.server, "root", None)
+                pages_dir = Path(self.directory)
+                try:
+                    navigation = _navigation(root, pages_dir, _page_data(root)) if root is not None else None
+                except Exception:  # Navigation is optional; a read failure must not discard the submitted draft.
+                    navigation = None
+                page = decision_page.render(d, datetime.now().astimezone().date().isoformat(), slug=m[1],
+                                            refusal="Your answer was not saved. Choose one of the options or write an answer.",
+                                            draft=draft, selected=key if key in [o["key"] for o in d["options"]] else "",
+                                            back="/decisions" if form.get("back") == ["/decisions"] else "",
+                                            navigation=navigation)
+                return self._send_transient(400, page.encode("utf-8"))
             d["answer"] = {"key": key or None, "words": words, "at": datetime.now().astimezone().isoformat(timespec="seconds")}
             stat = source.stat()
             tmp = source.with_name(f".{source.name}.tmp")
@@ -521,14 +1252,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             for page in Path(self.directory).iterdir():
                 if RENDERED.fullmatch(page.name):
                     RENDERED_AT[str(page)] = 0, None, ""
+        # The slug read back from the directory, not the request, so no request data reaches the header (CodeQL's
+        # py/http-response-splitting); None only if the file vanished since, and the list is then the place to go.
+        slug = next((p.name[len("decision-"):-len(".json")] for p in Path(self.directory).iterdir()
+                     if p.name == f"decision-{m[1]}.json"), None)
         self.send_response(303)
-        self.send_header("Location", "/decisions" if form.get("back") == ["/decisions"] else f"/decisions/{m[1]}")
+        self.send_header("Location", "/decisions" if slug is None or form.get("back") == ["/decisions"] else f"/decisions/{slug}")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_HEAD(self):
-        if self._allowed():
-            self._send_html(False) if self._is_html() else super().do_HEAD()
+        self._serve(False)
 
     def list_directory(self, path):
         # The stdlib listing, without dotfiles (the pid file is the server's) or rendered pages (routes, not files).
@@ -546,7 +1280,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return f"{kind}; charset=utf-8" if kind.startswith("text/") else kind
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store" if (WORKER_SESSION.fullmatch(urlsplit(self.path).path) or WORKER_MESSAGE.fullmatch(urlsplit(self.path).path)) else "no-cache")
         if page_reload.RELOAD_COOKIE in ((getattr(self, "headers", None) or {}).get("Cookie") or ""):
             # Consumed by the request that carries it, so it cannot mark another tab's navigation (Codex on #579).
             self.send_header("Set-Cookie", f"{page_reload.RELOAD_COOKIE.split('=')[0]}=; Max-Age=0; Path=/")
@@ -571,10 +1305,22 @@ def make_server(pages_dir: Path, port: int, root: Path | None = None, refresh=No
     """With `root`, pages render on request and a Refresher keeps `.sources.json` current."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port),
                                              functools.partial(Handler, directory=str(pages_dir)))
+    server.static_root = pages_dir.resolve()
+    try:
+        directory = os.open(server.static_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            stat = os.fstat(directory)
+            server.static_root_identity = (stat.st_dev, stat.st_ino)
+        finally:
+            os.close(directory)
+    except OSError:
+        server.static_root_identity = None
     server.root, server.refresher, server.slots = root, None, threading.BoundedSemaphore(_workers(root))
+    server.message_secret = secrets.token_bytes(32)
     if root is not None:
         if refresh is None:
-            from board_sources import refresh
+            from board_sources import refresh as refresh_sources
+            refresh = functools.partial(refresh_sources, scheduled=True)
         server.refresher = Refresher(root, refresh, every)
         server.refresher.start()
     return server
@@ -629,6 +1375,19 @@ def _stop(pages_dir: Path, port: int, stop: threading.Event | None = None) -> No
     raise PagesError(f"the older pages server (pid {pid}) is still answering on port {port}")
 
 
+def _drop_stale_pid(pages_dir: Path, port: int) -> None:
+    """Nothing answers on the port, so a pid file naming no `pages.py serve` there is stale (a dead or reused pid,
+    #935): it goes, and nothing is signalled. One still naming our server on this port names a hung server, the
+    user's to stop: starting another could not bind the port, and the board never moves to another one."""
+    try:
+        pid = int((pages_dir / PID).read_text())
+    except (OSError, ValueError):
+        pid = None
+    if pid is not None and is_pages_serve(pid, port):
+        raise PagesError(f"pid {pid} runs the pages server on port {port} but does not answer; stop it by hand")
+    (pages_dir / PID).unlink(missing_ok=True)
+
+
 def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, stop: threading.Event | None = None) -> str:
     """Start the server unless ours already answers on the port; replace one older than this code. Never
     moves to another port. Returns `pages: serving`, `pages: started`, `pages: restarted` or `pages: stopped`; raises PagesError."""
@@ -646,6 +1405,57 @@ def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, s
         return _ensure(pages_dir, port, log, root, stop)
 
 
+def _selected_release(root: Path) -> Path:
+    return release_selection.selected_release(root, supervisor)
+
+
+def _release_id(release: Path) -> str:
+    return hashlib.sha256(os.fsencode(release.resolve())).hexdigest()[:24]
+
+
+def _version_tuple(value: str) -> tuple[int, ...] | None:
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value):
+        return None
+    return tuple(int(part) for part in value.split("."))
+
+
+def _authoritative_release(root: Path | None, *, completed_only: bool = False) -> Path | None:
+    """Return an explicit selection; a workspace marker is never rollback authority."""
+    release = supervisor.RELEASE.resolve()
+    if root is not None:
+        intent = release_selection.explicit_intent(root, supervisor)
+        if intent is not None:
+            return release_selection.explicit_release(root, supervisor, completed_only=completed_only)
+    pointer = release.parent.parent / "current"
+    try:
+        if release.parent.name == "versions" and pointer.is_symlink():
+            selected = pointer.resolve(strict=True)
+            if (selected / "chief_of_stuff.py").is_file():
+                if root is not None:
+                    release_selection.validate_handoff(root, selected, supervisor)
+                return selected
+        if root is not None and not completed_only:
+            return release_selection.marker_release(root, release, supervisor)
+    except (OSError, RuntimeError, ValueError, supervisor.ServiceError):
+        pass
+    return None
+
+
+def _selected_for_rollback(root: Path | None) -> bool:
+    return _authoritative_release(root, completed_only=True) == supervisor.RELEASE.resolve()
+
+
+def _server_not_older(who: str) -> bool:
+    """Without a proven older version, a different build may be the newer one."""
+    match = re.match(rf"^{re.escape(SERVER)}/([0-9]+(?:\.[0-9]+)*)(?:\s|$)", who)
+    running = _version_tuple(match[1]) if match else None
+    ours = _version_tuple(VERSION)
+    if running is None or ours is None:
+        return True
+    width = max(len(running), len(ours))
+    return running + (0,) * (width - len(running)) >= ours + (0,) * (width - len(ours))
+
+
 def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: threading.Event | None = None) -> str:
     """Probe, replace and start under the same lock, including concurrent CLI ensures.
 
@@ -653,10 +1463,20 @@ def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: thre
     or the server does not come up."""
     who = _who(port)
     restart = False
-    if who is not None:
+    if who is None:
+        _drop_stale_pid(pages_dir, port)
+    else:
         if not who.startswith(SERVER):
             raise PagesError(f"port {port} answers as {who or 'an unnamed server'}, not the pages server")
-        if _version(who) >= _version(f"{SERVER}/{VERSION}"):
+        selected = _authoritative_release(root)
+        if selected is not None and selected != supervisor.RELEASE.resolve():
+            return "pages: serving"
+        identity = re.search(r"\brelease-([0-9a-f]{24})\b", who)
+        if identity and identity[1] == RELEASE_ID:
+            return "pages: serving"
+        if identity and root is not None and identity[1] == _release_id(_selected_release(root)):
+            return "pages: serving"
+        if _server_not_older(who) and not _selected_for_rollback(root):
             return "pages: serving"
         _stop(pages_dir, port, stop)
         restart = True
@@ -704,7 +1524,7 @@ def from_config(root: Path) -> tuple[Path, int]:
         raise PagesError(str(e)) from None
 
 
-def supervise(root: Path, stop: threading.Event) -> None:
+def supervise(root: Path, stop: threading.Event, startup=None) -> None:
     """Keep the board serving as part of the engine, with bounded backoff for failed or flapping starts.
 
     A workspace with no board is polled again, so one added later is served. Returns when `stop` is set or
@@ -726,6 +1546,8 @@ def supervise(root: Path, stop: threading.Event) -> None:
                     if str(exc) != last_error:
                         print(f"pages: {exc}", file=sys.stderr, flush=True)
                         last_error = str(exc)
+                if startup is not None and not stop.is_set():
+                    startup(status is not None and status != "pages: stopped")
                 if status == "pages: serving":
                     delay, retry = POLL, RETRY_MIN
                 else:
@@ -734,7 +1556,214 @@ def supervise(root: Path, stop: threading.Event) -> None:
                 if stop.wait(delay):
                     return
     except supervisor.ServiceError:
-        print("pages: another engine already holds pages-supervisor.lock", file=sys.stderr, flush=True)
+        if startup is not None:
+            startup(None)  # waiting for the lock is not proof of recovery
+        print("pages: another supervisor already holds pages-supervisor.lock", file=sys.stderr, flush=True)
+
+
+def supervise_with_retry(root: Path, stop: threading.Event, startup=None) -> None:
+    """Retry when another supervisor holds the lock, so either supervisor can take over when the other stops."""
+    while not stop.is_set():
+        if startup is None:
+            supervise(root, stop)
+        else:
+            supervise(root, stop, startup)
+        stop.wait(min(POLL, RETRY_MAX))
+
+
+def _pre_handoff_cli(entry: Path) -> bool:
+    """Recognize the old argparse CLI, which cannot participate in the readiness protocol."""
+    try:
+        tree = ast.parse(entry.read_bytes(), filename=str(entry))
+    except (OSError, SyntaxError, ValueError):
+        return False  # Let the normal candidate startup report other failures.
+    options = {arg.value for node in ast.walk(tree)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+               and node.func.attr == "add_argument"
+               for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)}
+    return {"--ensure", "--root"} <= options and "--handoff-ready-fd" not in options
+
+
+def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> None:
+    """Monitor the successor and resume supervision if its startup or later execution fails."""
+    retry_at, delay, failed_release = 0.0, 30.0, None
+    last_selection_error = None
+
+    def selected():
+        nonlocal last_selection_error
+        try:
+            result = _selected_release(root)
+            last_selection_error = None
+            return result
+        except supervisor.ServiceError as exc:
+            if str(exc) != last_selection_error:
+                print(f"pages: invalid release selection: {exc}; keeping {supervisor.RELEASE}", file=sys.stderr, flush=True)
+                last_selection_error = str(exc)
+            return None
+
+    while not stop.is_set():
+        board_stop = threading.Event()
+        thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
+        thread.start()
+        handoff = None
+        try:
+            while not stop.is_set():
+                if not thread.is_alive():
+                    thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
+                    thread.start()
+                release = selected()
+                if release is None:
+                    stop.wait(POLL)
+                    continue
+                if release != supervisor.RELEASE:
+                    if release != failed_release:
+                        retry_at, delay, failed_release = 0.0, 30.0, release
+                    if time.monotonic() >= retry_at:
+                        acquired = False
+                        try:
+                            with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+                                acquired = True
+                                release_selection.validate_handoff(root, release, supervisor)
+                                if selected() != release:
+                                    continue
+                                entry = release / "scripts/pages.py"
+                                if not entry.is_file():
+                                    raise supervisor.ServiceError(f"missing board entry file: {entry}")
+                                if _pre_handoff_cli(entry):
+                                    retry_at = float("inf")
+                                    print(f"pages: release {release} does not declare board handoff support; "
+                                          f"keeping {supervisor.RELEASE} supervising; rollback requires manual intervention",
+                                          file=sys.stderr, flush=True)
+                                    continue
+                                python = supervisor.ensure_venv(supervisor.data_dir(), release=release, timeout=60)
+                            if not stop.is_set() and selected() == release:
+                                handoff = (python, entry)
+                                break
+                        except Exception as exc:
+                            if acquired or not isinstance(exc, supervisor.ServiceError):
+                                delay = min(delay * 2, 3600)
+                                retry_at = time.monotonic() + delay
+                                print(f"pages: cannot prepare release {release}: {exc}; keeping {supervisor.RELEASE}",
+                                      file=sys.stderr, flush=True)
+                            # A busy global lock is retried on the next poll.
+                else:
+                    retry_at, delay, failed_release = 0.0, 30.0, None
+                stop.wait(POLL)
+        finally:
+            board_stop.set()
+            thread.join()
+        if handoff is not None and not stop.is_set() and selected() == release:
+            child = None
+            try:
+                python, entry = handoff
+                release_selection.validate_handoff(root, release, supervisor)
+                if selected() != release:
+                    continue
+                read_fd, write_fd = os.pipe()
+                try:
+                    child = subprocess.Popen(
+                        release_selection.isolated_release_argv(python, entry, "--root", str(root),
+                                                        "--handoff-ready-fd", str(write_fd), "supervise"),
+                        pass_fds=(write_fd,), cwd="/", env=release_selection.python_environment())
+                except BaseException:
+                    os.close(read_fd)
+                    raise
+                finally:
+                    os.close(write_fd)
+                try:
+                    # A waiting successor sends W while another supervisor owns the lock; it must
+                    # keep reporting and report failure if it later cannot take over the board.
+                    deadline = time.monotonic() + 15
+                    while (not stop.is_set() and child.poll() is None and
+                           selected() == release):
+                        if select.select([read_fd], [], [], min(POLL, 0.1))[0]:
+                            report = os.read(read_fd, 4096)
+                            if not report or b"0" in report or any(c not in b"1W" for c in report):
+                                raise supervisor.ServiceError("candidate failed board supervision")
+                            if startup is not None:
+                                startup(None if report[-1:] == b"W" else True)
+                            deadline = time.monotonic() + 75
+                        if time.monotonic() >= deadline:
+                            raise supervisor.ServiceError("candidate stopped reporting board health")
+                finally:
+                    os.close(read_fd)
+            except (OSError, supervisor.ServiceError) as exc:
+                print(f"pages: cannot start release {release}: {exc}; keeping {supervisor.RELEASE}",
+                      file=sys.stderr, flush=True)
+            finally:
+                if child is not None:
+                    if child.poll() is None:
+                        child.terminate()
+                    try:
+                        child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait()
+            if not stop.is_set():
+                delay = min(delay * 2, 3600)
+                retry_at = time.monotonic() + delay
+                print(f"pages: release {release} exited; resuming {supervisor.RELEASE}", file=sys.stderr, flush=True)
+
+
+def _held(path: Path) -> bool:
+    """True while another process holds the lock file at `path`."""
+    if not path.exists():
+        return False
+    try:
+        with supervisor.lock(path):
+            return False
+    except supervisor.ServiceError:
+        return True
+
+
+def install(root: Path, jobs_dir: Path | None = None) -> str:
+    """Install an independent board fallback; the supervisor lock coordinates it with a running engine."""
+    root = root.resolve()
+    from_config(root)  # no Board line, nothing to supervise
+    if sys.platform != "darwin":
+        raise PagesError("the board supervisor requires macOS (launchd); run `pages supervise` under your own")
+    log = supervisor.state_dir(root) / "pages.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    desired = {"Label": supervisor.label("pages", root),
+               # Not resolved: `chief-of-stuff pages` runs under the venv's stable link, which later repairs keep.
+               "ProgramArguments": [sys.executable, str(Path(__file__).resolve()), "--root", str(root), "supervise"],
+               "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
+               "EnvironmentVariables": supervisor.launch_env(),
+               "StandardOutPath": str(log), "StandardErrorPath": str(log)}
+    with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+        return "pages: " + supervisor.load_agent(desired, jobs_dir)
+
+
+def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
+    """Remove the board LaunchAgent. The page server it started keeps serving until it is stopped or the Mac restarts."""
+    root = root.resolve()
+    with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+        supervisor.unload_agent(supervisor.label("pages", root), root, jobs_dir)
+    return "pages: unsupervised"
+
+
+def status(root: Path, jobs_dir: Path | None = None) -> dict:
+    """The board and the engine, each on its own: a board can serve with no engine, and an engine can run with the
+    board down. `agent` is the LaunchAgent that brings the board back after a restart, `supervised` whether a
+    supervisor holds the board now."""
+    root = root.resolve()
+    state = supervisor.state_dir(root)
+    agent = next((kind for kind in ("pages", "engine")
+                  if supervisor.job_path(supervisor.label(kind, root), jobs_dir).exists()), "none")
+    report = {"board": "not configured", "port": None, "pid": None, "pid_live": False,
+              "engine": "running" if _held(state / "engine.lock") else "missing",
+              "agent": {"pages": "board"}.get(agent, agent), "supervised": _held(state / "pages-supervisor.lock")}
+    try:
+        pages_dir, port = from_config(root)
+    except PagesError as exc:
+        report["board"] = f"not configured: {exc}"
+        return report
+    who = _who(port)
+    report.update(port=port, board="down" if who is None else "serving" if who.startswith(SERVER) else f"foreign: {who or 'unnamed'}")
+    with contextlib.suppress(OSError, ValueError):
+        report["pid"] = int((pages_dir / PID).read_text())
+        report["pid_live"] = is_pages_serve(report["pid"], port)
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -746,14 +1775,35 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ensure", action="store_true", help="start the server unless it is serving; print status only")
     ap.add_argument("--root", help="workspace root holding CLAUDE.md (default: the current directory)")
-    ap.add_argument("command", nargs="?", choices=("serve",))
+    ap.add_argument("command", nargs="?", choices=("serve", "supervise", "install", "uninstall", "status"))
     ap.add_argument("--dir")
     ap.add_argument("--port", type=int)
+    ap.add_argument("--handoff-ready-fd", type=int, help=argparse.SUPPRESS)
     args = ap.parse_args(args_list)
     if args.command == "serve":
         make_server(Path(args.dir), args.port, Path(args.root) if args.root else None).serve_forever()
         return 0
     root = Path(args.root or ".")
+    if args.command == "supervise":
+        stop = threading.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: stop.set())
+        def startup(ready):
+            with contextlib.suppress(OSError):
+                os.write(args.handoff_ready_fd, b"W" if ready is None else b"1" if ready else b"0")
+        supervise_standalone(root, stop, startup if args.handoff_ready_fd is not None else None)
+        return 0
+    if args.command in ("install", "uninstall", "status"):
+        try:
+            if args.command == "status":
+                from _vendor.toon_format import encode
+                print(encode(status(root)))
+            else:
+                print(install(root) if args.command == "install" else uninstall(root))
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:  # PagesError and ServiceError are RuntimeErrors
+            print(f"pages: {exc}", file=sys.stderr)
+            return 2
+        return 0
     try:
         pages_dir, port = from_config(root)
         print(ensure(pages_dir, port, root / ".chief-of-stuff" / "pages.log", root))

@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 from evals import test_engine as engines
 import decision_actions as da
+import decision_escalation
 import pages
 
 KEY = engines.KEY
@@ -37,7 +38,7 @@ class IntentEndToEndTest(unittest.TestCase):
 
     def current(self, row):
         """A decision's state: its identity's latest row (rows are append-only)."""
-        return da.state_of(da.latest(self.db.decisions(KEY))[da.identity(row)])
+        return da.state_of(decision_escalation.latest(self.db.decisions(KEY))[decision_escalation.identity(row)])
 
     def test_a_reroute_is_written_to_the_forge_by_the_engine_only(self):
         dec = self.asked("design", "Back?")

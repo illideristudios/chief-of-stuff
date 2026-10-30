@@ -11,6 +11,7 @@ from urllib.parse import quote, urlencode
 from evals import test_m6_store_board as fixtures
 from evals import test_notify as notices
 import decision_actions as da
+import decision_escalation
 import issue_page
 import notify
 import pages
@@ -29,7 +30,7 @@ OTHER = "github:example/other#12"
 
 def current(db, row):
     """A decision's state: its identity's latest row (rows are append-only)."""
-    return da.state_of(da.latest(db.decisions(row.issue_key))[da.identity(row)])
+    return da.state_of(decision_escalation.latest(db.decisions(row.issue_key))[decision_escalation.identity(row)])
 
 
 def comments(db):
@@ -65,6 +66,58 @@ class PanelTest(unittest.TestCase):
             self.assertEqual(self.request("POST", "/", {"decision_id": dec.id, "answer": "No"})[0], 409)
         self.assertEqual(current(self.db, dec).answer, "Yes")
         self.assertEqual(len(comments(self.db)), 1)
+
+    def test_refusals_are_navigable_and_preserve_input_without_replaying_stale_actions(self):
+        dec = self.db.add_decision(KEY, "design", "Choose a direction")
+        status, body = self.request("POST", "/", {"decision_id": dec.id, "answer": " <draft> ",
+                                                   "action": "reroute", "target_stage": "invalid"})
+        self.assertEqual(status, 400)
+        self.assertIn('class="tabs"', body)
+        self.assertIn('href="/"', body)
+        self.assertIn('&lt;draft&gt;', body)
+        self.assertNotIn('<draft>', body)
+        self.assertIn('name="answer"', body)
+        self.assertIn('name="target_stage"', body)
+        self.assertEqual(len(self.db.decisions(KEY)), 1)
+        self.assertEqual(self.request("POST", "/", {"decision_id": dec.id, "answer": "Accepted"})[0], 303)
+        status, body = self.request("POST", "/", {"decision_id": dec.id, "answer": "My draft"})
+        self.assertEqual(status, 409)
+        self.assertIn("Choose a direction", body)
+        self.assertIn("answered", body.lower())
+        self.assertIn("My draft", body)
+        self.assertIn('href="/decisions/', body)
+        self.assertNotIn('method="post"', body)
+        self.assertEqual(len(self.db.decisions(KEY)), 2)
+
+    def test_invalid_answer_can_be_corrected_and_retried(self):
+        dec = self.db.add_decision(KEY, "design", "Choose")
+        status, body = self.request("POST", "/", {"decision_id": dec.id, "answer": "  ", "action": "answer"})
+        self.assertEqual(status, 400)
+        self.assertIn('name="action" value="answer"', body)
+        self.assertEqual(self.request("POST", "/", {"decision_id": dec.id, "answer": "Corrected", "action": "answer"})[0], 303)
+        self.assertEqual(current(self.db, dec).answer, "Corrected")
+
+    def test_missing_decision_keeps_answer_and_unknown_issues_offer_navigation(self):
+        status, body = self.request("POST", "/", {"decision_id": 99999999, "answer": "draft"})
+        self.assertEqual(status, 404)
+        self.assertIn("draft", body)
+        self.assertIn('href="/"', body)
+        for route in ("/issues/99999", "/issues/foo"):
+            status, body = self.request("GET", route)
+            self.assertEqual(status, 404)
+            self.assertIn('class="tabs"', body)
+            self.assertIn('href="/workers"', body)
+            self.assertIn('href="/"', body)
+
+    def test_reasked_decision_reports_latest_open_state_and_escapes_it(self):
+        dec = self.db.add_decision(KEY, "design", "Old question")
+        self.db.add_decision(KEY, "design", "Old question")
+        status, body = self.request("POST", "/", {"decision_id": dec.id, "answer": "draft"})
+        self.assertEqual(status, 409)
+        self.assertIn("Old question", body)
+        self.assertIn("Current status: <b>open</b>", body)
+        self.assertIn("draft", body)
+        self.assertNotIn('method="post"', body)
 
     def test_simultaneous_answers_have_one_winner_and_one_queued_comment(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
@@ -107,7 +160,7 @@ class PanelTest(unittest.TestCase):
         self.assertEqual((saved.status, saved.rerouted_to, saved.intent), ("reversed", "implement", "run"))
         # The reversal is appended on the decision's own identity, in develop's reversal shape.
         self.assertEqual(len(self.db.decisions(KEY)), 2)
-        self.assertTrue(da.is_reversed(self.db.decisions(KEY)[-1]))
+        self.assertTrue(decision_escalation.is_reversed(self.db.decisions(KEY)[-1]))
 
     def test_record_update_supersedes_old_resume_status(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
@@ -140,6 +193,7 @@ class PanelTest(unittest.TestCase):
         self.db.upsert_item(OTHER, title="Other repository", stage="implement")
         from dataclasses import replace
         from backlog_ref import GitHubBacklog
+        (self.root / "CLAUDE.md").write_text(fixtures.CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n")
         fixtures.bs._write(self.root / "pages" / fixtures.bs.CACHE, replace(
             fixtures.bs.EMPTY, home=GitHubBacklog("example/repo"), issues={
                 "#12": fixtures.bs.Issue("#12", "https://github.com/example/repo/issues/12", "First repository", "open", (), body="First source proof"),

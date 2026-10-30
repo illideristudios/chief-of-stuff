@@ -439,6 +439,9 @@ def issue_key(cell: str, home: Backlog | GitHubBacklog | None = None) -> str:
     `#118`, `group/app#118` or the issue's URL. A cell that names no issue, or a bare `#N` with no `home`, keeps `#N`."""
     if ref := issue_ref(cell, home, any_host=True):
         return ref.label(home)
+    # A qualified but unresolved identity is never the bare issue in the home project.
+    if re.fullmatch(r"[\w.:-]+(?:/[\w.:-]+)+#\d+", cell.strip()):
+        return cell.strip()
     m = TRAILING_NUMBER.search(cell)
     return f"#{m[1]}" if m else cell.strip()
 

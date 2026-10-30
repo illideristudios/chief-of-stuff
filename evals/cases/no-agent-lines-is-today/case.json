@@ -27,7 +27,7 @@
     {
       "name": "still proposes a subagent",
       "type": "regex",
-      "pattern": "(?s)```(?:(?!```).)*Owns:(?:(?!```).)*```",
+      "pattern": "(?s)```(?:(?!```).)*\\bTask:(?:(?!```).)*\\bReport:(?:(?!```).)*```",
       "match": "contains"
     },
     {

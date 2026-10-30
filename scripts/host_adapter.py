@@ -22,6 +22,7 @@ import make_worktree
 import runtimes
 from model_port import Failure, Reply, Request, quota_reset
 from shell_setup import ShellError, login_argv, resolve
+from tree_state import CURSOR_CHANNEL_EXCLUDE
 
 SCRIPTS = Path(__file__).resolve().parent
 HOSTS = ("codex", "cursor", "agy")
@@ -68,7 +69,7 @@ def _channel(env: dict[str, str]) -> tuple[str, list[str], dict[str, str]]:
 
 def _exclude(tree: Path, entry: str) -> None:
     """Keep a per-run file out of every commit without touching the tree's tracked .gitignore."""
-    # The real repository, not git_trees' sanitised view: the view's info/exclude is a throwaway copy.
+    # The real repository's exclude is what the worker's git reads; the audit view authors its own and does not copy this file.
     code, path = make_worktree.git_trusted(["rev-parse", "--git-path", "info/exclude"], tree)
     if code:
         raise ShellError("cannot locate the worker tree's info/exclude")
@@ -77,6 +78,55 @@ def _exclude(tree: Path, entry: str) -> None:
     if entry not in lines:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         exclude.write_text("\n".join([*lines, entry]) + "\n")
+
+
+def _register_codex(request: Request, command: str, args: list[str], binding: dict[str, str]) -> list[str]:
+    table = ", ".join(f"{key} = {json.dumps(value)}" for key, value in sorted(binding.items()))
+    return ["-c", f"mcp_servers.engine.command={json.dumps(command)}",
+            "-c", f"mcp_servers.engine.args={json.dumps(args)}",
+            "-c", f"mcp_servers.engine.env={{{table}}}",
+            # `-a never` refuses any MCP call that needs approval, the report tool included.
+            "-c", 'mcp_servers.engine.default_tools_approval_mode="approve"',
+            *git_trees.codex_add_dir_args(Path(request.cwd))]
+
+
+def _cursor_config_replaceable(config: Path, binding: dict[str, str]) -> bool:
+    """Whether the tree's existing `.cursor/mcp.json` is the engine's own channel from an earlier run's retry."""
+    try:
+        found = json.loads(config.read_text()).get("mcpServers")
+    except (ValueError, AttributeError, OSError):
+        found = None
+    earlier = found.get("engine") if isinstance(found, dict) and set(found) == {"engine"} else None
+    given = earlier.get("args") if isinstance(earlier, dict) else None
+    bound = earlier.get("env") if isinstance(earlier, dict) else None
+    # The engine's own channel from an earlier run (any release's engine_mcp.py, a CHIEF_ binding) is
+    # replaced on a retry; a second registration of this run, or anything else in the tree, is kept.
+    ours_before = (isinstance(given, list) and len(given) == 1 and Path(str(given[0])).name == "engine_mcp.py"
+                   and isinstance(bound, dict) and any(str(key).startswith("CHIEF_") for key in bound))
+    return ours_before and bound != binding
+
+
+def _register_cursor(request: Request, command: str, args: list[str], binding: dict[str, str]) -> None:
+    tree = Path(request.cwd)
+    config = tree / ".cursor" / "mcp.json"
+    if config.exists() and not _cursor_config_replaceable(config, binding):
+        raise ShellError("the worker tree already has .cursor/mcp.json; refusing to replace it")
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(json.dumps({"mcpServers": {"engine": {"command": command, "args": args, "env": binding}}}))
+    _exclude(tree, CURSOR_CHANNEL_EXCLUDE)
+
+
+def _register_agy(request: Request, command: str, args: list[str], binding: dict[str, str]) -> str:
+    name = f"chief-{request.session_id}"
+    binary = resolve(runtimes.binary("agy"))
+    if not binary:
+        raise ShellError("`agy` is not on the login shell's PATH")
+    flags = [part for key, value in sorted(binding.items()) for part in ("-e", f"{key}={value}")]
+    done = subprocess.run(login_argv([binary, "mcp", "add", *flags, name, command, *args]),
+                          capture_output=True, text=True, timeout=60, env=claude_adapter.model_env())
+    if done.returncode:
+        raise ShellError(f"agy mcp add failed: {(done.stderr or done.stdout).strip()[:200]}")
+    return name
 
 
 def register(runtime: str, request: Request, env: dict[str, str]) -> tuple[list[str], str]:
@@ -88,31 +138,12 @@ def register(runtime: str, request: Request, env: dict[str, str]) -> tuple[list[
     """
     command, args, binding = _channel(env)
     if runtime == "codex":
-        table = ", ".join(f"{key} = {json.dumps(value)}" for key, value in sorted(binding.items()))
-        return ["-c", f"mcp_servers.engine.command={json.dumps(command)}",
-                "-c", f"mcp_servers.engine.args={json.dumps(args)}",
-                "-c", f"mcp_servers.engine.env={{{table}}}",
-                *git_trees.codex_add_dir_args(Path(request.cwd))], ""
+        return _register_codex(request, command, args, binding), ""
     if runtime == "cursor":
-        tree = Path(request.cwd)
-        config = tree / ".cursor" / "mcp.json"
-        if config.exists():
-            raise ShellError("the worker tree already has .cursor/mcp.json; refusing to replace it")
-        config.parent.mkdir(exist_ok=True)
-        config.write_text(json.dumps({"mcpServers": {"engine": {"command": command, "args": args, "env": binding}}}))
-        _exclude(tree, "/.cursor/mcp.json")
+        _register_cursor(request, command, args, binding)
         return [], ""
     if runtime == "agy":
-        name = f"chief-{request.session_id}"
-        binary = resolve(runtimes.binary("agy"))
-        if not binary:
-            raise ShellError("`agy` is not on the login shell's PATH")
-        flags = [part for key, value in sorted(binding.items()) for part in ("-e", f"{key}={value}")]
-        done = subprocess.run(login_argv([binary, "mcp", "add", *flags, name, command, *args]),
-                              capture_output=True, text=True, timeout=60, env=claude_adapter.model_env())
-        if done.returncode:
-            raise ShellError(f"agy mcp add failed: {(done.stderr or done.stdout).strip()[:200]}")
-        return [], name
+        return [], _register_agy(request, command, args, binding)
     raise ValueError(f"no host adapter for {runtime}")
 
 
@@ -249,6 +280,8 @@ def moved_outside_engine(store, record: dict, now: str) -> str:
         heads = {record["default_branch"]: record.get("default_head", "")} if record.get("default_branch") else {}
     runtime, tree = record.get("runtime"), Path(record["tree"])
     problems, recorded = [], None
+    if not heads and record.get("launcher") == "t3":  # an adopted T3 run whose heads were lost: unknown is never safe
+        problems.append("no protected-branch heads were recorded")
     for branch, before in sorted(heads.items()):
         fetched, _ = make_worktree.git_trusted(["fetch", "-q", "origin", f"refs/heads/{branch}"], tree)
         after = branch_heads(tree, [branch])[branch]

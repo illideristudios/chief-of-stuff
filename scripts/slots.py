@@ -70,6 +70,6 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
     ran = None
     if used is not None:
         model, effort, *rest = used
-        ran = rest[0] if rest else None
+        ran = rest[0] if rest else "claude"
     store.record_segment(issue_key, stage, attempt, started_at=clock().isoformat(), runtime=ran, model=model,
                          effort=effort)

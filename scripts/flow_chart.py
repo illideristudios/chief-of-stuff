@@ -21,6 +21,8 @@ from decision_actions import current_rows, state_of
 import gantt
 from clock import done_clock, parse_stamp as _parse_store_dt
 from fragment import esc, issue_href
+from backlog_ref import issue_ref
+from task_forge import EXHAUSTED_CHIP, retry_exhaustion
 from tracker import WORKFLOW, change_keys, issue_key, launch_row, launcher
 # The Log line grammar and the moves read with it live in tracker_log.py, which draws nothing. `moves` is imported
 # here as well, so `flow_chart.moves` still names it.
@@ -31,8 +33,8 @@ H = timedelta(hours=1)
 WINDOWS = (("24 hours", 6 * H, 18 * H), ("7 days", 48 * H, 120 * H))
 COLOURS: dict[str, str | tuple[str, str]] = {stage: f"var(--stage-{stage})" for stage in gantt.PALETTE}
 # #217/#226: the chart's own bucket order, earliest-first within a group. A finished row's word is
-# "merged" or "closed" (task_forge.forge_ends); both read as merged. "open" is only the queued loop's
-# literal status; everything else moved (whatever its stage or tracker state word) counts as running.
+# "merged" or "closed" (task_forge.forge_ends); both read as merged. "open" is queued on the board;
+# a row is running only while a segment is open.
 BUCKETS = ("merged", "approved", "running", "needs input", "queued")
 
 
@@ -58,8 +60,12 @@ def _ahead(stages: list[str], start: datetime, end: datetime, title: str = "") -
 
 def _refs(tasks, log: list[Move], home):
     """Look up a row's issue or change, bridging change-only passes only through a unique issue."""
+    def task_key(t):
+        raw = t.issue.strip()
+        return issue_key(raw, home) if issue_ref(raw, home, any_host=True) or (raw.startswith("#") and raw[1:].isdecimal()) else raw
+
     named = {text: change_keys(text, home) for text in [*(t.item for t in tasks), *(m.name for m in log)]}
-    pairs = list(named.values()) + [(issue_key(t.issue, home), named[t.item][1])
+    pairs = list(named.values()) + [(task_key(t), named[t.item][1])
                                    for t in tasks if t.issue.strip() and not t.workflow]
     issues = {}
     for issue, change in pairs:
@@ -69,13 +75,143 @@ def _refs(tasks, log: list[Move], home):
 
     def ref_of(task, text: str) -> str:
         if task and task.issue.strip() and not task.workflow:
-            return issue_key(task.issue, home)
+            return task_key(task)
         if task and not task.workflow:
             return ""
         issue, change = named[task.item if task else text]
         return issue or change_issues.get(change, change)
 
     return ref_of
+
+
+def _launch_runs(log: list[Move], key_of) -> tuple[dict, dict]:
+    """(first, runs) of the time-sorted log: each task's first stage move, and its launched workers' [worker, start, end or None]."""
+    first, runs = {}, {}
+    for m in log:
+        key = key_of(m)
+        if not m.launch:
+            first.setdefault(key, m.at)
+        elif m.stage == "implement":
+            runs.setdefault(key, []).append([m.worker, m.at, None])
+        elif run := next((r for r in reversed(runs.get(key, ())) if r[0] == m.worker and r[2] is None), None):
+            run[2] = m.at
+
+    # Only runs without an explicit end fall back to the next launch on their task.
+    # Resolve this after reading all stops so explicitly overlapping runs keep their ends.
+    for task_runs in runs.values():
+        for run, successor in zip(task_runs, task_runs[1:]):
+            if run[2] is None:
+                run[2] = successor[1]
+    return first, runs
+
+
+def _owner(runs: dict, key: str, at: datetime, task) -> str:
+    running = [w for w, start, end in runs.get(key, ()) if start <= at and (end is None or at < end)]
+    return running[-1] if running else task.shown_owner if task else ""
+
+
+def _stop(task, last: Move, now: datetime) -> datetime:
+    """Where a task's last bar stops: now, or for a done task its own clock or last move."""
+    if task and task.kind == "done":
+        # (#196) no clock: stop at its own last move, so it draws no bar past that move.
+        # (#213) a clock: its latest occurrence at or before now, not a same-date occurrence that
+        # may not have happened yet.
+        if t := task.state_time:
+            return done_clock(t, now, now.tzinfo)
+        return last.at
+    return now
+
+
+def _stage_bars(mine: list[Move], key: str, task, runs: dict, first: dict, terminal: set, stop: datetime,
+                boundary: datetime, is_held: bool) -> list[gantt.Segment]:
+    """The done bars of one task's moves, each ending at the next move, its worker's run, or `stop`."""
+    segs = []
+    for m, nxt in zip(mine, mine[1:] + [None]):
+        if m.stage in terminal:
+            continue
+        e = nxt.at if nxt else stop
+        if m.launch and m.stage == "implement":
+            # Concurrent launches have separate boundaries and retain their own worker titles.
+            run = next(r for r in runs[key] if r[0] == m.worker and r[1] == m.at)
+            e = min(run[2] or stop, first.get(key, stop))
+            if is_held:
+                e = min(e, boundary)
+        elif nxt is None and is_held:
+            continue
+        if e > m.at:
+            segs.append(gantt.Segment(m.at, e, m.stage, "done",
+                                      m.worker if m.launch and m.stage == "implement" else _owner(runs, key, m.at, task)))
+    return segs
+
+
+def _standing(task, lane, last: Move, now: datetime, terminal: set, owner_now: str, *, finish, held_cause: str | None,
+              end: datetime | None, is_approved: bool) -> tuple[str, str, list[gantt.Segment], datetime | None]:
+    """(status, note, bars ahead of now, end of the forecast that holds a worker slot or None) of one moved task."""
+    if finish:
+        at, word = finish
+        return word, f"{word} {at:%H:%M}", [], None
+    if last.stage in terminal:
+        return "merged", f"merged {last.at:%H:%M}", [], None
+    if held_cause is not None:
+        return "needs input", f"needs input · {held_cause}", [gantt.Segment(now, now + WINDOWS[-1][2], last.stage, "hold", owner_now)], None
+    if task and lane and last.stage in lane.stages and end and end > now:
+        ahead = [last.stage] + [s for s in lane.stages[lane.stages.index(last.stage) + 1:] if s not in terminal]
+        # #217: a task not yet marked `running` but already moving through the lane still counts as
+        # running, never as queued (which is `open` with no move at all).
+        status = "running" if task.kind == "open" else task.kind
+        note = f"approved · merge {_clock(end, now)}" if is_approved else f"{last.stage} · {_clock(end, now)}"
+        return status, note, _ahead(ahead, now, end, owner_now), end
+    kind = task.kind if task else ""
+    status = "approved" if is_approved else ("running" if kind == "open" else kind)
+    return status, "approved" if is_approved else last.stage, [], None
+
+
+def _queued_rows(tasks, by_name: dict, moved: set, lanes: dict, held: dict, durations, busy: list[datetime], slots: int,
+                 terminal: set, now: datetime, ref_of, runs: dict) -> list[tuple[str, gantt.Row]]:
+    """Forecast-only rows for the open tasks at their lane's first stage with no move, in the free worker slots."""
+    horizon = now + WINDOWS[-1][2]
+    # Each slot is free once the forecast holding it ends; more forecasts than slots wait for the (n-k+1)th end.
+    slots = max(1, slots)
+    busy += [now] * (slots - len(busy))
+    heapq.heapify(busy)
+    out = []
+    for t in tasks:
+        key, lane = t.name.strip().casefold(), lanes.get(t.lane.strip())
+        if (not key or by_name[key] is not t or key in moved or t.kind != "open" or t.name.strip() in held
+                or not lane or t.stage.strip() != lane.stages[0] or not (took := (durations or {}).get(t.item))):
+            continue
+        while len(busy) > slots:
+            heapq.heappop(busy)
+        start = heapq.heappop(busy)
+        if start >= horizon:
+            break
+        heapq.heappush(busy, start + took)
+        stages = [s for s in lane.stages if s not in terminal]
+        out.append((t.kind, gantt.Row(ref_of(t, t.item), t.name.strip(), f"queued · {_clock(start + took, now)}",
+                                      tuple(_ahead(stages, start, start + took, _owner(runs, key, now, t))))))
+    return out
+
+
+def _task_segments(task, mine: list[Move], key: str, runs: dict, first: dict, terminal: set, now: datetime,
+                   finish, is_held: bool) -> tuple[list[gantt.Segment], Move]:
+    """(done bars, last move) of one moved task, the bars clipped at its forge end when `finish` is set."""
+    stop = _stop(task, mine[-1], now)
+    boundary = mine[-1].at
+    # A launcher stop ends its run but leaves the row at its prior working stage.
+    mine = [m for m in mine if not (m.launch and m.stage == RELAUNCH_STAGE)]
+    # #227: a held row's last stage bar ends at its own last move — no dangling bar reading as work
+    # in progress — and the hold bar alone carries it from now through the window.
+    segs = _stage_bars(mine, key, task, runs, first, terminal, stop, boundary, is_held)
+    if finish:
+        at = finish[0]
+        segs = [replace(g, end=min(g.end, at)) for g in segs if g.start < at]
+    return segs, mine[-1]
+
+
+def _ordered(rows: list[tuple[str, gantt.Row]], now: datetime) -> list[tuple[str, gantt.Row]]:
+    # #226: rows group merged, approved, running, needs input, queued, earliest move first within a group.
+    far_future = now + WINDOWS[-1][2] * 1000  # a row with no segments at all sorts last in its bucket
+    return sorted(rows, key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)))
 
 
 def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[str, datetime], now: datetime,
@@ -101,119 +237,29 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
         return (t.name.strip() or t.item.strip()).casefold() if t else m.name.casefold()
 
     terminal = {lane.stages[-1] for lane in lanes.values()}
-    horizon = now + WINDOWS[-1][2]
     busy: list[datetime] = []
     log = sorted(log, key=lambda m: m.at)
-    first, runs = {}, {}  # runs: key → [worker, start, end or None] per launch
-    for m in log:
-        key = key_of(m)
-        if not m.launch:
-            first.setdefault(key, m.at)
-        elif m.stage == "implement":
-            runs.setdefault(key, []).append([m.worker, m.at, None])
-        elif run := next((r for r in reversed(runs.get(key, ())) if r[0] == m.worker and r[2] is None), None):
-            run[2] = m.at
-
-    # Only runs without an explicit end fall back to the next launch on their task.
-    # Resolve this after reading all stops so explicitly overlapping runs keep their ends.
-    for task_runs in runs.values():
-        for run, successor in zip(task_runs, task_runs[1:]):
-            if run[2] is None:
-                run[2] = successor[1]
-
-    def owner(key: str, at: datetime, task) -> str:
-        running = [w for w, start, end in runs.get(key, ()) if start <= at and (end is None or at < end)]
-        return running[-1] if running else task.shown_owner if task else ""
-
+    first, runs = _launch_runs(log, key_of)
     log = [m for m in log if not (m.launch and (f := first.get(key_of(m))) and m.at >= f)]
     out, groups = [], {}
     for m in log:
         groups.setdefault(key_of(m), []).append(m)
     for key, mine in groups.items():
-        task, last = find.get(key) or find.get(mine[-1].name.strip().casefold()), mine[-1]
-        stop = now
-        if task and task.kind == "done":
-            # (#196) no clock: stop at its own last move, so it draws no bar past that move.
-            # (#213) a clock: its latest occurrence at or before now, not a same-date occurrence that
-            # may not have happened yet.
-            if t := task.state_time:
-                stop = done_clock(t, now, now.tzinfo)
-            else:
-                stop = last.at
-        finish = task and (ended or {}).get(task.name.strip())
+        task = find.get(key) or find.get(mine[-1].name.strip().casefold())
         hold_key = (task.name.strip() or task.item.strip()) if task else ""
         is_held = bool(task and hold_key in held)
-        boundary = last.at
-        # A launcher stop ends its run but leaves the row at its prior working stage.
-        mine = [m for m in mine if not (m.launch and m.stage == RELAUNCH_STAGE)]
-        last = mine[-1]
-        # #227: a held row's last stage bar ends at its own last move — no dangling bar reading as work
-        # in progress — and the hold bar alone carries it from now through the window.
-        segs = []
-        for m, nxt in zip(mine, mine[1:] + [None]):
-            if m.stage in terminal:
-                continue
-            e = nxt.at if nxt else stop
-            if m.launch and m.stage == "implement":
-                # Concurrent launches have separate boundaries and retain their own worker titles.
-                run = next(r for r in runs[key] if r[0] == m.worker and r[1] == m.at)
-                e = min(run[2] or stop, first.get(key, stop))
-                if is_held:
-                    e = min(e, boundary)
-            elif nxt is None and is_held:
-                continue
-            if e > m.at:
-                segs.append(gantt.Segment(m.at, e, m.stage, "done",
-                                          m.worker if m.launch and m.stage == "implement" else owner(key, m.at, task)))
-        if finish:
-            at, word = finish
-            segs = [replace(g, end=min(g.end, at)) for g in segs if g.start < at]
-        lane = lanes.get(task.lane.strip()) if task else None
-        is_approved = bool(task and task.name.strip() in approved)
-        if finish:
-            status, note = word, f"{word} {at:%H:%M}"
-        elif last.stage in terminal:
-            status, note = "merged", f"merged {last.at:%H:%M}"
-        elif is_held:
-            segs.append(gantt.Segment(now, now + WINDOWS[-1][2], last.stage, "hold", owner(key, now, task)))
-            status, note = "needs input", f"needs input · {held[hold_key]}"
-        elif task and lane and last.stage in lane.stages and (end := ends.get(task.item)) and end > now:
-            ahead = [last.stage] + [s for s in lane.stages[lane.stages.index(last.stage) + 1:] if s not in terminal]
-            segs += _ahead(ahead, now, end, owner(key, now, task))
-            busy.append(end)
-            # #217: a task not yet marked `running` but already moving through the lane still counts as
-            # running, never as queued (which is `open` with no move at all — the loop below).
-            status = "running" if task.kind == "open" else task.kind
-            note = f"approved · merge {_clock(end, now)}" if is_approved else f"{last.stage} · {_clock(end, now)}"
-        else:
-            kind = task.kind if task else ""
-            status = "approved" if is_approved else ("running" if kind == "open" else kind)
-            note = "approved" if is_approved else last.stage
+        finish = task and (ended or {}).get(task.name.strip())
+        segs, last = _task_segments(task, mine, key, runs, first, terminal, now, finish, is_held)
+        status, note, ahead, slot_end = _standing(
+            task, lanes.get(task.lane.strip()) if task else None, last, now, terminal, _owner(runs, key, now, task),
+            finish=finish, held_cause=held[hold_key] if is_held else None, end=ends.get(task.item) if task else None,
+            is_approved=bool(task and task.name.strip() in approved))
+        if slot_end:
+            busy.append(slot_end)
         out.append((status, gantt.Row(ref_of(task, last.name), task.label if task else launch_row(last.name, ())[1],
-                                      note, tuple(segs))))
-    # Each slot is free once the forecast holding it ends; more forecasts than slots wait for the (n-k+1)th end.
-    slots = max(1, slots)
-    busy += [now] * (slots - len(busy))
-    heapq.heapify(busy)
-    moved = set(groups)
-    for t in tasks:
-        key, lane = t.name.strip().casefold(), lanes.get(t.lane.strip())
-        if (not key or by_name[key] is not t or key in moved or t.kind != "open" or t.name.strip() in held
-                or not lane or t.stage.strip() != lane.stages[0] or not (took := (durations or {}).get(t.item))):
-            continue
-        while len(busy) > slots:
-            heapq.heappop(busy)
-        start = heapq.heappop(busy)
-        if start >= horizon:
-            break
-        heapq.heappush(busy, start + took)
-        stages = [s for s in lane.stages if s not in terminal]
-        out.append((t.kind, gantt.Row(ref_of(t, t.item), t.name.strip(), f"queued · {_clock(start + took, now)}",
-                                      tuple(_ahead(stages, start, start + took, owner(key, now, t))))))
-    # #226: rows group merged, approved, running, needs input, queued, earliest move first within a group.
-    far_future = now + WINDOWS[-1][2] * 1000  # a row with no segments at all sorts last in its bucket
-    return sorted(_merge_issues(out),
-                  key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)))
+                                      note, tuple(segs + ahead))))
+    out += _queued_rows(tasks, by_name, set(groups), lanes, held, durations, busy, slots, terminal, now, ref_of, runs)
+    return _ordered(_merge_issues(out), now)
 
 
 def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> list[tuple[str, gantt.Row]]:
@@ -242,7 +288,7 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
             start = _parse_store_dt(s.started_at, now)
             if s.ended_at:
                 end = _parse_store_dt(s.ended_at, now)
-                kind = "done"
+                kind = "failed" if s.outcome == "failed" else "done"
             else:
                 end = now
                 kind = "running"
@@ -255,9 +301,16 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
         short_ref = f"#{key.rpartition('#')[2]}" if "#" in key else key
         stage = item.stage or (raw_segs[-1].stage if raw_segs else "implement")
         has_open_dec = bool(open_decs_by_key.get(key))
-        is_held = bool(item.human_review or has_open_dec)
+        exhausted = retry_exhaustion(resume, raw_segs, db.log(key) if hasattr(db, "log") else ())
+        is_held = bool(item.human_review or has_open_dec or exhausted
+                       or (raw_segs and raw_segs[-1].outcome == "human_review"))
         if item.forge_state == "closed":
             status, note = "merged", "closed"
+        elif exhausted:
+            # #963: the engine gave up; never draw this as running or a plain open retry.
+            status, note = "needs input", f"needs input · {EXHAUSTED_CHIP}"
+            if include_hold_bars:
+                g_segs.append(gantt.Segment(now, now + WINDOWS[-1][2], stage, "hold", ""))
         elif is_held:
             cause = "decision" if has_open_dec else stage
             status, note = "needs input", f"needs input · {cause}"
@@ -267,10 +320,9 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
             status, note = "approved", "approved"
         elif any(s.ended_at is None for s in raw_segs):
             status, note = "running", stage
-        elif raw_segs:
-            status, note = "running", stage
         else:
-            status, note = "open", f"queued · {stage}"
+            queued = "retry" if raw_segs and raw_segs[-1].outcome == "failed" else "queued"
+            status, note = "open", f"{queued} · {stage}"
         row = gantt.Row(
             ref=short_ref,
             name=item.title or key,
@@ -355,4 +407,4 @@ def css() -> str:
     return gantt.css(COLOURS) + (".gantt-legend .gantt-forecast:not([data-cat]){--c:var(--stage-implement)}\n"
                                  ".gantt-legend{border-top:1px solid var(--gantt-edge);padding-top:5px}\n"
                                  "@media (max-width:520px){.gantt,.gantt-legend{--gantt-label:96px;--gantt-note:0px}"
-                                 ".gantt-note,.gantt-ref{display:none}.gantt-axis{font-size:8.5px}}\n")
+                                 ".gantt-note,.gantt-ref:not(a){display:none}.gantt-axis{font-size:8.5px}}\n")

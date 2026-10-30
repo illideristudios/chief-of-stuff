@@ -98,7 +98,7 @@ Exit (S1): evals showing a routine question resolved by a unanimous trio with no
 The owner, 2026-10-11: proceed with this scope as written.
 
 1. Board reads from the store. Gantt shows one line per issue with segments by (issue, stage, attempt). Adjust the existing UI only where the model needs it (D8).
-2. Decisions that pass the gate are board items, answered on the board. No separate decision pages.
+2. Decisions that pass the gate are board items, answered on the board. Amended 2026-10-19 (#945; owner: "there should be a per-decision page that is automatically rendered by id"): every decision also has its own page at `/decisions/<id>`, rendered from the store, and its board item links to it. This replaces "no separate decision pages".
 3. Notify sends exception pings only, linking to the board item.
 4. Agent performance report as a store query over stage segments (A3, kept).
 5. Requirements checklists (H10/V24, carried): done tasks tick one item with evidence, and the board shows done counts. The feature is: the owner feeds in a PRD, the engine distils a checklist from [a template](2026-10-10-requirements-checklist-template.md), and done tasks tick items with evidence (owner, 2026-10-10: "we need a template requirements checklist"). M0 still finds why the old feature broke; the known suspects are the board parser silently skipping non-canonical checkbox lines, the syntax moving into an optional skill (#510), and ticking depending on a model reading that skill. Nothing is ported until that cause is written down. Distilling, matching a done task to an item, and ticking stay model judgement, made in collaboration with the owner; the engine only parses and counts (owner, 2026-10-10).

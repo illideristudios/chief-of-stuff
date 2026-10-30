@@ -24,6 +24,8 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from tree_state import CURSOR_CHANNEL_EXCLUDE
+
 
 class Unviewable(Exception):
     """A short, path-free reason why the repository cannot supply a safe view."""
@@ -135,7 +137,7 @@ _OBJECT_ONLY = frozenset(("branch", "cat-file", "for-each-ref", "log", "ls-files
 # Exact option spellings, restricted operand count, required read option, operand policy.
 # A named operand group consumes a separate option value, not a revision/path.
 _READ_OPTIONS = {
-    "status": (r"--(?:ignored|porcelain|short)", None, None, "path"),
+    "status": (r"--(?:ignored|porcelain|short|untracked-files=all)", None, None, "path"),
     "rev-parse": (r"--(?:abbrev-ref|absolute-git-dir|git-common-dir|is-shallow-repository|quiet|short|show-toplevel|verify)"
                   r"|-q|--path-format=(?:absolute|relative)|--disambiguate=[0-9a-f]{1,64}"
                   r"|--git-path=.+|(?P<operand>--git-path)", None, None, "mixed"),
@@ -530,6 +532,12 @@ def _finish(view: View, args: list[str], revisions: list[str],
             raise Unviewable("index is unreadable")
         if any(entry.startswith(b"160000 ") for entry in index.stdout.split(b"\0")):
             raise Unviewable("submodules are not inspected")
+        # Author the view's own info/exclude for worktree reads (#1033): only the engine's Cursor channel pattern,
+        # never the repository's info/exclude (which a worker can write), keeping core.excludesFile=/dev/null and no
+        # GIT_COMMON_DIR. Materialized on read so opened()'s initial directory inventory stays unchanged.
+        exclude = Path(view.env["GIT_DIR"]) / "info/exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        exclude.write_text(f"{CURSOR_CHANNEL_EXCLUDE}\n")
     return _run(args, cwd=cwd, env=view.env, timeout=_remaining(deadline))
 
 

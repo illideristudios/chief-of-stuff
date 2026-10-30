@@ -5,7 +5,7 @@
 - User: Robin
 - Daily log dir: `daily/`
 - Daily log template: `templates/daily.md`; tracker template `templates/tracker.md`
-- Tracker: `daily/<date>-tracker.md` (sections: Tasks, Decisions, File ownership, Log)
+- Tracker: `daily/<date>-tracker.md` (sections: Tasks, Decisions, Log)
 - Timezone: {{tz}}
 - Settings: `cos.toml`
 - Calendar tool: `mcp__calendar__list_events`

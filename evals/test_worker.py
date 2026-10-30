@@ -186,8 +186,10 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
              mock.patch.object(claude_adapter, "command", return_value=["/fake"]), \
              mock.patch.object(claude_adapter.subprocess, "Popen", side_effect=OSError("spawn failed")):
-            with self.assertRaisesRegex(OSError, "spawn failed"):
+            with self.assertRaisesRegex(worker.StartFailed, "spawn failed") as caught:
                 self.launch()
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+        self.assertEqual(caught.exception.chosen.runtime, "claude")
         self.assertEqual(self.db.segments(), [])
         self.assertFalse(self.db.resume(KEY).get("runs"))
         with mock.patch.object(worker.make_worktree, "build") as rebuild, \
@@ -325,10 +327,157 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
         self.assertIn("trunk moved", " ".join(entry.message for entry in self.db.log(KEY)))
 
+    def t3_launched(self, protected=True):
+        """#1178: a Claude entry started as a T3 thread, recorded and claimed like any other."""
+        self.forge.default_branch_protected = lambda: protected
+
+        def t3_start(request, run_dir, **kwargs):
+            (run_dir / "thread.json").write_text(json.dumps({"thread_id": "mcp:t-1",
+                                                             "thread_link": "t3code://threads/env-1/mcp:t-1"}))
+            return self.start(request, run_dir)
+        with mock.patch.object(worker, "_model", return_value=worker.ModelEntry("claude", "sonnet", "high")), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
+             mock.patch.object(worker.t3_adapter, "start", side_effect=t3_start) as t3, \
+             mock.patch.object(worker.claude_adapter, "start") as claude, \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            used = worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                                 policies=self.p, forge=self.forge, clock=lambda: NOW, launcher="t3")
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, clock=lambda: NOW, launch=lambda: used)
+        return t3, claude
+
+    def test_a_t3_launch_stores_the_thread_id_and_link_in_the_run_record(self):
+        t3, claude = self.t3_launched()
+        claude.assert_not_called()
+        t3.assert_called_once()
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        self.assertEqual((record["runtime"], record["launcher"]), ("claude", "t3"))
+        self.assertEqual(record["thread_id"], "mcp:t-1")
+        self.assertEqual(record["thread_link"], "t3code://threads/env-1/mcp:t-1")
+        self.assertEqual(record["branch_heads"], {"trunk": "d" * 40, "main": "d" * 40})  # §13: no guard plugin loads, as for any host
+        self.assertEqual(self.db.segments(KEY)[0].runtime, "claude")  # still a claude worker: T3 is the launcher
+
+    def test_a_t3_launch_needs_the_forge_to_protect_the_default_branch(self):
+        with self.assertRaisesRegex(RuntimeError, "protects the default branch"):
+            self.t3_launched(protected=False)
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_t3_selection_never_silently_launches_an_unsupported_runtime_locally(self):
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.object(worker, "_model", return_value=worker.ModelEntry("codex", "gpt-6.1-sol")), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "start") as local:
+            with self.assertRaisesRegex(RuntimeError, "T3.*codex"):
+                worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                              policies=self.p, forge=self.forge, clock=lambda: NOW, launcher="t3")
+        local.assert_not_called()
+
+    def test_t3_does_not_ignore_a_configured_account_profile(self):
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.object(worker, "_model", return_value=worker.ModelEntry("claude", "sonnet")), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.t3_adapter, "start") as start:
+            with self.assertRaisesRegex(RuntimeError, "provider instance"):
+                worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                              policies=self.p, forge=self.forge, clock=lambda: NOW, launcher="t3", claude_as_profile="alternate")
+        start.assert_not_called()
+
+    def test_a_t3_rotation_with_only_unsupported_hosts_does_not_invent_a_claude_entry(self):
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high"]\n')
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.t3_adapter, "available", side_effect=lambda runtime: runtime == "claude"), \
+             mock.patch.object(worker, "below_limit", return_value=True), \
+             mock.patch.object(worker.t3_adapter, "start") as start:
+            with self.assertRaisesRegex(RuntimeError, "T3.*rotation"):
+                worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                              policies=self.p, forge=self.forge, clock=lambda: NOW, launcher="t3")
+        start.assert_not_called()
+
+    def test_dead_t3_runner_is_adopted_without_starting_a_second_worker(self):
+        self.t3_launched()
+        data = self.db.resume(KEY)
+        run = Path(data["runs"]["implement-1"]["run_dir"])
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker.t3_adapter, "observe", return_value={"status": "running"}):
+            adopted = worker._existing_run(data, run, "implement", 1, self.trees, lambda: NOW)
+        self.assertIsNotNone(adopted)
+
+    def test_t3_remote_liveness_wins_over_runner_exit_and_defers_teardown(self):
+        self.t3_launched()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run / "exit.json").write_text('{"exit_code": -15}')
+        with mock.patch.object(worker.t3_adapter, "refresh", return_value={"status": "running"}), \
+             mock.patch.object(worker.t3_adapter, "observe", return_value=worker.t3_adapter.Evidence(alive=False, launcher="t3")), \
+             mock.patch.object(worker, "teardown_once") as teardown:
+            worker.collect(self.db, self.root, lambda: NOW)
+        teardown.assert_not_called()
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+
+    def test_incomplete_terminal_t3_evidence_preserves_the_attempt_before_refresh(self):
+        self.t3_launched()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run / "t3.json").write_text(json.dumps({"cli": "/t3", "home": ""}))
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        shown = json.dumps({"thread": {"threadId": "mcp:t-1", "status": "completed"}})
+        with mock.patch.object(worker.t3_adapter, "_t3", return_value=subprocess.CompletedProcess([], 0, shown, "")), \
+             mock.patch.object(worker.t3_adapter, "refresh") as refresh, \
+             mock.patch.object(worker, "teardown_once") as teardown:
+            worker.collect(self.db, self.root, lambda: NOW)
+        refresh.assert_not_called()
+        teardown.assert_not_called()
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+
+    def test_clearing_a_tree_cannot_kill_a_runner_and_abandon_its_remote_thread(self):
+        run = self.root / ".chief-of-stuff/runs/old"
+        run.mkdir(parents=True)
+        (run / "command.json").write_text(json.dumps({"cwd": str(self.tree), "session_id": "old"}))
+        (run / "t3.json").write_text("{}")
+        with mock.patch.object(worker.t3_adapter, "observe", return_value={"status": "running"}), \
+             mock.patch.object(worker.process_status, "carriers", return_value=[]), \
+             mock.patch.object(worker.process_status, "stop_session") as stop:
+            with self.assertRaisesRegex(RuntimeError, "T3.*live"):
+                worker._clear_tree(self.root, self.tree, self.db, KEY, NOW.isoformat())
+        stop.assert_not_called()
+
+    def test_a_t3_run_is_classified_as_a_host_without_a_claude_envelope_and_checked_for_outside_merges(self):
+        self.t3_launched()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run / "stdout").write_text("plain reply text, not a Claude envelope")
+        (run / "stderr").write_text("")
+        self.report(run)
+        (run / "exit.json").write_text(json.dumps({"exit_code": 0}))
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker.t3_adapter, "refresh", return_value={"status": "completed"}), \
+             mock.patch.object(worker.t3_adapter, "observe", return_value=worker.t3_adapter.Evidence(alive=False, launcher="t3")), \
+             mock.patch.object(worker.host_adapter, "moved_outside_engine", return_value="trunk moved") as moved:
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        moved.assert_called_once()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+
+    def test_an_adopted_t3_start_keeps_its_launcher_thread_and_branch_heads_and_takes_nothing_else_from_thread_json(self):
+        self.t3_launched()
+        data = self.db.resume(KEY)
+        run = Path(data.pop("runs")["implement-1"]["run_dir"])
+        self.assertEqual(json.loads((run / "branch_heads.json").read_text()), {"trunk": "d" * 40, "main": "d" * 40})
+        (run / "thread.json").write_text(json.dumps({"thread_id": "mcp:t-1", "thread_link": "t3code://threads/env-1/mcp:t-1",
+                                                     "pid": -1, "runtime": "codex", "branch_heads": {}}))
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        record = worker._existing_run(data, run, "implement", 1, self.trees, lambda: NOW)
+        self.assertEqual((record["launcher"], record["runtime"], record["thread_id"]), ("t3", "claude", "mcp:t-1"))
+        self.assertEqual(record["branch_heads"], {"trunk": "d" * 40, "main": "d" * 40})
+        self.assertEqual(record["pid"], 77)
+        # A heads file that is not branch -> 40-hex sha is dropped, so the run holds for want of heads (no option injection).
+        (run / "branch_heads.json").write_text(json.dumps({"main": "--output=/x"}))
+        self.assertNotIn("branch_heads", worker._existing_run(data, run, "implement", 1, self.trees, lambda: NOW))
+
     ROTATION = ('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", "cursor:auto", '
                 '"agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
 
-    def launch_rotation(self, on_path=("codex", "agent", "agy"), protected=True, data=None):
+    def launch_rotation(self, on_path=("codex", "agent", "agy"), protected=True, data=None, start_error=None):
         """#701: a launch from the owner's mixed rotation; returns (used, the host the start went to)."""
         (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
         (self.root / "chief-of-stuff.toml").write_text(self.ROTATION)
@@ -339,6 +488,8 @@ class WorkerTest(unittest.TestCase):
 
         def host(runtime, request, run_dir, env):
             went.append(runtime)
+            if start_error is not None:
+                raise start_error
             return self.start(request, run_dir), ""
 
         def claude(request, run_dir, **kwargs):
@@ -358,6 +509,49 @@ class WorkerTest(unittest.TestCase):
         used, went = self.launch_rotation()
         self.assertEqual((used, went), (("gpt-6.1-sol", "high", "codex"), "codex"))
         self.assertEqual(self.db.resume(KEY)["model"], {"implement": "codex:gpt-6.1-sol@high"})
+
+    def test_failed_rotation_pick_keeps_the_selected_entry_and_original_cause(self):
+        self.ROTATION = ('[models.implement]\nrotation = ["claude:sonnet@high", '
+                         '"cursor:composer-2.5"]\npick = "random"\n')
+        error = OSError("host refused")
+        with mock.patch.object(worker.random, "choice", side_effect=lambda entries: entries[-1]) as choose:
+            with self.assertRaisesRegex(worker.StartFailed, "host refused") as caught:
+                self.launch_rotation(start_error=error)
+        choose.assert_called_once()
+        self.assertEqual(caught.exception.chosen, worker.ModelEntry("cursor", "composer-2.5"))
+        self.assertIs(caught.exception.__cause__, error)
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_failed_quota_fallback_keeps_the_new_host_instead_of_previous_model(self):
+        self.ROTATION = ('[models.implement]\nrotation = ["claude:sonnet@high", '
+                         '"cursor:composer-2.5"]\n')
+        with self.assertRaises(worker.StartFailed) as caught:
+            self.launch_rotation(data={"quota": {"retry_at": NOW.isoformat()},
+                                       "model": {"implement": "claude:sonnet@high"}},
+                                 start_error=OSError("host refused"))
+        self.assertEqual(caught.exception.chosen, worker.ModelEntry("cursor", "composer-2.5"))
+
+    def test_failure_before_selection_does_not_borrow_the_previous_model(self):
+        self.db.set_resume(KEY, {"model": {"implement": "claude:opus@high"}})
+        with mock.patch.object(worker, "_model") as choose, \
+             mock.patch.object(self.forge, "issue", side_effect=OSError("forge unavailable")):
+            with self.assertRaisesRegex(OSError, "forge unavailable"):
+                self.launch()
+        choose.assert_not_called()
+
+    def test_failed_claude_start_retains_model_and_effort(self):
+        with mock.patch.object(self, "start", side_effect=OSError("spawn refused")):
+            with self.assertRaisesRegex(worker.StartFailed, "spawn refused") as caught:
+                self.launch_with_settings('[models.implement]\nrotation = ["claude:sonnet@high"]\n')
+        self.assertEqual(caught.exception.chosen, worker.ModelEntry("claude", "sonnet", "high"))
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+
+    def test_launch_does_not_wrap_process_control_exceptions(self):
+        for exception in (KeyboardInterrupt, SystemExit):
+            with self.subTest(exception=exception), mock.patch.object(self, "start", side_effect=exception):
+                self.db.set_resume(KEY, {})
+                with self.assertRaises(exception):
+                    self.launch_with_settings('[models.implement]\nrotation = ["claude:sonnet@high"]\n')
 
     def test_a_host_whose_cli_is_missing_is_skipped_for_the_next_entry(self):
         used, went = self.launch_rotation(on_path=("agent", "agy"))
@@ -386,10 +580,21 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(offered, [["cursor:auto", "agy:gemini-4-argon-high", "claude:sonnet@high"]])
         self.assertEqual((used, went), (("sonnet", "high"), "claude"))
 
-    def test_first_stays_the_default_and_a_quota_stop_still_advances_under_random(self):
+    def test_first_round_robin_turn_starts_at_the_first_launchable_entry(self):
         with mock.patch.object(worker.random, "choice") as never:
             self.assertEqual(self.launch_rotation()[1], "codex")
         never.assert_not_called()
+
+    def test_launch_skips_near_cap_and_records_workflow_with_the_selected_entry(self):
+        self.ROTATION = ('[models.implement]\nrotation = ["claude:sonnet@high", "codex:next@medium"]\n'
+                         '[limits]\nwarn_at = 0.65\n')
+        with mock.patch.object(worker, "below_limit", side_effect=lambda runtime, *args: runtime != "claude") as probe:
+            used, went = self.launch_rotation()
+        self.assertEqual((used, went), (("next", "medium", "codex"), "codex"))
+        self.assertIn(mock.call("claude", "", NOW, .65), probe.call_args_list)
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, clock=lambda: NOW, launch=lambda: used)
+        self.assertEqual(self.db.segments(KEY)[0].workflow, self.p.default_workflow)
 
     def test_a_quota_stop_advances_even_when_picking_at_random(self):
         self.ROTATION = self.ROTATION + 'pick = "random"\n'
@@ -466,7 +671,7 @@ class WorkerTest(unittest.TestCase):
                      mock.patch.object(worker.claude_adapter, "start", side_effect=RuntimeError("refused")):
                     with self.assertRaisesRegex(RuntimeError, "refused"):
                         self.launch(stage)
-                self.assertIn(str(tree), [row.path for row in self.db.ownership(KEY)])
+                self.assertIn(str(tree), [row.path for row in self.db.trees(KEY)])
                 self.db.upsert_item(KEY, forge_state="closed")
                 items, guards = cleanup.owner_guards(tree, cleanup.owned_items(self.root, self.db))
                 self.assertEqual([item.issue_key for item in items], [KEY])
@@ -510,6 +715,18 @@ class WorkerTest(unittest.TestCase):
                 with mock.patch.object(worker.process_status, "identity", return_value=None):
                     worker.collect(self.db, self.root, lambda: NOW)
                 self.assertEqual(self.db.segments()[0].outcome, "done")
+
+    def test_recovered_start_uses_reserved_entry_when_model_save_was_interrupted(self):
+        used, _ = self.launch_rotation()
+        data = self.db.resume(KEY)
+        data.pop("model")
+        data.pop("runs")
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.process_status, "identity", return_value="start"), \
+             mock.patch.object(worker.host_adapter, "start") as start:
+            recovered = self.launch()
+        start.assert_not_called()
+        self.assertEqual(recovered, used)
 
     def test_dead_or_reused_run_is_preserved_as_refused_before_relaunch(self):
         for recorded, old_identity in ((True, None), (True, "different-birth"), (False, None)):
@@ -630,7 +847,7 @@ class WorkerTest(unittest.TestCase):
         self.assertNotEqual(build.call_args.args[3], self.tree.name)
         self.assertEqual(start.call_args.args[0].cwd, str(fresh))
         self.assertEqual(self.db.resume(KEY)["review_trees"]["1"]["head"], "new-head")
-        self.assertEqual({row.path for row in self.db.ownership(KEY)}, {str(self.tree), str(fresh)})
+        self.assertEqual({row.path for row in self.db.trees(KEY)}, {str(self.tree), str(fresh)})
 
     def test_live_review_is_adopted_before_changed_head_can_rebuild_its_tree(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
@@ -655,7 +872,7 @@ class WorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "does not match the request head"):
                 self.launch("review")
         start.assert_not_called()
-        self.assertEqual([row.path for row in self.db.ownership(KEY)], [str(self.tree)])
+        self.assertEqual([row.path for row in self.db.trees(KEY)], [str(self.tree)])
 
     def test_rework_reuses_tree_and_branch_without_build(self):
         self.launched()
@@ -692,7 +909,7 @@ class WorkerTest(unittest.TestCase):
         prompt = worker.dispatch_prompt.compose_issue(
             self.db.items()[0], "title", "body", "implement", self.persona, root=self.root, require_green=True)
         self.assertIn("require_green_tests", prompt)
-        self.assertIn("human review", prompt)
+        self.assertIn("failed work", prompt)
         self.assertIn("passed, failed, skipped and xfailed are all known", prompt)
         self.assertIn("passed > 0", prompt)
         self.assertIn("failed, skipped and xfailed all zero", prompt)
@@ -817,19 +1034,23 @@ class WorkerTest(unittest.TestCase):
         fresh = KEY.rpartition("#")[0] + "#3"
         forge.rows.extend([{"issue_key": other, "stage": "implement", "forge_state": "open"},
                            {"issue_key": fresh, "stage": "implement", "forge_state": "open"}])
-        for number, row in enumerate(forge.rows):
-            row["body"] = f"## File ownership\n- write: `src/{number}.py`"
         self.db.upsert_item(other, stage="implement")
         self.db.record_segment(other, "implement", 1, NOW.isoformat())
         launch = mock.Mock(return_value=("example", ""))
-        for _ in range(2):
-            self.suite_pass(forge, launch)
-            self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+        end = self.db.end_segment
+        def close(key, *args, **kwargs):
+            if key == KEY:
+                raise RuntimeError("store temporarily unavailable")
+            return end(key, *args, **kwargs)
+        with mock.patch.object(self.db, "end_segment", side_effect=close):
+            for _ in range(2):
+                self.suite_pass(forge, launch)
+                self.assertIsNone(self.db.segments(KEY)[0].ended_at)
         self.assertIsNotNone(self.db.segments(other)[0].ended_at)
         self.assertIn(fresh, [call.args[0] for call in launch.call_args_list])
         errors = [row.message for row in self.db.log(KEY) if "close failed" in row.message]
         self.assertEqual(len(errors), 1)
-        self.assertIn("label unavailable", errors[0])
+        self.assertIn("store temporarily unavailable", errors[0])
 
     def test_a_foreign_session_cannot_replace_the_current_red_suite(self):
         for exitless in (False, True):
@@ -845,10 +1066,11 @@ class WorkerTest(unittest.TestCase):
                     (run / "exit.json").unlink()
                 with mock.patch.object(worker.process_status, "identity", return_value=None):
                     self.suite_pass(forge, mock.Mock(return_value=("example", "")))
-                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
-                self.assertIn("suite_hold", self.db.resume(KEY))
+                expected = "human_review" if exitless else "failed"
+                self.assertEqual(self.db.segments(KEY)[0].outcome, expected)
+                self.assertEqual("suite_hold" in self.db.resume(KEY), exitless)
 
-    def test_a_dead_worker_without_an_exit_holds_a_red_suite(self):
+    def test_a_dead_worker_without_an_exit_retries_a_red_suite(self):
         forge = self.suite_run()
         run_dir = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
         (run_dir / "exit.json").unlink()
@@ -860,7 +1082,9 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY)["suite_hold"]["stage"], "implement")
         launch = mock.Mock(return_value=("example", ""))
         self.suite_pass(forge, launch)
-        launch.assert_not_called()
+        launch.assert_called_once_with(KEY, "implement", 2, "builder")
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "failed")
+        self.assertNotIn("suite_hold", self.db.resume(KEY))
 
     def test_a_non_done_report_is_not_suite_gated(self):
         forge = self.suite_run(outcome="blocked")
@@ -873,84 +1097,8 @@ class WorkerTest(unittest.TestCase):
         self.assertNotIn("suite_hold", self.db.resume(KEY))
         forge.add_human_hold.assert_not_called()
 
-    def test_suite_hold_survives_forge_errors_and_restart_until_release(self):
-        cases = ((stage, failure) for stage in ("implement", "fix")
-                 for failure in ("label unavailable", RuntimeError("forge offline")))
-        for stage, failure in cases:
-            with self.subTest(stage=stage, failure=failure):
-                if self.db.segments():
-                    self.db.engine.dispose()
-                    self.setUp()
-                forge = self.suite_run(stage)
-                def hold(number):
-                    if hold.failure:
-                        if isinstance(hold.failure, Exception):
-                            raise hold.failure
-                        return hold.failure
-                    forge.rows[0]["human_review"] = True
-                    return ""
-                hold.failure = failure
-                forge.add_human_hold = mock.Mock(side_effect=hold)
-                launch = mock.Mock(return_value=("example", ""))
-                self.suite_pass(forge, launch)
-                # Reopen the store: a process-local flag cannot preserve this hold.
-                self.db.engine.dispose()
-                self.db = store.Store(self.root / "store.db", clock=lambda: NOW)
-                self.addCleanup(self.db.engine.dispose)
-                self.suite_pass(forge, launch)
-                launch.assert_not_called()
-                self.assertTrue(self.db.items()[0].human_review)
-                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
-                evidence = "\n".join(row.message for row in self.db.log(KEY))
-                self.assertIn("suite is not green", evidence)
-                self.assertNotIn("unreadable worker run", evidence)
-                hold.failure = None
-                self.suite_pass(forge, launch)
-                self.suite_pass(forge, launch)
-                launch.assert_not_called()
-                self.assertEqual(forge.add_human_hold.call_count, 3)
-                forge.rows[0]["human_review"] = False
-                actions = self.suite_pass(forge, launch)
-                self.assertEqual(actions, [reconcile.Review(KEY, 1)])
-                self.assertEqual(launch.call_args.args[1], "review")
-                self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
 
-    def test_releasing_a_review_suite_hold_accepts_the_review(self):
-        forge = self.suite_run(stage="review")
-        data = self.db.resume(KEY)
-        data["review_findings"] = {"attempt": 1, "counts": {}}
-        self.db.set_resume(KEY, data)
-        def hold(number):
-            forge.rows[0]["human_review"] = True
-            return ""
-        forge.add_human_hold = mock.Mock(side_effect=hold)
-        launch = mock.Mock(return_value=("example", ""))
-        self.suite_pass(forge, launch)
-        launch.assert_not_called()
-        forge.rows[0]["human_review"] = False
-        with mock.patch.object(engine.engine_merge, "execute", return_value=False):
-            actions = self.suite_pass(forge, launch)
-        self.assertEqual(actions, [reconcile.Merge(KEY)])
-        launch.assert_not_called()
-        self.assertEqual(self.db.resume(KEY)["runs"]["review-1"]["result"]["outcome"], "done")
 
-    def test_accepting_suite_hold_preserves_human_review_performance_after_restart(self):
-        forge = self.suite_run()
-        def hold(number):
-            forge.rows[0]["human_review"] = True
-            return ""
-        forge.add_human_hold = mock.Mock(side_effect=hold)
-        launch = mock.Mock(return_value=("example", ""))
-        self.suite_pass(forge, launch)
-        forge.rows[0]["human_review"] = False
-        self.suite_pass(forge, launch)
-        self.db.engine.dispose()
-        self.db = store.Store(self.root / "store.db", clock=lambda: NOW)
-        self.addCleanup(self.db.engine.dispose)
-        segment = self.db.segments(KEY)[0]
-        self.assertEqual(segment.outcome, "done")
-        rows = performance.table([segment], NOW.date(), NOW.date())
-        self.assertEqual((rows[0].completed, rows[0].human_review), (1, 1))
 
     def test_closed_suite_holds_retire_without_publication_or_acceptance(self):
         for published in (False, True):
@@ -1006,11 +1154,12 @@ class WorkerTest(unittest.TestCase):
         hold = {"stage": "implement", "attempt": 1, "published": True}
         for rows in ([], [{"issue_key": KEY}]):
             with self.subTest(rows=rows):
+                self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "human_review")
                 self.db.set_resume(KEY, {"suite_hold": hold})
                 engine._sync_suite_holds(FakeForge(), self.db, rows, NOW.isoformat())
-                self.assertEqual(self.db.resume(KEY)["suite_hold"], hold)
-                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
-                self.assertTrue(self.db.items()[0].human_review)
+                self.assertNotIn("suite_hold", self.db.resume(KEY))
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "failed")
+                self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "implement", "attempt": 1})
 
     def test_collect_uses_passed_policy_when_workspace_configuration_breaks(self):
         self.suite_run()
@@ -1107,7 +1256,7 @@ class WorkerTest(unittest.TestCase):
                                  NOW + timedelta(hours=3), {}, quota_resets={KEY: NOW + timedelta(hours=2)})
         self.assertEqual(planned, [reconcile.Dispatch(KEY, "implement", "builder", 6)])
 
-    def test_engine_syncs_forge_before_collecting_so_completion_uses_declared_ownership(self):
+    def test_engine_syncs_forge_before_collecting(self):
         order = []
         self.forge.snapshots = mock.Mock(side_effect=lambda: order.append("forge") or [])
         with mock.patch.object(engine.worker, "collect", side_effect=lambda *a, **kw: order.append("collect") or kw["gather"]()), \
@@ -1202,7 +1351,8 @@ class WorkerTest(unittest.TestCase):
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         self.assertEqual(self.db.segments()[0].outcome, "done")
         command = json.loads((Path(record["run_dir"]) / "command.json").read_text())["argv"]
-        for token in ("-p", "--output-format", "json", "--model", "example", "--session-id", record["session_id"]):
+        for token in ("-p", "--output-format", "stream-json", "--input-format", "--replay-user-messages",
+                      "--model", "example", "--session-id", record["session_id"]):
             self.assertIn(token, command)
         self.assertNotIn("--safe-mode", command)
 
@@ -1392,6 +1542,33 @@ class WorkerTest(unittest.TestCase):
         self.assertNotIn("--safe-mode", args)
         self.assertEqual(args[args.index("--setting-sources") + 1], "user")
         self.assertIn("--strict-mcp-config", args)
+
+    def test_a_workers_own_engine_tools_need_no_permission(self):
+        # Declared through --mcp-config, the report tool asked for permission; the trio answered after the guard
+        # hook's 40s wait, so the worker was denied and "stopped without reporting" (drago#19 plan-4).
+        guard = Path(claude_adapter.__file__).resolve().parents[1] / "guard"
+        args = claude_adapter.argv(worker.Request("prompt", worker=True, plugin_dirs=(str(guard),)), "/fake", [])
+        self.assertEqual(args[args.index("--allowedTools") + 1], "mcp__engine")
+        self.assertLess(args.index("--allowedTools"), args.index("--"))
+
+    def test_a_worker_keeps_its_plugins_mcp_servers_under_strict_mcp_config(self):
+        # Claude Code 2.1.303 drops plugin MCP servers under --strict-mcp-config, so every worker lost the engine's
+        # report tool and "stopped without reporting an outcome". The guard's servers travel in --mcp-config.
+        guard = Path(claude_adapter.__file__).resolve().parents[1] / "guard"
+        args = claude_adapter.argv(worker.Request("prompt", worker=True, plugin_dirs=(str(guard),)), "/fake", [])
+        config = json.loads(args[args.index("--mcp-config") + 1])
+        self.assertEqual(config["mcpServers"]["engine"],
+                         {"command": "${CHIEF_PYTHON}", "args": [f"{guard}/../scripts/engine_mcp.py"]})
+        self.assertLess(args.index("--mcp-config"), args.index("--"))
+
+    def test_a_plugin_path_with_a_quote_or_backslash_still_gives_valid_mcp_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / 'odd "dir" \\ name'
+            plugin.mkdir()
+            (plugin / ".mcp.json").write_text('{"engine": {"command": "x", "args": ["${CLAUDE_PLUGIN_ROOT}/s.py"]}}')
+            args = claude_adapter.argv(worker.Request("p", worker=True, plugin_dirs=(str(plugin),)), "/fake", [])
+        config = json.loads(args[args.index("--mcp-config") + 1])
+        self.assertEqual(config["mcpServers"]["engine"]["args"], [f"{plugin}/s.py"])
 
     def test_forge_retains_request_head_branch(self):
         payload = [{"number": 1, "title": "Request", "url": "url", "headRefOid": "sha",

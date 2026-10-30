@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
-from typing import Any, Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Callable, Mapping, Sequence
 
-from decision_actions import DecisionUpdate, exhaust_retry, human_answer, identity, preserve_ask_link, retryable_failure
+from decision_actions import human_answer
+from decision_escalation import (DecisionUpdate, is_gate, exhaust_retry, identity, preserve_ask_link,
+                                 retryable_failure)
 from model_port import Failure, Model, Reply, Request, draw
 from policy import Persona, Policy, PolicyError
 
-TIMEOUT_S = 60
+TIMEOUT_S = 300  # #928: Cursor composer took 222s on a one-line decision (Zach 2026-10-19: "we need to bump timeout")
 
 
 @dataclass(frozen=True)
@@ -54,7 +56,7 @@ def select(policy: Policy, personas: Mapping[str, Persona], tags: Sequence[str])
     return tuple(personas[name] for name in names)
 
 
-def _request(decision: dict, persona: Persona, entry: Any = None) -> Request:
+def _request(decision: dict, persona: Persona, entry: Any = None, timeout_s: float = TIMEOUT_S) -> Request:
     prompt = (f"You are {persona.name}: {persona.role}.\nRules: {json.dumps(persona.rules)}\n"
               "Review this decision independently. Vote adopt only if you recommend adopting it without concerns; "
               "otherwise vote concern. Choose one of the options as your choice and give non-empty reasoning.\n"
@@ -62,7 +64,7 @@ def _request(decision: dict, persona: Persona, entry: Any = None) -> Request:
               f"Decision: {json.dumps(decision)}")
     model, effort, runtime = ((entry.model, entry.effort or "", entry.runtime) if entry is not None
                               else (persona.model, persona.effort or "", ""))
-    return Request(prompt, model=model, effort=effort, runtime=runtime, timeout_s=TIMEOUT_S, schema={
+    return Request(prompt, model=model, effort=effort, runtime=runtime, timeout_s=timeout_s, schema={
         "type": "object",
         "properties": {
             "vote": {"type": "string", "enum": ["adopt", "concern"]},
@@ -87,10 +89,30 @@ def _verdict(persona: Persona, got: Reply | Failure, options: tuple[str, ...]) -
     return {"persona": persona.name, "vote": "concern", "choice": None, "reasoning": reasoning}
 
 
+def _default(update: DecisionUpdate) -> str:
+    """What the engine does if nobody answers (§6, #1128), read from its own no-answer paths."""
+    decision = update.record.get("decision") if isinstance(update.record.get("decision"), dict) else {}
+    try:
+        event = json.loads(decision.get("context") or "")
+    except (TypeError, ValueError):
+        event = None
+    if isinstance(event, dict) and "tool_name" in event and event.get("kind", "permission") == "permission":
+        return "Denied: a permission the trio does not adopt is denied."  # engine._route_asks
+    if is_gate(update, decision):
+        return "Hold: the work waits at the gate until it is approved."  # reconcile._gate
+    return "The worker waits: the issue holds until this is answered."  # engine_mcp ask, decision_escalation.owner_waits
+
+
+def _with_default(update: DecisionUpdate) -> DecisionUpdate:
+    """A row keeps the default its decision was recorded with; a row without one gets it from the decision."""
+    return update if update.record.get("default") else replace(update, record={**update.record, "default": _default(update)})
+
+
 def record(store: Any, key: str, update: DecisionUpdate) -> Any | None:
     """The one writer of decision rows: a trio result, an unavailable consultation, a board intent and the engine's
     transitions. Human answer wins: a row a person did not write never lands over a person's answer, which is
-    returned instead, the check and the append under one write lock."""
+    returned instead, the check and the append under one write lock. Every row carries the decision's default."""
+    update = _with_default(update)
     won = []
 
     def person_first(rows: list) -> Any | None:
@@ -116,24 +138,31 @@ def _members(model: Model, trio: Sequence[Persona]) -> tuple[list[Any], bool | N
 
 
 def _ask(model: Model, persona: Persona, described: dict, entry: Any, stopped: list,
-         others: Sequence[Any]) -> tuple[Any, Any, bool]:
+         others: Sequence[Any], remaining: Callable[[], float] | None = None) -> tuple[Any, Any, bool]:
     """One member's answer. A quota stop moves the member to the next entry, one no other member holds when there is
-    one, so the trio stays diverse; (answer, entry, exhausted)."""
+    one, so the trio stays diverse; any other model failure (a timeout, an unparsed answer) moves it once (#928), so
+    an outage is not counted as a concern. Each call gets at most the pass budget's `remaining` seconds, and none
+    starts once it is spent (#927); (answer, entry, exhausted)."""
+    replaced = False
     while True:
-        got = model(_request(described, persona, entry))
-        if entry is None or not (isinstance(got, Failure) and got.kind == "quota"):
+        left = TIMEOUT_S if remaining is None else min(TIMEOUT_S, remaining())
+        if left <= 0:
+            return Failure("unknown", "the engine pass spent its trio budget; consulted again next pass"), entry, False
+        got = model(_request(described, persona, entry, left))
+        if entry is None or not isinstance(got, Failure) or (got.kind != "quota" and replaced):
             return got, entry, False
         stopped.append(entry)
+        replaced = replaced or got.kind != "quota"
         drawn = dict(launchable=model.launchable, how=model.pick)
         following = (draw(model.rotation, 1, used=[*stopped, *others], **drawn)
                      or draw(model.rotation, 1, used=stopped, **drawn))
         if not following:
-            return got, entry, True
+            return got, entry, got.kind == "quota"
         entry = following[0]
 
 
 def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona], model: Model, store: Any,
-            failures: int = 0) -> Outcome:
+            failures: int = 0, remaining: Callable[[], float] | None = None) -> Outcome:
     """Consult all three under a resolved policy, then record adoption or escalation on the existing issue.
 
     `failures` is the count of earlier outages; a retryable result carries the new count, and the cap, in its row."""
@@ -147,7 +176,8 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
         if not members:
             got = Failure("missing_program", "no [models.trio] entry can launch read-only on this host")
         else:
-            got, entry, out = _ask(model, persona, described, entry, stopped, members[:i] + members[i + 1:])
+            got, entry, out = _ask(model, persona, described, entry, stopped, members[:i] + members[i + 1:],
+                                     remaining)
             members[i], exhausted = entry, exhausted or out
         # Each vote names what cast it, so trio accuracy can be compared per model (§6, section 9).
         verdicts.append({**_verdict(persona, got, decision.options),
@@ -202,7 +232,8 @@ def _settled(decision: Decision, earlier: Sequence[Any]) -> Outcome | None:
 
 
 def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas: Mapping[str, Persona],
-           model: Model | None, store: Any, failures: int = 0) -> Outcome:
+           model: Model | None, store: Any, failures: int = 0,
+           remaining: Callable[[], float] | None = None) -> Outcome:
     """Reuse a settled decision for these options and context, or consult the trio once."""
     try:
         decision.validate()
@@ -211,13 +242,13 @@ def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas:
             return settled
         if model is None:
             raise ValueError(decision.question)
-        return consult(decision, policy, personas, model, store, failures)
+        return consult(decision, policy, personas, model, store, failures, remaining)
     except (PolicyError, ValueError) as exc:
         described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
         update = preserve_ask_link(earlier, DecisionUpdate(
             decision.topic, decision.question, None, "zach",
             {"decision": described, "error": f"{decision.question}: {exc}", "unanimous": False}))
         prior = next((row for row in reversed(earlier) if identity(row) == identity(update)), None)
-        if prior is None or prior.record != update.record:
+        if prior is None or prior.record != _with_default(update).record:
             record(store, decision.issue_key, update)
         return Outcome(None, False, str(exc))

@@ -110,6 +110,12 @@ class HostAdapterTest(unittest.TestCase):
         self.assertIn('CHIEF_ISSUE_KEY = "github:o/r#1"', joined)
         self.assertNotIn("OTHER", joined)
 
+    def test_codex_may_call_the_engine_tools_under_approval_never(self):
+        # Codex runs `-a never`, which refused every report call ("MCP tool call requires approval"), so no Codex
+        # run ever recorded an outcome. The engine's own channel is approved; other servers keep Codex's default.
+        extra, _ = host_adapter.register("codex", Request("p", session_id="s", cwd=str(self.dir)), BINDING)
+        self.assertIn('mcp_servers.engine.default_tools_approval_mode="approve"', extra)
+
     def test_cursor_gets_a_per_run_config_with_the_binding_kept_out_of_commits(self):
         tree = self.git_tree()
         request = Request("p", session_id="s", cwd=str(tree))
@@ -121,6 +127,31 @@ class HostAdapterTest(unittest.TestCase):
                                         text=True).stdout, "")
         with self.assertRaisesRegex(ShellError, "already has"):
             host_adapter.register("cursor", request, BINDING)
+
+    def test_a_cursor_retry_replaces_the_engines_config_from_an_earlier_run(self):
+        # drago 2026-10-19: seven Cursor retries failed to start because the earlier run's config was still there.
+        tree = self.git_tree()
+        host_adapter.register("cursor", Request("p", session_id="s1", cwd=str(tree)), BINDING)
+        retry = {**BINDING, "CHIEF_ATTEMPT": "2", "CHIEF_SESSION_ID": "s2"}
+        host_adapter.register("cursor", Request("p", session_id="s2", cwd=str(tree)), retry)
+        self.assertEqual(json.loads((tree / ".cursor" / "mcp.json").read_text())["mcpServers"]["engine"]["env"], retry)
+
+    def test_a_cursor_retry_after_a_release_install_replaces_the_older_versions_config(self):
+        # Architect review of #973: the earlier run's args name another release's engine_mcp.py.
+        tree = self.git_tree()
+        (tree / ".cursor").mkdir()
+        older = {"command": sys.executable, "args": ["/v/0.129.99-abc/scripts/engine_mcp.py"], "env": BINDING}
+        (tree / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"engine": older}}))
+        retry = {**BINDING, "CHIEF_SESSION_ID": "s2"}
+        host_adapter.register("cursor", Request("p", session_id="s2", cwd=str(tree)), retry)
+        self.assertEqual(json.loads((tree / ".cursor" / "mcp.json").read_text())["mcpServers"]["engine"]["env"], retry)
+
+    def test_a_cursor_config_the_engine_did_not_write_is_never_replaced(self):
+        tree = self.git_tree()
+        (tree / ".cursor").mkdir()
+        (tree / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"theirs": {"command": "x"}}}))
+        with self.assertRaisesRegex(ShellError, "already has"):
+            host_adapter.register("cursor", Request("p", session_id="s", cwd=str(tree)), BINDING)
 
     def test_agy_adds_a_uniquely_named_entry_and_cleanup_removes_it(self):
         calls = []
@@ -196,6 +227,12 @@ class HostAdapterTest(unittest.TestCase):
             held = host_adapter.moved_outside_engine(store, record, "now")
         self.assertIn("develop gained commits the engine did not merge: " + "w" * 12, held)
         self.assertNotIn("main gained", held)
+
+    def test_a_t3_run_with_no_recorded_heads_holds_rather_than_passing_unchecked(self):
+        # #1178: an adopted T3 run whose heads were lost is unknown, and unknown is never safe (ledger F3).
+        store = SimpleNamespace(items=lambda: [], resume=lambda key: {})
+        record = {"tree": str(self.dir), "runtime": "claude", "launcher": "t3"}
+        self.assertIn("holding for human review", host_adapter.moved_outside_engine(store, record, "now"))
 
     def test_branch_heads_reads_every_branch_in_one_call_and_marks_absent_ones(self):
         calls = []
