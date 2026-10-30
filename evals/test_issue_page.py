@@ -1071,13 +1071,16 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
         # person it waits on; the board's Flow and the task page read the one cause.
         cfg = BoardTest().cfg()
         src = sources()
+        # The cell says pr. The hold follows the stage Flow keeps, so the Log says pr too (#887).
+        tracker = TODAY_START.replace("- 00:01 opened the day\n",
+                                      "- 00:01 opened the day\n- 00:05 stage: Upload size limit → pr\n")
         for kanban, refs, cause in ((KANBAN, {}, "Robin"), (replace(KANBAN, hold_stages=("pr",)), {}, "pr"),
                                     (replace(KANBAN, hold_stages=("pr",)), {"#109": None}, "decision")):
             with self.subTest(cause=cause):
-                board = self.flow_rows(lambda: rb.render(TODAY_START, cfg, self.NOW2, lanes=LANES, tracker_day=TODAY,
+                board = self.flow_rows(lambda: rb.render(tracker, cfg, self.NOW2, lanes=LANES, tracker_day=TODAY,
                                                          kanban=kanban, stage_log=[(YESTERDAY, YESTERDAY_TRACKER)],
                                                          sources=src, pending_refs=refs))
-                task = self.flow_rows(lambda: ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, TODAY_START)],
+                task = self.flow_rows(lambda: ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, tracker)],
                                                         src, self.NOW2, LANES, cfg, kanban=kanban, pending_refs=refs))
                 self.assertEqual(board["Upload size limit"][1].note, f"needs input · {cause}")
                 self.assertEqual(task["Upload size limit"][1].note, f"needs input · {cause}")

@@ -537,7 +537,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     # (#200, #220) forge_ends is shared with the board, so both end a row at the same time
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
     today = [t for t in today_tasks if not t.standing]
-    holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs)
+    holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs, log)
     held = held_names(holds)
     completions = forge_ends(mine, sources, now.tzinfo)
     rows = store_rows if store_rows is not None else [
