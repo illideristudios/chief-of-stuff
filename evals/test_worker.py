@@ -52,6 +52,68 @@ class WorkerTest(unittest.TestCase):
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
         self.addCleanup(git.stop)
+        self.clock_patch = mock.patch.object(claude_adapter, "require_worker_clock")
+        self.clock = self.clock_patch.start()
+        self.addCleanup(self.clock_patch.stop)
+
+    def test_a_refused_clock_starts_no_worker_and_records_no_run(self):
+        # Like any refused start, it follows the tree cut (#551); the run record is what a refusal never writes.
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start") as start:
+            with self.assertRaisesRegex(claude_adapter.ClockError, "no clock"):
+                self.launch()
+        start.assert_not_called()
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def rotation_launch(self, rotation, **launch_kwargs):
+        """A real rotation (never a mocked selection) with every host launchable, claude and codex starts mocked."""
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(f'[models.implement]\nrotation = {json.dumps(rotation)}\n')
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "available", return_value=True), \
+             mock.patch.object(worker.t3_adapter, "available", return_value=True), \
+             mock.patch.object(worker, "below_limit", return_value=True), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
+             mock.patch.object(worker.host_adapter, "start",
+                               side_effect=lambda runtime, request, run_dir, env: (self.start(request, run_dir), "")) as host, \
+             mock.patch.object(worker.t3_adapter, "start", side_effect=lambda request, run_dir, **kw: self.start(request, run_dir)) as t3, \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as claude, \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            used = worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                                 policies=self.p, forge=self.forge, clock=lambda: NOW, **launch_kwargs)
+        return used, claude, host, t3
+
+    def test_a_refused_clock_makes_only_the_local_claude_entry_unlaunchable(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        used, claude, host, _ = self.rotation_launch(["claude:sonnet@high", "codex:gpt-6.1-sol@high"])
+        claude.assert_not_called()
+        host.assert_called_once()
+        self.assertEqual(used, ("gpt-6.1-sol", "high", "codex"))
+        self.clock.assert_called_once()
+
+    def test_a_refused_clock_with_no_other_entry_refuses_with_the_clock_error(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        with self.assertRaisesRegex(claude_adapter.ClockError, "no clock"):
+            self.rotation_launch(["claude:sonnet@high"])
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_a_t3_or_non_claude_launch_never_checks_the_local_clock(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        used, claude, _, t3 = self.rotation_launch(["claude:sonnet@high"], launcher="t3")
+        t3.assert_called_once()
+        claude.assert_not_called()
+        self.assertEqual(used, ("sonnet", "high"))
+        self.clock.assert_not_called()
+
+    def test_a_usable_clock_keeps_the_first_local_claude_entry(self):
+        used, claude, host, _ = self.rotation_launch(["claude:sonnet@high", "codex:gpt-6.1-sol@high"])
+        claude.assert_called_once()
+        host.assert_not_called()
+        self.assertEqual(used, ("sonnet", "high"))
+        self.clock.assert_called_once()
 
     def launch(self, stage="implement", attempt=1):
         return worker.launch(KEY, stage, attempt, None, store=self.db, root=self.root,
@@ -1436,6 +1498,8 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments()[0].outcome, "failed")
 
     def test_real_detached_adapter_is_adopted_and_collected_after_engine_restart(self):
+        self.clock_patch.stop()
+        self.addCleanup(self.clock_patch.start)
         fake = Path(__file__).parent / "fixtures" / "fake_claude.py"
         cli = self.root / "fake-cli"
         cli.write_text(f"#!{sys.executable}\nimport time, runpy\ntime.sleep(0.5)\n"
