@@ -101,7 +101,7 @@ class NeedsOwner:
     reason: str
 
 
-def _is_gate(row: Any, decision: dict[str, Any]) -> bool:
+def is_gate(row: Any, decision: dict[str, Any]) -> bool:
     # Rows written before `gate` was explicit are recognised by their shape.
     return bool(decision.get("gate", row.topic != "ask" and not decision.get("instance")
                              and tuple(decision.get("options") or ()) == ("approve", "hold")))
@@ -114,16 +114,11 @@ def needs_owner(rows: Sequence[Any]) -> NeedsOwner | None:
     row = rows[-1]
     record = row.record if isinstance(row.record, dict) else {}
     decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
-    gate = _is_gate(row, decision)
-    # Older gate holds committed an answer before their separate interrupt write.
-    legacy_hold = row.answer == "hold" and row.decided_by == "trio" and gate
-    if not legacy_hold and ((row.answer or "").strip() or row.decided_by != "zach"):
+    if is_gate(row, decision):  # Legacy coordinator gates and saved owner waits are retired.
+        return None
+    if (row.answer or "").strip() or row.decided_by != "zach":
         return None
     stage, attempt = decision.get("stage", ""), decision.get("attempt", 0)
-    # A gate is judged on the segment it consulted, which older rows stored as the policy source.
-    scoped = re.fullmatch(r"(.+)-(\d+)", str(decision.get("context", ""))) if gate else None
-    if scoped:
-        stage, attempt = scoped[1], int(scoped[2])
     return NeedsOwner(identity(row), stage, attempt, str(record.get("error") or row.question))
 
 
@@ -195,6 +190,8 @@ def pending_decisions(decisions: Sequence[Any], gates: Sequence[str], segments: 
         record = row.record if isinstance(row.record, dict) else {}
         decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
         scope = (decision.get("stage", ""), decision.get("attempt", 0))
+        if is_gate(row, decision):
+            return False
         return (is_reversed(row) or bool(record.get("restarted"))
                 or not _superseded(scope, getattr(row, "created_at", None), segments, cutoff))
 

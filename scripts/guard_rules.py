@@ -18,6 +18,12 @@ def permission_ask(event: dict) -> tuple[str, str]:
     return f"Permission requested for {event.get('tool_name', 'tool')}", context
 
 
+def denial_binds(decided_by: str | None, ask, binding) -> bool:
+    """#958: a split or an unavailable trio (the engine's own "guard" deny, or no decision row) and a reversal stop just
+    the attempt that got them; a trio verdict or a person's deny binds every attempt."""
+    return decided_by not in (None, "", "guard") or (ask.stage, ask.attempt) == (binding.stage, binding.attempt)
+
+
 def resume_state(binding, item, asks, reports) -> dict:
     return {
         "issue_key": binding.issue_key,

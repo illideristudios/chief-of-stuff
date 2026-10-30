@@ -77,36 +77,28 @@ class DecisionActionsTest(unittest.TestCase):
         self.assertTrue(any(isinstance(a, da.ForgeComment) and "plan" in a.body for a in tr.actions))
         self.assertEqual([a for a in tr.actions if not isinstance(a, da.ForgeComment)], [])
 
-    def test_answered_decision_meeting_blocked_action_becomes_blocked_and_never_closed(self) -> None:
-        # #288: an answered decision whose issue is blocked carries the reason the action cannot run,
-        # shows on the board as blocked, and is never treated as closed.
+    def test_a_wait_or_an_escalation_leaves_a_persons_answer_answered(self) -> None:
+        # §6, #1124: a decision is blocked only when its own intent fails for good, never by the planner waiting.
         ship = answered(answer="Ship now", decided_by="user")
-        for action, reason in (
-            (reconcile.Wait(KEY, "merge conflicts"), "merge conflicts"),
-            (reconcile.Escalate(KEY, "retry limit"), "retry limit"),
-        ):
+        for action in (reconcile.Wait(KEY, "merge conflicts"), reconcile.Escalate(KEY, "retry limit")):
             with self.subTest(action=action):
                 tr = da.meet_action(ship, action)
-                self.assertEqual((tr.decision.status, tr.decision.blocked_reason, tr.decision.answer, tr.decision.decided_by),
-                                 ("blocked", reason, "Ship now", "user"))
-                self.assertEqual(da.board_status(tr.decision), "blocked")
-                self.assertFalse(da.is_closed(tr.decision))
-                self.assertEqual((tr.update.record["status"], tr.update.record["blocked_reason"], tr.update.answer),
-                                 ("blocked", reason, "Ship now"))
+                self.assertEqual((tr.decision.status, tr.decision.blocked_reason), ("answered", ""))
+                self.assertTrue(da.is_closed(tr.decision))
+                self.assertIsNone(tr.update)
 
-    def test_blocked_decision_clears_to_answered_when_action_can_run(self) -> None:
+    def test_an_answer_a_wait_blocked_settles_to_answered_whatever_the_action(self) -> None:
         blocked = answered(answer="Ship now", decided_by="user", status="blocked", blocked_reason="merge conflicts")
-        tr = da.meet_action(blocked, reconcile.Dispatch(KEY, "implement", "builder", 1))
-        self.assertEqual((tr.decision.status, tr.decision.blocked_reason), ("answered", ""))
-        self.assertTrue(da.is_closed(tr.decision))
-        self.assertEqual(tr.update.record["status"], "answered")
-        self.assertNotIn("blocked_reason", tr.update.record)
+        for action in (reconcile.Wait(KEY, "merge conflicts"), reconcile.Dispatch(KEY, "implement", "builder", 1)):
+            with self.subTest(action=action):
+                tr = da.meet_action(blocked, action)
+                self.assertEqual((tr.decision.status, tr.decision.blocked_reason), ("answered", ""))
+                self.assertEqual(tr.update.record["status"], "answered")
+                self.assertNotIn("blocked_reason", tr.update.record)
 
     def test_an_unchanged_state_appends_no_row(self) -> None:
         # Rows are append-only, so a pass that changes nothing must write nothing.
         self.assertIsNone(da.meet_action(answered(decided_by="user"), reconcile.Dispatch(KEY, "implement", "builder", 1)).update)
-        blocked = answered(decided_by="user", status="blocked", blocked_reason="merge conflicts")
-        self.assertIsNone(da.meet_action(blocked, reconcile.Wait(KEY, "merge conflicts")).update)
 
     def test_a_models_answer_is_not_marked_blocked(self) -> None:
         self.assertIsNone(da.meet_action(answered(decided_by="trio"), reconcile.Wait(KEY, "merge conflicts")).update)
@@ -226,19 +218,17 @@ class DecisionUpdateTest(unittest.TestCase):
         self.assertIsNone(da.block([make_decision(id=1)], 1, "offline"))
         self.assertIsNone(da.block([answered(id=1)], 1, "offline"))
 
-    def test_restore_held_restores_only_blocked_answers_when_no_decision_is_open(self) -> None:
+    def test_settle_waits_settles_every_wait_blocked_answer_and_keeps_a_blocked_intent(self) -> None:
+        # #1124: an open sibling no longer keeps a wait-blocked answer blocked; a spent intent stays blocked.
         blocked = answered(id=1, question="a", status="blocked", blocked_reason="merge is not ready")
         held = intent(2, "run", "blocked", blocked_reason="retry limit reached")
-        self.assertEqual([(u.question, u.record["status"]) for u in da.restore_held([blocked, held])], [("a", "answered")])
-        self.assertEqual(da.restore_held([blocked, make_decision(id=3, question="c")]), [])
-
-    def test_unblock_restores_only_the_decision_whose_latest_row_has_that_id(self) -> None:
-        blocked = [answered(id=n, question=f"q{n}", status="blocked", blocked_reason="wait") for n in (1, 2)]
-        update = da.unblock(blocked, 1)
-        self.assertEqual((update.question, update.record["status"]), ("q1", "answered"))
-        self.assertNotIn("blocked_reason", update.record)
-        self.assertIsNone(da.unblock(blocked, None))
-        self.assertIsNone(da.unblock([intent(1)], 1))
+        rows = [blocked, held, make_decision(id=3, question="c")]
+        updates = da.settle_waits(rows)
+        self.assertEqual([(u.question, u.record["status"]) for u in updates], [("a", "answered")])
+        self.assertNotIn("blocked_reason", updates[0].record)
+        for update in updates:
+            appended(rows, update)
+        self.assertEqual(da.settle_waits(rows), [])
 
 
 class CurrentIntentTest(unittest.TestCase):

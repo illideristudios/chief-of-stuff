@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +17,12 @@ import git_trees
 import git_view
 import process_status
 import readiness
+import session_logs
+import t3_adapter
+import worker_health
 from forge_port import ForgeError
 from orphans import Claim
-from reconcile import Facts
+from reconcile import Facts, latest_segment
 
 
 def _blockers(forge: Any) -> tuple[dict[str, tuple[str, ...]] | None, str]:
@@ -45,6 +48,12 @@ def _alive(record: dict | None) -> bool | None:
     if record is None:
         return None
     run_dir = record.get("run_dir")
+    if record.get("launcher") == "t3":
+        try:
+            evidence = t3_adapter.observe(record)
+            return True if evidence.alive is True and not evidence.error else None
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+            return None
     if isinstance(run_dir, str) and run_dir and (Path(run_dir) / "exit.json").exists():
         return None  # the adapter finished: `worker.collect` classifies its exit, not a liveness guess
     pid, session, identity = record.get("pid"), record.get("session_id"), record.get("identity")
@@ -94,19 +103,26 @@ def _progress(tree: Path, view: git_view.View) -> datetime | None | object:
     return when if when.utcoffset() is not None else object()
 
 
-def _changed(state: Any, tree: Path, starting_head: str | None) -> bool | None:
-    """Read-only changes belong to this run, not to the unmerged branch it checked out."""
-    if state is None or state.dirty is None:
-        return None
-    if state.dirty:
-        return True
-    if not isinstance(starting_head, str) or not starting_head:
-        return None
-    try:
-        code, head = git_trees.git(["rev-parse", "HEAD"], tree)
-    except (OSError, git_view.CacheError, subprocess.SubprocessError):
-        return None
-    return head != starting_head if code == 0 and head else None
+def _activity(record: dict | None, started: datetime, now: datetime, progress, account: str) -> datetime | None:
+    """Repository and transcript evidence for this attempt, bounded by its start and this pass."""
+    stamps = [progress] if isinstance(progress, datetime) else []
+    if record:
+        run_dir = record.get("run_dir")
+        for name in ("stdout", "stderr"):
+            try:
+                path = Path(run_dir) / name
+                if path.stat().st_size:
+                    stamps.append(datetime.fromtimestamp(path.stat().st_mtime, now.tzinfo))
+            except (OSError, TypeError):
+                pass
+        if record.get("runtime", "claude") == "claude" and record.get("tree") and record.get("session_id"):
+            try:
+                for path, _, event in session_logs.activity_events(account, Path(record["tree"])):
+                    if path.stem == record["session_id"]:
+                        stamps.append(datetime.fromisoformat(event["timestamp"]))
+            except (OSError, ValueError, TypeError, KeyError):
+                pass
+    return max((stamp for stamp in stamps if stamp.utcoffset() is not None and started <= stamp <= now), default=None)
 
 
 def _tree_facts(tree: Path) -> tuple[Any, bool | None, datetime | None | object]:
@@ -124,15 +140,6 @@ def _tree_facts(tree: Path) -> tuple[Any, bool | None, datetime | None | object]
         return None, None, object()
 
 
-def _in_trees(root: Path, trees: Path, path: str) -> bool:
-    if not Path(path).is_absolute():
-        return False  # file scopes remain scopes even when Worktrees: .
-    try:
-        return (root / path).resolve().is_relative_to(trees.resolve())
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-
 def _recorded_tree(raw: Any, root: Path, trees: Path) -> Path | None:
     try:
         tree = None
@@ -146,47 +153,79 @@ def _recorded_tree(raw: Any, root: Path, trees: Path) -> Path | None:
         return None
 
 
-def _starting_head(record: dict | None) -> str | None:
-    """Older records may still have a durable launch baseline or a pinned review head."""
-    if not record:
-        return None
-    head = record.get("starting_head") or record.get("reviewed_head")
-    if isinstance(head, str) and head.strip():
-        return head.strip()
-    run = record.get("run_dir")
-    if isinstance(run, str) and run and "\x00" not in run:
+def _implementation_requests(forge: Any, store: Any, observed: dict[str, bool | None]) -> tuple:
+    """Bind released work to the same open request review launch selects; unread evidence stays unknown."""
+    candidates = []
+    for item in store.items():
+        key = item.issue_key
+        data = store.resume(key)
+        data = data if isinstance(data, dict) else {}
+        if (item.forge_state != "open" or item.stage != "implement" or item.human_review
+                or observed.get(key) is not False or "suite_hold" in data):
+            continue
+        history = store.segments(key)
+        if any(s.ended_at is None for s in history):
+            continue
+        completed = [s for s in history if s.started_at and s.ended_at and s.stage != "architect"]
+        latest, ambiguous = latest_segment(completed)
+        if latest is None or ambiguous or latest.stage != "implement" or latest.outcome != "human_review":
+            continue
+        runs = data.get("runs", {})
+        run_name = f"implement-{latest.attempt}"
+        if not isinstance(runs, dict) or (run_name in runs and not isinstance(runs[run_name], dict)):
+            candidates.append(((key, latest.stage, latest.attempt), None))
+            continue
+        record = _record(store, key, latest.stage, latest.attempt)
+        branch = record.get("branch") if record else None
+        if branch is None or (isinstance(branch, str) and not branch.strip()):
+            # The shared branch belongs to the current attempt, never to an older segment with a later clock.
+            current_attempt = max(s.attempt for s in history if s.stage == "implement")
+            branch = data.get("work_branch") if latest.attempt == current_attempt else None
+        candidates.append(((key, latest.stage, latest.attempt), branch))
+    result = {identity: None for identity, _ in candidates}
+    if not any(isinstance(branch, str) and branch.strip() for _, branch in candidates):
+        return tuple(result.items())
+    try:
+        requests = forge.requests()
+        if not isinstance(requests, list) or any(
+                type(r.number) is not int or r.number < 1 or not isinstance(r.branch, str) or not r.branch.strip()
+                or not isinstance(r.closes, tuple) or any(not isinstance(ref, str) for ref in r.closes)
+                for r in requests):
+            return tuple(result.items())
+    except (ForgeError, OSError, ValueError, TypeError, AttributeError):
+        return tuple(result.items())
+    for identity, branch in candidates:
+        if not isinstance(branch, str) or not branch.strip():
+            continue
         try:
-            return (Path(run) / "starting_head").read_text(encoding="utf-8").strip() or None
-        except (OSError, UnicodeError, ValueError):
+            request = forge.closing_request(identity[0], requests)
+            result[identity] = request.branch == branch
+        except ForgeError as exc:
+            if str(exc) == f"no open request closes {identity[0]}":
+                result[identity] = False
+        except (OSError, ValueError, TypeError, AttributeError):
             pass
-    return None
+    return tuple(result.items())
 
 
 def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
-           require_green: bool = False) -> Facts:
+           require_green: bool = False, hold_observations: tuple[tuple[str, bool | None], ...] = (),
+           stall_after: timedelta = timedelta(minutes=3), account: str = "") -> Facts:
     """Read recorded worker trees directly; discovery is not evidence that a recorded tree is unreadable."""
     if now.utcoffset() is None:
         raise ValueError("timestamps must include a timezone")
-    claims: list[readiness.Claim] = []
     asks: list[readiness.Ask] = []
     reports: list[readiness.Report] = []
-    read_only: list[str] = []
     for item in store.items():
-        # worker.launch also records the worktree path here; that is a tree claim, not a file scope.
-        rows = [row for row in store.ownership(item.issue_key)
-                if row.mode != "tree" and not _in_trees(root, trees, row.path)]
-        claims.extend(readiness.Claim(item.issue_key, row.path, row.mode) for row in rows)
-        if rows and all(row.mode == "read" for row in rows):
-            read_only.append(item.issue_key)
         asks.extend(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt) for row in store.asks(item.issue_key))
     alive: list[tuple[tuple[str, str, int], bool]] = []
-    changed: list[tuple[str, bool | None]] = []
     unreadable: list[str] = []
     on_main: list[tuple[str, bool | None]] = []
     tree_rows: list[tuple[str, Any]] = []
     names: list[tuple[str, str]] = []
     tree_claims: list[tuple[str, tuple]] = []
     progress: list[tuple[str, datetime | None]] = []
+    activity = []
     suite_on_main: list[tuple[str, bool | None]] = []
     recorded_trees: dict[str, Path] = {}
     pipeline = None
@@ -201,6 +240,10 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     for segment in latest.values():
         record = _record(store, segment.issue_key, segment.stage, segment.attempt)
         flag = _alive(record) if segment.ended_at is None else False
+        evidence = None
+        if segment.ended_at is None and record and record.get("launcher") == "t3":
+            evidence = t3_adapter.observe(record)
+            flag = evidence.alive
         if flag is not None:
             alive.append(((segment.issue_key, segment.stage, segment.attempt), flag))
         raw = record.get("tree") if record else None
@@ -214,14 +257,24 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
             names.append((segment.issue_key, tree.name))
             tree_claims.append((segment.issue_key, (Claim(segment.issue_key, flag is not False,
                                                          "" if flag is not False else "has no process"),)))
-        changes = None if state is None or state.dirty is None else bool(state.dirty)
-        if segment.issue_key in read_only:
-            changes = _changed(state, tree, _starting_head(record))
-        changed.append((segment.issue_key, changes))
         if landed is not None:
             on_main.append((segment.issue_key, landed))
         # Unknown progress is no evidence of progress; the bounded silence rule must still run.
         progress.append((segment.issue_key, stamp if isinstance(stamp, datetime) else None))
+        if segment.ended_at is None:
+            started = datetime.fromisoformat(segment.started_at)
+            if evidence is None:
+                evidence = worker_health.Evidence(alive=flag,
+                    last_activity_at=_activity(record, started, now, stamp, account))
+            pending = [ask for ask in store.asks(segment.issue_key)
+                       if not ask.answer and (ask.stage, ask.attempt) == (segment.stage, segment.attempt)]
+            data = store.resume(segment.issue_key) or {}
+            observed = data.get("worker_health", {})
+            same = observed.get("run") == f"{segment.stage}-{segment.attempt}"
+            since = observed.get("pending_since") if same else None
+            evidence = replace(evidence, pending_requests=max(evidence.pending_requests, len(pending)),
+                pending_since=datetime.fromisoformat(since) if since else now)
+            activity.append((segment.issue_key, evidence))
         suite = None
         if state is not None and pipeline is not None and isinstance(pipeline.sha, str) and pipeline.sha:
             code = git_trees.git(["merge-base", "--is-ancestor", "HEAD", pipeline.sha], tree)[0]
@@ -272,10 +325,15 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
             suites.append(((rows[-1].issue_key, rows[-1].stage, rows[-1].attempt),
                            (dispatch_prompt.suite_counts(raw), rows[-1].summary or "")))
     blockers, why = _blockers(forge)
-    return Facts(claims=tuple(claims), blockers=None if blockers is None else tuple(blockers.items()), blockers_error=why,
-                 asks=tuple(asks), reports=tuple(reports), alive=tuple(alive), read_only=tuple(read_only),
-                 changed=tuple(changed), unreadable=tuple(unreadable), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
+    return Facts(blockers=None if blockers is None else tuple(blockers.items()), blockers_error=why,
+                 asks=tuple(asks), reports=tuple(reports), alive=tuple(alive),
+                 unreadable=tuple(unreadable), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
                  landing_heads=tuple(landing_heads.items()), landed_trees=tuple(landed_trees),
                  trees=tuple(tree_rows), tree_names=tuple(names),
+                 activity=tuple(activity),
                  tree_claims=tuple(tree_claims), progress=tuple(progress), landing_errors=tuple(landing_errors.items()),
-                 suites=tuple(suites), require_green=require_green)
+                 suites=tuple(suites), require_green=require_green, stall_after=stall_after,
+                 hold_observations=hold_observations,
+                 implementation_requests=_implementation_requests(forge, store, dict(hold_observations)),
+                 suite_holds=tuple(item.issue_key for item in store.items()
+                                   if isinstance(data := store.resume(item.issue_key), dict) and "suite_hold" in data))

@@ -64,20 +64,31 @@ class Render(unittest.TestCase):
         self.assertIn('<section class="columns-col columns-gate"', html)
         self.assertIn('<span class="columns-note">gate</span>', html)
 
-    def test_overflow_folds_past_the_limit_and_tallies_what_it_hides(self) -> None:
-        cards = (C("a", "running"), C("b", "running"), C("c", "open"), C("d", "open"), C("e", "done"))
-        html = columns.render([columns.Column("implement", cards)], limit=2)
-        shown, more = html.split('<details class="columns-more">')
-        self.assertEqual(shown.count('class="columns-card"'), 2)
-        self.assertIn("<summary>+ <span>2 open</span><span>1 done</span></summary>", more)
-        self.assertEqual(more.count('class="columns-card"'), 3, "the folded cards are one click away, not dropped")
-        self.assertNotIn("columns-more", columns.render([columns.Column("implement", cards)], limit=5))
+    def test_a_column_draws_every_card_and_its_count_equals_the_cards_drawn(self) -> None:
+        # #216, still open as #938: a column draws every card, its count equals the cards drawn, and there is no fold.
+        kinds = ("waiting", "open", "running", "done")
+        drawn = {"implement": 244, "plan": 32}
+        cols = [columns.Column(name, tuple(C(f"{name} {i}", kinds[i % len(kinds)]) for i in range(n)))
+                for name, n in drawn.items()]
+        html = columns.render(cols)
+        self.assertEqual(html.count('class="columns-card"'), sum(drawn.values()))
+        self.assertNotIn("columns-more", html)
+        self.assertNotIn("<details", html)
+        for name, n in drawn.items():
+            body = re.search(rf'<section class="columns-col" aria-label="{name}, (\d+)">(.*?)</section>', html, re.S)
+            self.assertIsNotNone(body, name)
+            self.assertEqual(int(body.group(1)), n)
+            self.assertEqual(body.group(2).count('class="columns-card"'), n)
+            self.assertIn(f'<span class="columns-count">{n}</span>', body.group(2))
 
-    def test_render_takes_the_columns_and_a_limit_and_draws_no_footer_strip(self) -> None:
-        # #350: NO LANE is gone from the user's model, so `render(cols, limit=LIMIT)` has no `footer` parameter
+    def test_render_takes_the_columns_and_draws_no_footer_strip(self) -> None:
+        # #350: NO LANE is gone from the user's model, so `render(cols)` has no `footer` parameter
         # and no `columns-foot` markup (a column count and card count are all its `<figure>` carries).
+        # #938: `limit` is gone with the fold; a caller cannot ask to hide cards.
         with self.assertRaises(TypeError):
             columns.render([col("implement", 1)], footer="x")
+        with self.assertRaises(TypeError):
+            columns.render([col("implement", 1)], limit=2)
         self.assertNotIn("columns-foot", columns.render([col("implement", 1)]))
 
     def test_text_is_escaped(self) -> None:
@@ -102,6 +113,9 @@ class Css(unittest.TestCase):
         with self.assertRaises(ValueError):
             columns.css({"x": ("red;}body{display:none", "#000", "0")})
         self.assertNotIn("</style>", columns.css({'a"</style>': ("#000", "#fff", "0")}))
+
+    def test_the_sheet_has_no_overflow_fold(self) -> None:
+        self.assertNotIn("columns-more", columns.css())
 
 
 TRACKER = """# Tracker

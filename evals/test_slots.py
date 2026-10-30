@@ -147,6 +147,19 @@ class ClaimTest(unittest.TestCase):
         got = self.db.segments(KEY)[0]
         self.assertEqual((got.model, got.effort), ("sonnet", "medium"))
 
+    def test_unknown_reservation_gets_the_successful_launch_identity(self) -> None:
+        for attempt, used, expected in ((1, ("opus", "high"), ("claude", "opus", "high")),
+                                        (2, ("composer-2.5", "", "cursor"), ("cursor", "composer-2.5", ""))):
+            def launch():
+                reserved = self.db.segments(KEY)[-1]
+                self.assertEqual((reserved.runtime, reserved.model, reserved.effort), ("", "", ""))
+                return used
+
+            slots.claim(self.trees, self.db, issue_key=KEY, stage="plan", attempt=attempt,
+                        max_concurrency=None, launch=launch, clock=lambda: PINNED)
+            got = self.db.segments(KEY)[-1]
+            self.assertEqual((got.runtime, got.model, got.effort), expected)
+
     def test_claim_records_passed_model_effort_when_launch_returns_none(self) -> None:
         slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
                     max_concurrency=1, launch=lambda: None, clock=lambda: PINNED,

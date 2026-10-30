@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 KIND = re.compile(r"[a-z][a-z0-9-]*")
 COLOUR = re.compile(r"[#\w(),.%/ -]+")  # a colour, var() or border shorthand; nothing that ends a declaration or a rule
@@ -17,10 +19,46 @@ def esc(text: str) -> str:
     return html.escape(text, quote=True)
 
 
+def external_url(url: str) -> str:
+    """`url` stripped when it is a clean http(s) URL with a host, else `""`."""
+    clean = (url or "").strip()
+    if not clean or any(ord(c) <= 32 or ord(c) == 127 for c in clean):
+        return ""
+    try:
+        parts = urlsplit(clean)
+    except ValueError:
+        return ""
+    return clean if parts.scheme.lower() in ("http", "https") and bool(parts.netloc) else ""
+
+
 def href(url: str) -> str:
     """`href="url"`, opening in a new tab when `url` is external (http/https); in-app routes stay in the tab."""
-    blank = ' target="_blank" rel="noopener"' if url.lower().startswith(("http://", "https://")) else ""
-    return f'href="{esc(url)}"{blank}'
+    if ext := external_url(url):
+        return f'href="{esc(ext)}" target="_blank" rel="noopener"'
+    try:
+        scheme = urlsplit((url or "").strip()).scheme.lower()
+    except ValueError:
+        return 'href="#"'
+    safe = "#" if scheme in ("javascript", "data", "vbscript") else url
+    return f'href="{esc(safe)}"'
+
+
+def latest_thread_link(runs: dict) -> str:
+    """The latest recorded T3 attempt, independent of the JSON object's key order."""
+    candidates = []
+    for index, record in enumerate(runs.values() if isinstance(runs, dict) else ()):
+        if not isinstance(record, dict):
+            continue
+        link = record.get("thread_link", "")
+        if not isinstance(link, str) or not re.fullmatch(r't3code://threads/[^/\s?#"<>]+/[^/\s?#"<>]+', link):
+            continue
+        try:
+            started = datetime.fromisoformat(record.get("started_at", ""))
+            stamp = started.timestamp() if started.tzinfo else float("-inf")
+        except (TypeError, ValueError, OverflowError, OSError):
+            stamp = float("-inf")
+        candidates.append((stamp, index, link))
+    return max(candidates)[2] if candidates else ""
 
 
 def kind(name: str) -> str:
@@ -42,9 +80,12 @@ def colour(value: str) -> str:
     return value
 
 
+# The id of the PENDING block on /decisions (decision_page.index); the Decisions tab and the NEEDS INPUT tile link to it (#1122).
+DECISIONS_ANCHOR = "pending-decisions"
+DECISIONS_ROUTE = f"/decisions#{DECISIONS_ANCHOR}"
 # The Board sections nav (Flow.dc.html) atop every page: (name, route); a tab with no page yet has no route.
 TABS = (("Board", "/"), ("Workers", "/workers"), ("Dispatch", ""), ("Since you last looked", ""), ("Epics", ""),
-        ("Decisions", "/decisions"), ("Limits", ""))
+        ("Decisions", DECISIONS_ROUTE), ("Limits", ""))
 # On the pages' tokens (--fg, --muted, --line, --link); wraps at phone width rather than widening the page.
 # The pages' type: Alegreya Sans for text, Cormorant SC for heads.
 FONTS = "https://fonts.googleapis.com/css2?family=Alegreya+Sans:wght@400;500;600&family=Cormorant+SC:wght@600&display=swap"
@@ -60,6 +101,8 @@ nav.tabs>[data-tone=ready] .badge{color:var(--stage-review)}
 nav.tabs>[data-tone=pending] .badge{color:var(--brass)}
 nav.tabs>[data-tone=risk] .badge{color:var(--stage-triage)}
 nav.tabs .badge{font:700 11.5px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0;color:var(--link,var(--brass))}
+nav.tabs>span[title]{opacity:.55;cursor:default}
+nav.tabs>span[title] .badge{color:var(--muted)}
 """
 
 
@@ -99,8 +142,8 @@ def tab_bar(tab: str, pending: int, parent: bool = False, since: tuple[int, str]
     for name, url in TABS:
         text, title, tone = badges.get(name, ("", "", ""))
         badge = f'<span class="badge" title="{esc(title)}">{esc(text)}</span>' if text else ""
-        attrs = (mark if name == tab else "") + (f' data-tone="{tone}"' if text else "")
-        out.append(f"<a {href(url)}{attrs}>{name}{badge}</a>" if url else f"<span{attrs}>{name}{badge}</span>")
+        attrs = (mark if name == tab else "") + (f' data-tone="{tone}"' if text and url else "")
+        out.append(f"<a {href(url)}{attrs}>{name}{badge}</a>" if url else f'<span{attrs} title="not available yet">{name}{badge}</span>')
     return '<nav class="tabs" aria-label="Board sections">' + "".join(out) + "</nav>\n"
 
 

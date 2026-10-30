@@ -94,6 +94,10 @@ class MarkdownTest(unittest.TestCase):
             self.assertNotIn('href="javascript:', html)
             self.assertIn('&lt;script&gt;', html)
 
+    def test_a_bare_html_comment_stays_escaped_in_markdown_blocks(self):
+        html = page_common.markdown_blocks('<!-- codex-code-review-finding:v1 -->')
+        self.assertIn('&lt;!--', html)
+
     def test_forge_references_do_not_rewrite_links_or_fences(self):
         html = dp._md('**#12** and `src/app.py:3` [#12](https://example.com/#12) <https://example.com/#12>', dp.Linker(GH))
         self.assertEqual(html.count('class="ref"'), 2)
@@ -263,8 +267,14 @@ class MarkdownTest(unittest.TestCase):
         from test_issue_page import TODAY, today_tracker
         import issue_page
         cfg = parse_coordinator(CONFIG.format(board='- Backlog: GitHub; repo o/app'), today=TODAY)
-        html = issue_page.render(109, [(TODAY, today_tracker())], sources(MR, issue=replace(ISSUE, body='See #12.')), NOW, cfg=cfg)
+        issue = replace(ISSUE, url='https://github.com/o/app/issues/109', body='See #12.')
+        src = replace(sources(MR, issue=issue), home=bs.backlog.GitHubBacklog('o/app'))
+        html = issue_page.render(109, [(TODAY, today_tracker())], src, NOW, cfg=cfg)
         self.assertIn('href="https://github.com/o/app/issues/12"', html)
+
+        cfg = parse_coordinator(CONFIG.format(board='- Backlog: GitLab; host https://forge.example; project grp/app'), today=TODAY)
+        html = issue_page.render(109, [(TODAY, today_tracker())], sources(MR, issue=replace(ISSUE, body='See #12.')), NOW, cfg=cfg)
+        self.assertIn('href="https://forge.example/grp/app/-/issues/12"', html)
 
     def test_cards_and_panel_prose_use_inline_markdown(self):
         html = columns.render([columns.Column('**label**', (columns.Card('**Title** *detail* `code`', 'open', owner='**owner**', state='**state**'),))], inline=page_common.markdown_inline)
@@ -288,9 +298,9 @@ class MarkdownTest(unittest.TestCase):
                 dom = Structure(html)
                 name, = dom.by_class('columns-card-name')
                 self.assertEqual(name['tag'], 'a')
-                self.assertEqual(name['attrs'].get('href'), '/issues/12')
+                self.assertEqual(name['attrs'].get('href'), '/issues/github%3Ao%2Fapp%2312')
                 self.assertIn('<b>Write</b> <em>README</em>', html)
-                self.assertIn('<div class="columns-refs"><a href="/issues/12"', html)
+                self.assertIn('<div class="columns-refs"><a href="/issues/github%3Ao%2Fapp%2312"', html)
                 self.assertFalse(dom.nested_links)
 
     def test_merged_card_names_keep_the_change_link(self):
@@ -298,11 +308,12 @@ class MarkdownTest(unittest.TestCase):
         from workspace import parse_coordinator
         from test_render_board import CLAUDE_MD
         merged = replace(MR, title='**Merged** change (#12)', state='merged', merged_at=NOW)
-        html = render_board.render('', parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
-                                   sources=sources(merged))
+        src = sources(merged)
+        cfg = replace(parse_coordinator(CLAUDE_MD, today=NOW.date()), backlog=src.home)
+        html = render_board.render('', cfg, NOW, sources=src)
         name, = Structure(html).by_class('columns-card-name')
         self.assertEqual(name['tag'], 'a')
-        self.assertEqual(name['attrs'].get('href'), '/issues/109')
+        self.assertEqual(name['attrs'].get('href'), '/issues/gitlab%3Aforge.example%2Fgrp%2Fapp%23109')
 
     def test_board_card_without_navigation_keeps_its_markdown_link(self):
         import render_board

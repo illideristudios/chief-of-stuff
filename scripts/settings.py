@@ -88,8 +88,16 @@ class Workflow:
     architecture_reviewer: str | None = None
     reviewer_session: str | None = None
     delivery: str = "pull-request"
-    merge_owner: str = "user"
+    merge_owner: str = "coordinator"
     approver: str | None = None
+
+
+@dataclass(frozen=True)
+class Stall:
+    """Silence threshold and opt-in, bounded local-process recovery."""
+    after_minutes: int = 3
+    action: str = "wait"
+    max_restarts: int = 2
 
 
 @dataclass(frozen=True)
@@ -101,10 +109,13 @@ class Workers:
     max_concurrency: int | None = None
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
+    worker_launcher: str = "cli"  # how an engine worker starts (§13, #1178): a local CLI process, or a T3 thread
     require_green_tests: bool = False  # one-shot and engine done require known counts with passed > 0 and no failures, skips or xfails
     rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
     teardown: str = ""  # engine-only cleanup command; one-shot launchers do not run it
     teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
+    stall: Stall = field(default_factory=Stall)
+    failure_limit: int = 2
 
 
 @dataclass(frozen=True)
@@ -210,7 +221,7 @@ class Settings:
     pages: Pages = field(default_factory=Pages)
     # #111: task class -> rotation; the first entry is the suggested model, the rest the fallback order.
     models: dict[str, tuple[ModelEntry, ...]] = field(default_factory=dict)
-    # #877: task class -> "first" or "random", how a fresh start chooses among the launchable entries.
+    # Task class -> strategy for a fresh launch; retries follow the previous entry regardless of strategy.
     model_picks: dict[str, str] = field(default_factory=dict)
     graph: Graph | None = None
     # #54: repository name -> path (relative to the workspace root) that `chief-of-stuff worktree --clone <name>` cuts from.
@@ -265,14 +276,17 @@ def _entry(where: str, text) -> ModelEntry:
     return ModelEntry(runtime, model, effort)
 
 
-PICKS = ("first", "random")  # #877: how a fresh start chooses among a class's launchable entries
+PICKS = ("first", "random", "round_robin")
 
 
 def _picks(table) -> dict[str, str]:
-    """Each class's `pick`, "first" when absent; Zach, 2026-10-18: "can we make it so they randomly select"."""
+    """The owner's worker strategy defaults to round robin; the trio retains its independent draw."""
     picks = {}
     for name, t in table.items():
-        value = t.get("pick", "first") if isinstance(t, dict) else "first"
+        default = "first" if name == "trio" else "round_robin"
+        value = t.get("pick", default) if isinstance(t, dict) else default
+        if name == "trio" and value == "round_robin":
+            raise SettingsError("[models.trio]: pick must be first or random; round_robin is a worker strategy")
         if value not in PICKS:
             raise SettingsError(f"[models.{name}]: pick must be one of {', '.join(PICKS)}")
         picks[name] = value
@@ -313,9 +327,30 @@ def pick(rotation: tuple[ModelEntry, ...], after: str | None = None, not_family:
                         (f" outside {not_family}" if not_family else ""))
 
 
+def _stall(table) -> Stall:
+    if not isinstance(table, dict):
+        raise SettingsError("[workers.stall] must be a table")
+    extra = set(table) - {"after_minutes", "action", "max_restarts"}
+    if extra:
+        raise SettingsError(f"[workers.stall] unknown keys: {', '.join(sorted(extra))}")
+    minutes = table.get("after_minutes", Stall.after_minutes)
+    if type(minutes) is not int or not 1 <= minutes <= 999999999:
+        raise SettingsError("[workers.stall] after_minutes must be a positive whole number no greater than 999999999")
+    count = table.get("max_restarts", 2)
+    if type(count) is not int or count < 0:
+        raise SettingsError("[workers.stall] max_restarts must be a non-negative whole number")
+    action = table.get("action", "wait")
+    if action not in ("wait", "restart"):
+        raise SettingsError('[workers.stall] action must be "wait" or "restart"')
+    return Stall(minutes, action, count)
+
+
 def _workers(table) -> Workers:
     if not isinstance(table, dict):
         raise SettingsError("[workers] must be a table")
+    failure_limit = table.get("failure_limit", Workers.failure_limit)
+    if type(failure_limit) is not int or failure_limit < 1:
+        raise SettingsError("[workers] failure_limit must be a positive whole number")
     launcher = table.get("launcher", "ghostty")
     if launcher not in ("ghostty", "tmux", "herdr"):
         raise SettingsError("[workers] launcher must be `ghostty`, `tmux` or `herdr`")
@@ -337,6 +372,9 @@ def _workers(table) -> Workers:
     if "claude_as_profile" in table and not (isinstance(profile, str) and CLAUDE_AS_PROFILE.fullmatch(profile)):
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
+    worker_launcher = table.get("worker_launcher", "cli")
+    if worker_launcher not in ("cli", "t3"):
+        raise SettingsError("[workers] worker_launcher must be `cli` or `t3`")
     rules = table.get("rules", [])
     # Reject controls, invisible formatting (including bidi), and separators that can conceal instructions.
     if not isinstance(rules, list) or not all(
@@ -357,7 +395,8 @@ def _workers(table) -> Workers:
             raise SettingsError(f"[workers] {key} must be a nonempty, single-line command without control characters")
         commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules), **commands)
+                   claude_as_profile=profile, worker_launcher=worker_launcher, require_green_tests=green, rules=tuple(rules),
+                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit, **commands)
 
 
 def _repos(table) -> dict[str, str]:
@@ -411,16 +450,14 @@ def _workflow(table) -> Workflow:
     delivery = table.get("delivery", "pull-request")
     if delivery not in ("pull-request", "branch"):
         raise SettingsError("[workflow] delivery must be `pull-request` or `branch`")
-    merge_owner = table.get("merge_owner", "user")
-    if merge_owner not in ("user", "worker", "approval"):
-        raise SettingsError("[workflow] merge_owner must be `user`, `worker` or `approval`")
-    if delivery == "branch" and merge_owner != "user":
-        raise SettingsError(f"[workflow] merge_owner={merge_owner} requires delivery=pull-request")
-    # #97: the forge username whose approval the coordinator merges on; nobody else's counts.
-    approver = table.get("approver")
-    if merge_owner == "approval" and (not isinstance(approver, str) or not approver.strip()):
-        raise SettingsError("[workflow] merge_owner=approval needs approver, the user's forge username")
-    return Workflow(**names, delivery=delivery, merge_owner=merge_owner, approver=approver)
+    # Accept old settings without retaining their owner wait. The engine owns every merge.
+    merge_owner = table.get("merge_owner", "coordinator")
+    if merge_owner not in ("user", "worker", "approval", "coordinator"):
+        raise SettingsError("[workflow] merge_owner must be `coordinator` (legacy values are accepted)")
+    approver = table.get("approver")  # optional review-thread filter, never merge authority
+    if approver is not None and (not isinstance(approver, str) or not approver.strip()):
+        raise SettingsError("[workflow] approver must be a non-empty forge username")
+    return Workflow(**names, delivery=delivery, merge_owner="coordinator", approver=approver)
 
 
 def _lane(name: str, table) -> Lane:
@@ -433,7 +470,7 @@ def _lane(name: str, table) -> Lane:
         raise SettingsError(f"[lanes] {name}: a stage appears twice")
     if not isinstance(gates, list) or not all(isinstance(g, str) for g in gates) or not set(gates) <= set(stages):
         raise SettingsError(f"[lanes] {name}: gates must be stages of the lane")
-    return Lane(tuple(stages), tuple(gates))
+    return Lane(tuple(stages))
 
 
 def _github_project(table, stages: list[str], terminal: list[str]) -> GitHubProject:
@@ -505,7 +542,7 @@ def _kanban(table) -> Kanban:
         project = _github_project(table["github_project"], stages, terminal)
     elif "project" in table:
         project = _github_project(_project_ref(table["project"]), stages, terminal)
-    return Kanban(tuple(stages), human, mapping, tuple(holds), tuple(terminal), project)
+    return Kanban(tuple(stages), human, mapping, (), tuple(terminal), project)
 
 
 def _notify(table: dict, root: Path) -> Notify:
