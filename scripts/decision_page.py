@@ -35,11 +35,13 @@ copy under `--root` when there is one. With no forge, or a reference it cannot p
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import stat
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from html import escape
@@ -49,7 +51,7 @@ import board_sources
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
 from clock import leading
 from decision_actions import DecisionState, OPEN_STATES, addresses, state_of, states, tab_counts as store_tab_counts
-from fragment import FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
+from fragment import DECISIONS_ANCHOR, FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
 from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
 from module_graph import section as _graph
@@ -65,6 +67,19 @@ NODE = {"deployed": "n", "inflight": "n-inflight", "designed": "n-designed", "ex
 EDGE = {"deployed": "e", "inflight": "e-inflight", "designed": "e-designed"}
 CHIPS = (("deployed", "DEPLOYED"), ("inflight", "IN FLIGHT"), ("designed", "DESIGNED"), ("hot", "WAITING ON THIS"),
          ("external", "EXTERNAL"))
+
+
+@contextmanager
+def page_render_lock(root: Path, *, shared: bool = False):
+    """Coordinate CLI publication with server reads across processes."""
+    path = root.resolve() / ".chief-of-stuff" / "pages-render.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def write_if_changed(path: Path, text: str) -> None:
@@ -339,9 +354,11 @@ def _answer_form(slug: str, cls: str, opts: str, back: str = "") -> str:
 
 
 def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root: Path | None = None,
-           ctx: Context | None = None, slug: str = "", mtime: float | None = None, pending: int = 0) -> str:
+           ctx: Context | None = None, slug: str = "", mtime: float | None = None, pending: int = 0,
+           refusal: str = "", draft: str = "", selected: str = "", back: str = "",
+           navigation: dict | None = None) -> str:
     """The page. With a context, what the JSON leaves out is read from it: when it was asked, the answer and the
-    chip, and each reference's status."""
+    chip, and each reference's status. `navigation` is the shared tab lead counts (#965)."""
     link = Linker(forge, root)
 
     def md(text: str) -> str:
@@ -365,18 +382,19 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     opts = []
     for o in d["options"]:
         tag = '<span class="tag">recommended</span>' if o["key"] == d["recommended"] else ""
-        on = " checked" if page and page.get("key") == o["key"] else ""
+        on = " checked" if (selected == o["key"] if refusal else page and page.get("key") == o["key"]) else ""
         opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value="{escape(o["key"])}"{on}> {escape(o["key"])}</span>'
                     f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </label>')
     # The write-in is the next option: same look, key "" (a words-only save), the next letter after the real ones.
     wi_key = chr(ord("A") + len(d["options"]))
-    on = " checked" if page and page.get("key") == "" else ""
+    on = " checked" if (not selected if refusal else page and page.get("key") == "") else ""
+    draft_value = f' value="{escape(draft)}"' if refusal else ""
     opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value=""{on}> {wi_key}</span>'
-                f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer">'
+                f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer"{draft_value}>'
                 f'<button type="submit">save</button></span>\n      </label>')
     fmt = (lambda t: ctx.when(t)) if ctx else (lambda t: f"{t:%H:%M}")
     done = f'    <div class="card answered">{_saved_html(d, fmt)}</div>\n' if page else ""
-    right.append(_section("Options", done + "    " + _answer_form(slug, "options", "\n" + "\n".join(opts)) + "\n    </form>"))
+    right.append(_section("Options", done + "    " + _answer_form(slug, "options", "\n" + "\n".join(opts), back) + "\n    </form>"))
     right.append(_section("Recommendation", f'    <div class="card prose">{markdown_blocks(d["why"], link.resolve)}</div>'))
     right.append(_section("If you don't answer", f'    <div class="card default prose">{markdown_blocks(d["default"], link.resolve)}</div>'))
     if d.get("references"):
@@ -411,9 +429,10 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     change = next((c for r in d.get("references") or [] for ref in refs_in(str(r.get("value", "")))
                    if ctx and (c := ctx.change(ref))), None)
     where += _graph(change, ctx and ctx.graph, ctx and ctx.pages, root)
+    alert = f'<div class="card ask" role="alert">{escape(refusal)}</div>' if refusal else ""
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True)}"
+            f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True, **(navigation or {}))}{alert}"
             f'  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(d['headline'])}</h1>\n    </div>\n"
             f'    <span class="chip{" answered" if answered else ""}">{chip}</span>\n  </header>\n\n'
@@ -455,7 +474,8 @@ def decision_context(root: Path, day: date, now: datetime | None = None) -> Cont
         settings = None
     kanban = settings and settings.kanban
     pages = root / cfg.pages_dir if cfg.pages_dir else tracker.parent
-    return Context(now, tuple(rows), tuple(sorted(log, key=lambda x: x[0])), tasks, board_sources.load(pages),
+    return Context(now, tuple(rows), tuple(sorted(log, key=lambda x: x[0])), tasks,
+                   board_sources.for_home(board_sources.load(pages), cfg.backlog),
                    kanban.human_review_label if kanban else "", cfg.user, cfg.backlog,
                    settings and settings.graph, pages)
 
@@ -487,7 +507,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"decision: no page — {e}", file=sys.stderr)
         return 1
     try:
-        write(Path(args.root), pages_dir, args.name, args.date, Path(args.source) if args.source else None)
+        with page_render_lock(Path(args.root)):
+            write(Path(args.root), pages_dir, args.name, args.date, Path(args.source) if args.source else None)
     except (OSError, json.JSONDecodeError, DecisionError, KeyError, TypeError, AttributeError) as e:
         print(f"decision: {e}", file=sys.stderr)
         return 2
@@ -495,12 +516,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def write(root: Path, pages_dir: Path, name: str, day: str, source: Path | None = None) -> Path:
+def write(root: Path, pages_dir: Path, name: str, day: str, source: Path | None = None,
+          navigation: dict | None = None) -> Path:
     """Render `decision-<name>.json` (or `source`) to `decision-<name>.html`; the page server calls this in process."""
     source = source or pages_dir / f"decision-{name}.json"
     ctx = context(root, day)
     page = render(parse(json.loads(source.read_text())), day, forge(root), root, ctx, name, source.stat().st_mtime,
-                  pending_count(pages_dir, ctx))
+                  pending_count(pages_dir, ctx), navigation=navigation)
     pages_dir.mkdir(parents=True, exist_ok=True)
     out = pages_dir / f"decision-{name}.html"
     write_if_changed(out, page)
@@ -669,6 +691,15 @@ def _plural(n: int, word: str) -> str:
 def pending_count(pages_dir: Path, ctx: Context | None) -> int:
     """The readable decisions no row has answered, as decisions.html counts PENDING; 0 without a context."""
     return sum(d is not None for _, d, _, _ in entries(pages_dir, ctx)) if ctx else 0
+
+
+def store_navigation(db: PageData, pending: list, navigation: dict | None = None) -> dict:
+    """Store lead counts with the readable authored decisions included exactly once."""
+    counts = store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
+    nav = dict(navigation) if navigation is not None else counts
+    store_count = counts["decisions"]
+    nav["decisions"] = store_count + sum(d is not None for _, d, _, _ in pending)
+    return nav
 
 
 def held_refs(pending: list[tuple[str, dict | None, datetime | None, str]], ctx: Context) -> dict[str, datetime | None]:
@@ -936,13 +967,13 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
     meta.append('<a href="/">board</a>')
     words = f"{escape(ctx.user)}'s words" if ctx.user else "words"
     none = '      <div class="row"><span class="none">none</span></div>'
-    body = (f'  <section>\n    <h2 class="pend">PENDING · {total_pending}</h2>\n    <div class="list">\n'
+    body = (f'  <section aria-labelledby="{DECISIONS_ANCHOR}">\n    <h2 id="{DECISIONS_ANCHOR}" class="pend">PENDING · {total_pending}</h2>\n    <div class="list">\n'
             '      <div class="row pend head cap"><span>asked</span><span>decision</span><span>options</span><span>holding</span><span>if unanswered</span></div>\n'
             + ("\n".join(rows) or none) + "\n    </div>\n  </section>\n"
             f'  <section>\n    <h2>COMPLETED · {len(done)}</h2>\n    <div class="list fin">\n'
             f'      <div class="row done head cap"><span>answered</span><span>decision</span><span>answer</span><span>{words}</span><span>since</span></div>\n'
             + ("\n".join(done) or none) + "\n    </div>\n  </section>\n")
-    nav = navigation if navigation is not None else (store_tab_counts(db.items(), db.decisions(), db.segments()) if db is not None else {})
+    nav = (store_navigation(db, pending, navigation) if db is not None else (navigation or {}))
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             f"<title>Decisions · {escape(_day(day))}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decisions\">\n{tab_bar('Decisions', total_pending, **nav)}"
@@ -956,10 +987,12 @@ def write_all(pages_dir: Path, ctx: Context, day: str, root: Path | None = None,
     """Re-render every readable decision's page from its JSON and the context, and `decisions.html`; the pending entries."""
     pending = entries(pages_dir, ctx)
     count = sum(d is not None for _, d, _, _ in pending)
+    if db is not None:
+        navigation = store_navigation(db, pending, navigation)
     for source in pages_dir.glob("decision-*.json"):
         try:
             page = render(parse(json.loads(source.read_text())), day, ctx.forge, root, ctx, source.stem.removeprefix("decision-"),
-                          source.stat().st_mtime, count)
+                          source.stat().st_mtime, count, navigation=navigation)
         except BAD:
             continue
         write_if_changed(source.with_suffix(".html"), page)

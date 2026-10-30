@@ -168,7 +168,7 @@ def claims(root: Path, trees: Path, tree: Path) -> list[str]:
 
 
 def owned_items(root: Path, db: Store) -> list[tuple[Path, WorkItem]]:
-    return [((root / row.path).resolve(), item) for item in db.items() for row in db.ownership(item.issue_key)]
+    return [((root / row.path).resolve(), item) for item in db.items() for row in db.trees(item.issue_key)]
 
 
 def owner_guards(tree: Path, owned: list[tuple[Path, WorkItem]],
@@ -254,7 +254,7 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
                         kept += owners_kept
                     except SQLAlchemyError as exc:
                         failed = True
-                        kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
+                        kept.append(f"store trees cannot be checked ({type(exc).__name__})")
                     if not kept:
                         removal_started = True
                         shutil.rmtree(tree)

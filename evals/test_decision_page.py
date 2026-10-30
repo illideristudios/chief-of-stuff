@@ -995,7 +995,8 @@ class ModuleGraphTest(unittest.TestCase):
         (self.root / "cos.toml").write_text(graph)
         change = bs.Change(key, self.url, "Warm pool", "open", False, "passed", False, 0, None, "main", ("agent/b.py",), (),
                            head=self.head)
-        bs._write(self.pages / bs.CACHE, bs.Sources({}, {}, {key: change}, (), {}))
+        home = Backlog("https://gl.example.test", "grp/app") if gitlab else GitHubBacklog("o/app")
+        bs._write(self.pages / bs.CACHE, bs.Sources({}, {}, {key: change}, (), {}, home))
         if references is None:
             references = [{"kind": kind, "value": key[0] + "57"}, {"kind": kind, "value": key, "label": "Warm pool"}]
         (self.pages / "decision-warm-pool.json").write_text(json.dumps(decision(references=references)))
@@ -1038,10 +1039,13 @@ class ModuleGraphTest(unittest.TestCase):
         self.assertEqual(Path(run["rules"]).resolve(), (self.clone / "docs" / "architecture.md").resolve())
         out = Path(run["out"]).resolve()
         self.assertEqual(out.name, "page.html")
-        # The cache is keyed by the head and the settings that draw it, under a dotdir the server never serves.
+        # The comparison identity hashes the head, base and settings under a dotdir the server never serves.
         cache, *key, _ = out.relative_to(self.pages.resolve()).parts
         self.assertTrue(cache.startswith("."), "the cache is a dotdir, which the server never serves")
-        self.assertTrue(any(self.head in part for part in key), "the cache path names the head")
+        self.assertEqual(len(key), 1)
+        self.assertRegex(key[0], r"^[0-9a-f]{64}$")
+        [saved] = (self.pages / ".graphs" / ".comparisons").iterdir()
+        self.assertEqual(json.loads(saved.read_text()), {"base": self.base, "key": key[0]})
 
     def test_a_gitlab_mr_is_drawn_from_its_merge_request_ref(self):
         self.workspace(gitlab=True)
@@ -1197,7 +1201,7 @@ class ModuleGraphTest(unittest.TestCase):
                 self.assertNotIn("unavailable", section)
         [run] = self.runs()
         self.assertEqual(run["max_nodes"], "12")
-        [out] = (self.pages / ".graphs").iterdir()
+        out = Path(run["out"]).parent
         self.assertEqual(sorted(f.name for f in out.glob("*.mmd")), ["page.mmd"])
         self.assertNotIn("views=", (out / "summary.txt").read_text())
 
@@ -1209,7 +1213,7 @@ class ModuleGraphTest(unittest.TestCase):
         self.assertNotIn('<pre class="mermaid">', section)
         for text in ("unavailable", "Errno", "page.mmd"):
             with self.subTest(text=text):
-                self.assertNotIn(text, page)
+                self.assertNotIn(text, section)
 
     def test_a_change_touching_only_excluded_modules_says_so_without_an_error(self):
         self.fake(views=[])
@@ -1219,7 +1223,7 @@ class ModuleGraphTest(unittest.TestCase):
                 page = self.page()
                 self.assert_nothing_outside_the_excluded_set(page, self.section(page))
         self.assertEqual(len(self.runs()), 1)
-        [out] = (self.pages / ".graphs").iterdir()
+        out = Path(self.runs()[0]["out"]).parent
         self.assertEqual(list(out.glob("*.mmd")), [])
         self.assertTrue((out / "summary.txt").read_text().endswith("views=0"))
 
@@ -1231,7 +1235,7 @@ class ModuleGraphTest(unittest.TestCase):
         cache = self.pages / bs.CACHE
         sources = bs.load(self.pages)
         change = replace(sources.changes["#58"], issues=("#109",))
-        bs._write(cache, bs.Sources({}, {}, {"#58": change}, (), {}))
+        bs._write(cache, replace(sources, changes={"#58": change}))
         (self.root / "daily").mkdir()
         today = datetime.now(ZoneInfo("America/Chicago")).date()  # the workspace's day, not the host's
         (self.root / "daily" / f"{today}-tracker.md").write_text(

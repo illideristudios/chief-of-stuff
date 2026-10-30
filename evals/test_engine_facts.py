@@ -36,8 +36,6 @@ class GatherTest(unittest.TestCase):
         self.db = store.Store(path, clock=lambda: NOW)
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, stage="implement")
-        self.db.set_ownership(KEY, "src/a.py", "write")
-        self.db.set_ownership(KEY, "docs/readme", "read")
         self.db.add_ask(KEY, "implement", 1, "sess", "Ship it?", ["yes"], "")
         self.db.add_report(KEY, "implement", 1, "sess", "blocked", "waiting", [])
         self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())
@@ -126,6 +124,29 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(self.release_gather(f).implementation_requests, ())
         f.requests.assert_not_called()
 
+    def test_equivalent_starts_in_other_offsets_are_a_tie_and_gather_no_evidence(self):
+        self.released_segment(attempt=2)
+        start = NOW - timedelta(hours=2)
+        east = start.astimezone(timezone(timedelta(hours=5))).isoformat()
+        self.db.record_segment(KEY, "review", 1, started_at=east, ended_at=(NOW-timedelta(hours=1)).isoformat(),
+                               outcome="done")
+        self.assertNotEqual(east, start.isoformat())
+        self.assertEqual(next(s for s in self.db.segments(KEY) if s.stage == "review").started_at, east)
+        f = self.release_forge([self.released_request()])
+        self.assertEqual(self.release_gather(f).implementation_requests, ())
+        f.requests.assert_not_called()
+
+    def test_same_stage_tie_selects_the_higher_attempt_and_a_newer_start_beats_a_larger_attempt(self):
+        self.released_segment()
+        self.db.record_segment(KEY, "implement", 2, started_at=(NOW-timedelta(hours=2)).isoformat(),
+                               ended_at=(NOW-timedelta(hours=1)).isoformat(), outcome="human_review")
+        self.db.set_resume(KEY, {"runs": {"implement-1": {"branch": "old"}, "implement-2": {"branch": "work/issue-1"}}})
+        f = self.release_forge([self.released_request()])
+        self.assertEqual(dict(self.release_gather(f).implementation_requests), {(KEY, "implement", 2): True})
+        self.db.record_segment(KEY, "implement", 3, started_at=(NOW-timedelta(hours=5)).isoformat(),
+                               ended_at=(NOW-timedelta(hours=4)).isoformat(), outcome="human_review")
+        self.assertEqual(dict(self.release_gather(f).implementation_requests), {(KEY, "implement", 2): True})
+
     def test_no_request_read_without_an_eligible_release(self):
         self.released_segment()
         for observations in ((), ((KEY, None),), ((KEY, True),)):
@@ -164,8 +185,6 @@ class GatherTest(unittest.TestCase):
         forge.blocked_by.return_value = {KEY: (OTHER,)}
         with mock.patch.object(engine_facts.process_status, "identity", return_value="other"):
             facts = engine_facts.gather(forge=forge, store=self.db, root=self.root, trees=self.trees, now=NOW)
-        self.assertIn(readiness.Claim(KEY, "src/a.py", "write"), facts.claims)
-        self.assertIn(readiness.Claim(KEY, "docs/readme", "read"), facts.claims)
         self.assertEqual(dict(facts.blockers), {KEY: (OTHER,)})
         self.assertEqual(facts.asks, (readiness.Ask(KEY, None, "implement", 1),))
         self.assertEqual(facts.reports[0].outcome, "blocked")
@@ -174,14 +193,6 @@ class GatherTest(unittest.TestCase):
     def gather(self, forge=None):
         forge = forge or mock.Mock(**{"blocked_by.return_value": {}})
         return engine_facts.gather(forge=forge, store=self.db, root=self.root, trees=self.trees, now=NOW)
-
-    def test_a_worktree_row_is_not_a_file_claim_and_arms_no_read_only_check(self):
-        self.db.upsert_item(OTHER, stage="implement")
-        self.db.set_ownership(OTHER, str(self.trees / "issue-2-implement-1"))
-        with mock.patch.object(engine_facts.process_status, "identity", return_value="other"):
-            facts = self.gather()
-        self.assertFalse([c for c in facts.claims if c.issue_key == OTHER])
-        self.assertNotIn(OTHER, facts.read_only)
 
     def test_reports_follow_the_order_they_were_written(self):
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
@@ -236,7 +247,7 @@ class GatherTest(unittest.TestCase):
             with self.subTest(trees=trees), mock.patch.object(engine_facts.process_status, "identity", return_value=None):
                 facts = engine_facts.gather(forge=SimpleNamespace(blocked_by=lambda: {}), store=self.db,
                                             root=self.root, trees=trees, now=NOW)
-                self.assertEqual(facts.changed, ((KEY, None),))
+                self.assertEqual(facts.unreadable, (KEY,))
                 self.assertEqual(facts.progress, ((KEY, None),))
 
     def test_recorded_trees_are_read_even_when_discovery_omits_them(self):
@@ -252,7 +263,7 @@ class GatherTest(unittest.TestCase):
                 facts = engine_facts.gather(forge=SimpleNamespace(blocked_by=lambda: {}), store=self.db,
                                             root=self.root, trees=trees, now=NOW)
                 read.assert_called_once_with(tree)
-                self.assertEqual(facts.changed, ((KEY, False),))
+                self.assertEqual(facts.unreadable, ())
                 self.assertEqual(facts.progress, ((KEY, NOW),))
                 self.assertEqual(facts.on_main, ((KEY, True),))
 
@@ -261,7 +272,7 @@ class GatherTest(unittest.TestCase):
         data["runs"]["implement-1"]["tree"] = str(self.root.parent / "other-workspace")
         self.db.set_resume(KEY, data)
         with mock.patch.object(engine_facts, "_tree_facts") as read:
-            self.assertEqual(self.gather().changed, ((KEY, None),))
+            self.assertEqual(self.gather().unreadable, (KEY,))
         read.assert_not_called()
 
     def test_symlink_loop_is_unknown_and_a_valid_symlink_is_resolved_before_reading(self):
@@ -271,7 +282,7 @@ class GatherTest(unittest.TestCase):
         data["runs"]["implement-1"]["tree"] = str(tree)
         self.db.set_resume(KEY, data)
         with mock.patch.object(engine_facts, "_tree_facts") as read:
-            self.assertEqual(self.gather().changed, ((KEY, None),))
+            self.assertEqual(self.gather().unreadable, (KEY,))
             read.assert_not_called()
         tree.unlink()
         target = self.trees / "real"
@@ -281,42 +292,7 @@ class GatherTest(unittest.TestCase):
             self.gather()
             read.assert_called_once_with(target.resolve())
 
-    def test_missing_baseline_is_distinct_from_an_unreadable_tree_and_recovers_durable_head(self):
-        tree = self.trees / "review"
-        tree.mkdir()
-        run = self.root / "run"
-        run.mkdir()
-        self.db.set_ownership(KEY, "src/a.py", "read")
-        data = self.db.resume(KEY)
-        data["runs"]["implement-1"].update(tree=str(tree), run_dir=str(run))
-        self.db.set_resume(KEY, data)
-        with mock.patch.object(engine_facts, "_tree_facts", return_value=(TreeState("HEAD", 0, 2, 0), False, NOW)), \
-             mock.patch.object(engine_facts.git_trees, "git", return_value=(0, "launch-head")):
-            facts = self.gather(SimpleNamespace(blocked_by=lambda: {}))
-            self.assertNotIn(KEY, facts.unreadable)
-            self.assertEqual(dict(facts.changed)[KEY], None)
-            (run / "starting_head").write_text("launch-head\n")
-            self.assertEqual(dict(self.gather().changed)[KEY], False)
-
-    def test_invalid_baseline_evidence_remains_unknown_without_aborting_gather(self):
-        tree = self.trees / "review"
-        tree.mkdir()
-        run = self.root / "run"
-        run.mkdir()
-        (run / "starting_head").write_bytes(b"\xff")
-        self.db.set_ownership(KEY, "src/a.py", "read")
-        for run_dir in (str(run), "bad\x00path"):
-            data = self.db.resume(KEY)
-            data["runs"]["implement-1"].update(tree=str(tree), run_dir=run_dir)
-            self.db.set_resume(KEY, data)
-            with self.subTest(run_dir=run_dir), \
-                 mock.patch.object(engine_facts, "_alive", return_value=False), \
-                 mock.patch.object(engine_facts, "_tree_facts", return_value=(TreeState("HEAD", 0, 2, 0), False, NOW)):
-                facts = self.gather(SimpleNamespace(blocked_by=lambda: {}))
-                self.assertIsNone(dict(facts.changed)[KEY])
-                self.assertNotIn(KEY, facts.unreadable)
-
-    def test_read_only_changes_are_relative_to_starting_head_in_a_real_detached_tree(self):
+    def test_a_real_detached_tree_reports_commits_off_origin_and_unpushed(self):
         from evals import git_taint
         cache = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(git_taint.private_git_views(cache))
@@ -339,21 +315,15 @@ class GatherTest(unittest.TestCase):
         head = git("rev-parse", "HEAD")
         git("update-ref", "refs/remotes/origin/feature", head)
         git("checkout", "--detach")
-        self.db.set_ownership(KEY, "src/a.py", "read")
         data = self.db.resume(KEY)
-        data["runs"]["implement-1"].update(tree=str(tree), starting_head=head)
+        data["runs"]["implement-1"].update(tree=str(tree))
         self.db.set_resume(KEY, data)
         facts = self.gather(SimpleNamespace(blocked_by=lambda: {}))
-        self.assertEqual(dict(facts.changed)[KEY], False)
         self.assertGreater(dict(facts.trees)[KEY].off_origin, 0)
         self.assertEqual(dict(facts.trees)[KEY].unpushed, 0)
         (tree / "file").write_text("changed during review")
         git("commit", "-am", "review changed a file")
-        self.assertEqual(dict(self.gather().changed)[KEY], True)
         self.assertEqual(dict(self.gather().trees)[KEY].unpushed, 1)
-        git("reset", "--hard", head)
-        (tree / "untracked").write_text("left behind")
-        self.assertEqual(dict(self.gather().changed)[KEY], True)
 
     def test_late_reports_from_an_older_run_do_not_replace_the_latest_stop(self):
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
@@ -374,7 +344,7 @@ class GatherTest(unittest.TestCase):
                  mock.patch.object(engine_facts.git_trees, "discover", return_value=[tree]), \
                  mock.patch.object(engine_facts.git_view, "opened", side_effect=error), \
                  mock.patch.object(engine_facts.process_status, "identity", return_value="other"):
-                self.assertEqual(self.gather().changed, ((KEY, None),))
+                self.assertEqual(self.gather().unreadable, (KEY,))
 
     def test_a_forge_that_cannot_read_blockers_is_unknown(self):
         self.assertIsNone(self.gather(SimpleNamespace()).blockers)
@@ -394,12 +364,6 @@ class GatherTest(unittest.TestCase):
                 source = SimpleNamespace(blocked_by=lambda: {}, branch_head=lambda ref: forge.Pipeline(1, ref, "main-sha", status, ""))
                 self.assertEqual(dict(self.gather(source).suite_on_main)[KEY], expected)
                 git.assert_called_once_with(["merge-base", "--is-ancestor", "HEAD", "main-sha"], tree)
-
-    def test_finished_run_tree_evidence_remains_available_for_read_only_enforcement(self):
-        self.db.set_ownership(KEY, "src/a.py", "read")
-        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
-        self.assertIn(KEY, self.gather().read_only)
-        self.assertEqual(self.gather().changed, ((KEY, None),))
 
     def test_a_failed_relationship_read_says_why(self):
         failing = mock.Mock(**{"blocked_by.side_effect": engine_facts.ForgeError("auth required")})

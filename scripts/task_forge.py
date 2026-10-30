@@ -5,7 +5,7 @@ them, who the workers are and whether a stage holds. The board and the task page
 
 from __future__ import annotations
 
-from collections.abc import Container, Mapping
+from collections.abc import Container, Iterable, Mapping
 from datetime import date, datetime, time
 from dataclasses import dataclass
 from typing import Any
@@ -15,8 +15,8 @@ import board_sources
 import decision_actions
 from estimate import estimates, history, task_end
 import kanban as kanban_tool
+from readiness import EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, RetryExhaustion, retry_exhaustion
 from md import section
-import ownership
 from settings import Kanban
 import tracker
 from tracker import Task, issue_key, launcher
@@ -29,11 +29,53 @@ def source_key(key: str, home) -> str:
     namespace, sep, number = key.rpartition("#")
     if sep and number.isdecimal():
         if namespace.startswith("github:"):
-            return issue_key(f"https://github.com/{namespace[len("github:"):]}/issues/{number}", home)
+            url = f"https://github.com/{namespace[len('github:'):]}/issues/{number}"
+            ref = board_sources.backlog.issue_ref(url, home, any_host=True)
+            return ref.label(home) if ref else key.strip()
         if namespace.startswith("gitlab:"):
-            host, _, project = namespace[len("gitlab:"):].partition("/")
-            return issue_key(f"https://{host}/{project}/-/issues/{number}", home)
+            return board_sources.store_label(key, home)
+        if namespace and "/" in namespace and isinstance(home, board_sources.backlog.Backlog):
+            ref = board_sources.backlog.issue_ref(key, home, any_host=True)
+            if ref:
+                return ref.label(home)
+            return key.strip()
+    if "://" in key and board_sources.backlog.issue_ref(key, home, any_host=True) is None:
+        return key.strip()
     return issue_key(key, home)
+
+
+def lookup_keys(refs: Iterable[str], home) -> tuple[str, ...]:
+    """Cache lookup keys for `refs` under `home`, preserving namespace so cross-repo tasks never match bare `#N`."""
+    out: list[str] = []
+    for raw in refs:
+        text = raw.strip()
+        if not text or text == tracker.WORKFLOW:
+            continue
+        if home is None and text.startswith('#') and text[1:].isdecimal():
+            continue  # a bare tracker reference has no verified forge identity
+        if (isinstance(home, board_sources.backlog.Backlog) and board_sources.ambiguous_gitlab_label(text)):
+            continue  # legacy host labels and nested project shorthand have identical spellings
+        # URLs are converted to cache keys; a raw foreign URL in an old change cache must not match.
+        candidates = (source_key(text, home),) if "://" in text else (text, source_key(text, home))
+        for candidate in candidates:
+            if candidate and candidate not in out:
+                out.append(candidate)
+    return tuple(out)
+
+
+def tracker_issue_tasks(trackers, number: int, home, full_key: str | None = None):
+    """Resolve a numeric route using the latest snapshot naming it; reject multiple identities there."""
+    snapshots = [[t for t in tracker.parse_tracker(text).tasks if tracker.issue_number(t.issue) == number]
+                 for _, text in trackers]
+    if full_key:
+        selected = source_key(full_key, home)
+    else:
+        latest = next((rows for rows in reversed(snapshots) if rows), [])
+        identities = {source_key(t.issue, home) for t in latest}
+        if len(identities) > 1:
+            return None
+        selected = next(iter(identities), None)
+    return [t for rows in snapshots for t in rows if source_key(t.issue, home) == selected] if selected else []
 
 
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
@@ -58,10 +100,49 @@ def worker_names(sources: board_sources.Sources) -> set[str]:
     return {w.name for w in sources.workers}
 
 
+def source_workers(sources: board_sources.Sources) -> list[board_sources.Worker]:
+    """The distinct live workers shown on the Workers page, excluding idle sessions."""
+    found = {}
+    for worker in sources.workers:
+        if worker.kind == "session" and not worker.task.strip():
+            continue
+        found.setdefault(worker.name, worker)
+    return list(found.values())
+
+
+def segment_worker_key(seg):
+    """Match named workers across sources; unnamed runs retain their store identity."""
+    return getattr(seg, "runner", "") or (seg.issue_key, seg.stage, seg.attempt)
+
+
+def source_worker_tasks(sources: board_sources.Sources, tasks: list[Task]) -> set[Task]:
+    """Match each cached worker to the same task its Workers-page row would use."""
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    row_of = launcher(tasks)
+    found = set()
+    for worker in source_workers(sources):
+        task = by_name.get(worker.task.strip().casefold()) or row_of(worker.task)[0]
+        if task is not None:
+            found.add(task)
+    return found
+
+
+def live_worker_keys(sources: board_sources.Sources, segments) -> set[str | tuple[str, str, int]]:
+    """Combine cached workers and open store segments using the Workers page's runner identity."""
+    names: set[str | tuple[str, str, int]] = {worker.name for worker in source_workers(sources)}
+    names.update(segment_worker_key(seg) for seg in segments if seg.ended_at is None)
+    return names
+
+
+def change_issue_keys(change: board_sources.Change) -> set[str]:
+    """Only normalized closing references identify issues in a local change cache."""
+    return {ref for ref in change.issues if "://" not in ref}
+
+
 def task_changes(task: Task, sources: board_sources.Sources) -> tuple[board_sources.Change, ...]:
     """The changes naming the task's issue: the open ones, or else the merged ones."""
-    key = source_key(task.issue, sources.home) if task.issue.strip() else None
-    named = [c for c in sources.changes.values() if key and (key in c.issues or task.issue in c.issues) and c.state != "closed"]
+    keys = set(lookup_keys((task.issue,), sources.home))
+    named = [c for c in sources.changes.values() if keys and (keys & change_issue_keys(c)) and c.state != "closed"]
     return tuple(c for c in named if c.state == "open") or tuple(named)
 
 
@@ -185,7 +266,8 @@ def forge_ends(tasks: list[Task], sources: board_sources.Sources, zone: ZoneInfo
             continue
         if merges := [c.merged_at for c in task_changes(t, sources) if c.state == "merged" and c.merged_at]:
             out[name] = (max(merges).astimezone(zone), "merged")
-        elif (issue := sources.issues.get(issue_key(t.issue, sources.home)) if t.issue.strip() else None) and issue.state == "closed" and issue.closed_at:
+        elif (issue := next((sources.issues[k] for k in lookup_keys((t.issue,), sources.home)
+                             if k in sources.issues), None)) and issue.state == "closed" and issue.closed_at:
             out[name] = (issue.closed_at.astimezone(zone), "closed")
     return out
 
@@ -225,7 +307,7 @@ def drifts(task: Task, kanban: Kanban | None, sources: board_sources.Sources, st
 
 
 def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
-    """The dispatcher's open, unassigned candidates, bounded by free slots and file ownership overlap."""
+    """The dispatcher's open, unassigned candidates, bounded by free slots."""
     parsed = tracker.parse_tracker(tracker_text)
     tasks = parsed.tasks
 
@@ -234,10 +316,7 @@ def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
     if free_slots <= 0:
         return []
 
-    running_paths = [ownership.cell(tracker_text, {t.label, t.name, t.item}) or "" for t in running]
-
     ready: list[tracker.Task] = []
-    accepted_paths: list[str] = []
 
     for t in tasks:
         if t.kind != "open" or t.owner.strip() != "unassigned":
@@ -248,20 +327,7 @@ def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
         if t.stage.strip().startswith("hold"):
             continue
 
-        paths = ownership.cell(tracker_text, {t.label, t.name, t.item})
-        if paths is None:
-            continue
-
-        # Check collision with running tasks
-        if any(ownership.overlaps(r, paths) for r in running_paths):
-            continue
-
-        # Check collision with already accepted candidate tasks
-        if any(ownership.overlaps(a, paths) for a in accepted_paths):
-            continue
-
         ready.append(t)
-        accepted_paths.append(paths)
         if len(ready) >= free_slots:
             break
 
@@ -332,6 +398,14 @@ class PageData:
 
     def resume(self, key):
         return self.resumes.get(key)
+
+    def exhaustion(self, key) -> RetryExhaustion | None:
+        """Current retry exhaustion, unless the issue is closed or a live run supersedes it."""
+        item = self.item(key)
+        if item is None or item.forge_state == "closed":
+            return None
+        segs = [s for s in self.stage_segments if s.issue_key == key]
+        return retry_exhaustion(self.resumes.get(key), segs, [e for e in self.issue_logs if e.issue_key == key])
 
 
 def page_data(store) -> PageData:

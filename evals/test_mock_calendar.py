@@ -122,7 +122,7 @@ class RunnerCalendarTest(unittest.TestCase):
         cfg = run.calendar_mcp_config(Path("/r/events.json"), Path("/r/calls.jsonl"), "America/Chicago")
         cmd = run.claude_options(case.spec, mcp_config=cfg)
         self.assertEqual(json.loads(cmd[cmd.index("--mcp-config") + 1]), cfg)
-        allowed = cmd[cmd.index("--allowedTools") + 1 : cmd.index("--disallowedTools")]
+        allowed = cmd[cmd.index("--allowedTools") + 1 :]
         self.assertIn(run.CALENDAR_TOOL, allowed)
         self.assertIn("--strict-mcp-config", cmd)
 
