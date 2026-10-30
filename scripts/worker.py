@@ -32,7 +32,7 @@ from settings import ModelEntry, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import RETRYABLE, Failure, Reply, Request, retry_at
-from shell_setup import teardown
+from shell_setup import ShellError, teardown
 from reconcile import OP_WORKER_RUN
 
 _runners: dict[str, Any] = {}
@@ -499,9 +499,14 @@ def teardown_once(store: Any, root: Path, key: str, stage: str, attempt: int, co
     if isinstance(tree, str) and tree:
         for error in teardown(root, Path(tree), Path(tree).name, command):
             store.add_log(key, f"worker teardown failed: {error}", at)
-    record["torn_down"] = True
-    data["runs"] = {**runs, f"{stage}-{attempt}": record}
-    store.set_resume(key, data)
+    def mark(current: dict) -> None:
+        current_runs = current.get("runs")
+        current_runs = dict(current_runs) if isinstance(current_runs, dict) else {}
+        entry = dict(current_runs.get(f"{stage}-{attempt}") or record)
+        entry["torn_down"] = True
+        current["runs"] = {**current_runs, f"{stage}-{attempt}": entry}
+
+    store.update_resume(key, mark)
 
 
 def _clear_tree(root: Path, tree: Path, store: Any, key: str, at: str) -> None:
@@ -554,7 +559,8 @@ def stage_defaults(root: Path, text: str, stage: str) -> Any:
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
            claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
-           clock: engine_clock.Clock = engine_clock.system, launcher: str = "cli") -> tuple[str, str]:
+           clock: engine_clock.Clock = engine_clock.system, launcher: str = "cli",
+           t3_providers: dict[str, str] | None = None) -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
@@ -661,12 +667,23 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
            **guard_binding.guard_env(guard_binding.Binding(
                issue_key, stage, attempt, session_id, root.resolve(), clock(), protected))}
     protects: list[bool] = []  # the forge is asked once, and only when a non-Claude entry is considered
+    clock_refusals: list[ShellError | None] = []  # the worker clock is checked once, and only for a local Claude CLI entry
+
+    def local_claude_ready() -> bool:
+        # Only a local Claude CLI worker loads the clock plugin; T3 threads and other hosts are not checked (§13).
+        if not clock_refusals:
+            try:
+                claude_adapter.require_worker_clock(claude_as_profile, str(root))
+                clock_refusals.append(None)
+            except ShellError as exc:
+                clock_refusals.append(exc)
+        return clock_refusals[0] is None
 
     def launchable(runtime: str) -> bool:
         if launcher == "t3":
             return t3_adapter.available(runtime) and _guarded(forge, issue_key)
         if runtime == "claude":
-            return True
+            return local_claude_ready()
         if not host_adapter.available(runtime):
             return False
         if not protects:
@@ -686,14 +703,19 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     rotation = loaded.models.get(TASK_CLASS.get(stage, stage), ())
     if launcher == "t3" and rotation and not any(entry.runtime in t3_adapter.PROVIDERS for entry in rotation):
         raise RuntimeError("T3 has no engine channel for any runtime in this rotation")
-    chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
-                    how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
-                    attempt=attempt, available=available, workflow=workflow)
+    try:
+        chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
+                        how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
+                        attempt=attempt, available=available, workflow=workflow)
+    except RuntimeError:
+        if clock_refusals and clock_refusals[0] is not None:
+            raise clock_refusals[0] from None  # the clock, not the rotation, is why nothing could launch
+        raise
     try:
         if launcher == "t3" and chosen.runtime not in t3_adapter.PROVIDERS:
             raise RuntimeError(f"T3 has no engine channel for {chosen.runtime}; refusing a local fallback")
-        if launcher == "t3" and claude_as_profile:
-            raise RuntimeError("T3 cannot map claude_as_profile to a provider instance; refusing the default account")
+        # An unmapped profile or a missing instance refuses here, never falling back to T3's default account.
+        provider = t3_adapter.provider_instance(claude_as_profile, t3_providers or {}) if launcher == "t3" else None
         request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                           cwd=str(tree), worker=True, agent=agent,
                           plugin_dirs=plugin_dirs)
@@ -712,7 +734,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             if via_t3:
                 host["launcher"] = "t3"
                 (run_dir / "branch_heads.json").write_text(json.dumps(host["branch_heads"]))
-                runner = t3_adapter.start(request, run_dir, env=env)
+                runner = t3_adapter.start(request, run_dir, env=env, provider=provider)
             else:
                 runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
         try:
@@ -821,6 +843,30 @@ def deliver_messages(store: Any, root: Path, clock: engine_clock.Clock = engine_
                 store.add_log(item.issue_key, f"worker message {message.id} not handed off: {exc}", clock().isoformat())
 
 
+def _deliver_t3(store: Any, root: Path, message: Any, record: dict, run_dir: Path, identity: tuple, fail: Callable) -> None:
+    """`t3 thread send` carries the message as the thread's next turn. T3's acceptance is the most it can show: it is
+    recorded as delivered with that caveat, never as read. A CLI refusal fails the message; a timeout leaves it sending,
+    unconfirmed and never sent twice."""
+    thread = record.get("thread_id")
+    if not thread:
+        return  # the thread id is recorded just after launch
+    seen = t3_adapter.observe(record)
+    if seen.error:
+        return  # an unreadable thread is unknown: wait, never fail or send blind
+    if not seen.alive:
+        return fail(f"the worker's T3 thread has ended; {NEVER_WRITTEN}")
+    claim = store.begin_worker_message_delivery(*identity)
+    try:
+        t3_adapter.send(run_dir, thread, message.body)
+    except RuntimeError as exc:
+        return fail(f"{exc}; {NEVER_WRITTEN}", claim_id=claim.delivery_id)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"t3 thread send is unconfirmed ({type(exc).__name__})") from None
+    store.ack_worker_message(*identity, delivery_id=claim.delivery_id,
+                             evidence=f"T3 accepted it as thread {thread}'s next turn; "
+                                      "this does not show the worker read it or acted on it")
+
+
 def _deliver(store: Any, root: Path, message: Any) -> None:
     identity = (message.id, message.issue_key, message.stage, message.attempt, message.session_id)
 
@@ -843,6 +889,8 @@ def _deliver(store: Any, root: Path, message: Any) -> None:
         runtime = record.get("runtime", "claude")
         if runtime != "claude":
             return fail(f"{runtime} workers cannot receive live messages; {NEVER_WRITTEN}")
+        if record.get("launcher") == "t3":
+            return _deliver_t3(store, root, message, record, run_dir, identity, fail)
         if not claude_adapter.messaging(run_dir):
             return fail(f"this worker was started without live messaging; {NEVER_WRITTEN}")
         with claude_adapter.mailbox_lock(run_dir):
@@ -981,7 +1029,9 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             if missing_exit and not via_t3 and not any((run_dir / name).exists() for name in ("stdout", "stderr")) and not (
                     store.segment_reports(key, segment.stage, segment.attempt)):
                 continue  # no adapter output or report to classify yet; the planner still sees the abandoned run
+            # Durable exit evidence or confirmed death releases the workspace stack, even if completion waits.
             teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
+            data = _resume(store, key)  # Later quota/suite writes must retain the teardown marker.
             code, exited_at = (((t3_adapter.outcome(remote) if via_t3 and remote is not None else 1), None)
                                if missing_exit else _exit_record(run_dir))
             runtime = record.get("runtime", "claude")
@@ -1025,9 +1075,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                         outcome = "human_review"
                         reason = reconcile.suite_reason(counts, reports[-1].summary)
                         store.set_human_review(key, True)
-                        data["suite_hold"] = {"stage": segment.stage, "attempt": segment.attempt,
-                                              "published": False}
-                        store.set_resume(key, data)
+                        hold = {"stage": segment.stage, "attempt": segment.attempt, "published": False}
+                        store.update_resume(key, lambda d, hold=hold: d.update(suite_hold=hold))
                     else:
                         outcome = "done"
                 else:
