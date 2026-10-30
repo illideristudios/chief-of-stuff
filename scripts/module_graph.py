@@ -183,3 +183,9 @@ def section(change: board_sources.Change | None, graph: Graph | None, pages: Pat
     caption = re.sub(r" (?:excluded|views)=\S*", "", summary).replace(" edges", " · edges").replace(" drift=", " · drift ")
     return wrap(warning + '    <figure class="graph"><div class="views">\n' + "\n".join(figures) + "\n    </div>\n"
                 f'    <figcaption>{chips}<span class="sum">{escape(caption)}</span>{rest}</figcaption></figure>\n    {MERMAID}')
+
+
+def reference_path(root: Path, path: str, identity: tuple[str, str] | None, at: str | None,
+                   need: str, cache: dict) -> str | None:
+    """The pages' read-only Git gateway for forge file references, alongside their change comparisons."""
+    return git_trees.reference_path(root, path, identity, at, need, cache)
