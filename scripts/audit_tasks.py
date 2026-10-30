@@ -23,7 +23,7 @@ from md import cells as _cells, is_separator as _is_separator, section as _secti
 from tracker import Session, clip_name, parse_tracker  # noqa: E402
 from workspace import ConfigError, parse_coordinator, read_config, settings_path, worktrees_dir  # noqa: E402
 from dispatch_prompt import PROMPT_DIR, STOP_FILE, task_keys  # noqa: E402
-from backlog import CLOSED, GITHUB, Backlog, BacklogError, GitHubBacklog, file_with, home_of, issue_ref, issue_states  # noqa: E402
+from backlog import CLOSED, GITHUB, Backlog, BacklogError, GitHubBacklog, IssueRef, file_with, home_of, issue_ref, issue_states  # noqa: E402
 import backlog  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 import board_sources  # noqa: E402
@@ -149,6 +149,15 @@ def _tree_unlanded(root: Path | None, trees: str, owners: list, task, roster=(),
     return answer
 
 
+def _done_open_issue(tag: str, ref: IssueRef, home: Backlog | GitHubBacklog) -> str:
+    """A done task whose issue is still open: close at home, by URL on a GitLab sibling, else name the forge URL (#416)."""
+    if (ref.host, ref.repo) == home_of(home):
+        return f"done but {tag} is open; chief-of-stuff backlog --close {ref.number} --commit"
+    if isinstance(home, Backlog) and ref.host == home_of(home)[0]:
+        return f"done but {tag} is open; chief-of-stuff backlog --close {ref.url} --commit"
+    return f"done but {tag} is open; {ref.url}"
+
+
 def _config_for(home: Backlog | GitHubBacklog, host: str, repo: str) -> Backlog | GitHubBacklog:
     """The config that reads `repo` on `host`: the home itself, a GitHub repo, or another project on the home's
     GitLab host. The home is checked first. one_shot checks GitHub first; the two orders part only for a GitLab
@@ -203,7 +212,7 @@ def issue_faults(tasks, home: Backlog | GitHubBacklog, gh=None, lanes: dict | No
                 at = f" {when}" if when else ""
                 faults.append(IssueFault(name, f"{tag} is closed{at}; write the task done{f' at {when}' if when else ''}"))
         elif task.kind == "done" and found is not None and found.state != CLOSED and _ends_issue(task, lanes or {}):
-            faults.append(IssueFault(name, f"done but {tag} is open; chief-of-stuff backlog --close {ref.number} --commit"))
+            faults.append(IssueFault(name, _done_open_issue(tag, ref, home)))
     return faults
 
 
@@ -357,7 +366,11 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
         if ref.host == GITHUB and config.github_project:
             if project_items is None:
                 project_items, project_error = forge.project_items(
-                    gh or backlog.run_gh, config.github_project)
+                    gh or backlog.run_gh, config.github_project,
+                    tuple(rows[0][1] for rows in grouped.values()
+                          if rows[0][1].host == GITHUB
+                          and (issue := states[(rows[0][1].host, rows[0][1].repo)].get(rows[0][1].number))
+                          and issue.state != CLOSED))
             if project_error:
                 faults.append(KanbanFault(clip_name(furthest.label), project_error))
                 continue

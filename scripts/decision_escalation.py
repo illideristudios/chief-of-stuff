@@ -349,9 +349,24 @@ def committed_ask_answer(decisions: Sequence[Any], ask: Any) -> str | None:
 
 
 def answer_ask(decisions: Sequence[Any], ask: Any) -> DecisionUpdate | None:
-    """Settle an answered ask without reviving an old context or changing the trio's votes."""
+    """Settle an answered ask without reviving an old context or changing the trio's votes.
+
+    An answer that landed before any consultation is itself the user's row. A user row, a reversed
+    row, and an answer the latest row already records stay as they are.
+    """
+    if not ask.answer:
+        return None
     row = ask_decision(decisions, ask)
-    if (not ask.answer or row is None or row.answer or is_reversed(row) or is_restarted(row)):
+    if row is None:
+        ident = ("ask", ask.question, f"ask-{ask.id}")
+        if any(identity(d) == ident for d in decisions):
+            return None
+        return DecisionUpdate("ask", ask.question, ask.answer, "user", {
+            "recommendation": ask.answer,
+            "decision": {"options": list(ask.options), "context": ask.context,
+                         "stage": getattr(ask, "stage", ""), "attempt": getattr(ask, "attempt", 0),
+                         "instance": f"ask-{ask.id}"}})
+    if is_reversed(row) or is_restarted(row) or row.decided_by == "user" or row.answer == ask.answer:
         return None
     return DecisionUpdate(row.topic, row.question, ask.answer, "user",
                           {**row.record, "recommendation": ask.answer})

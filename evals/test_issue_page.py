@@ -18,7 +18,7 @@ import tempfile
 import threading
 import unittest
 from dataclasses import replace
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from html import unescape
 from pathlib import Path
 from unittest import mock
@@ -68,14 +68,6 @@ TODAY_START = f"""# Tracker
 | Cache warmup | Warm the pool | unassigned | open | {YESTERDAY} |  | S | build | implement | #111 | c |
 | Tidy config | Tidy | Robin | open | {TODAY} |  | S |  |  |  | c |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Review r1 | `src/a/` |
-| Verify r1 | `src/d/` |
-| Fix r1 | `src/b/` |
-| Warm the pool | `src/c/` |
 
 ## Log
 
@@ -533,7 +525,8 @@ class AcceptanceTest(unittest.TestCase):
                 for section_name in ("Issue", "Acceptance"):
                     part = page_section(html, section_name)
                     self.assertIn(f'href="{base}/issues/10"', part)
-                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+                    self.assertNotIn("/blob/", part)
+                    self.assertIn("src/lib.py:4", text(part))
 
     def test_multiline_comments_in_complete_items_do_not_leak_or_count(self):
         body = """## Acceptance
@@ -615,7 +608,8 @@ Real `<!-- inline example -->` stays.
                 for name in ("Issue", "Acceptance"):
                     part = page_section(html, name)
                     self.assertIn(f'href="{base}/issues/10"', part)
-                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+                    self.assertNotIn("/blob/", part)
+                    self.assertIn("src/lib.py:4", text(part))
 
     def test_issue_body_hides_comments_but_preserves_fenced_examples_even_when_stale(self):
         body = """Before <!-- hidden inline
@@ -795,11 +789,6 @@ WORK_YESTERDAY = f"""# Tracker
 
 {HEAD}| Upload size limit | {LONG} | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Upload size limit | `src/upload/` |
 
 ## Log
 
@@ -812,12 +801,6 @@ WORK_TODAY = f"""# Tracker
 {HEAD}| Upload size limit | {LONG} | unassigned | open | {YESTERDAY} |  | M | build | review | #109 | c |
 | Review round 1 | {LONG_REVIEW} | unassigned | open | {TODAY} |  | S | build | review | #109 | c |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Upload size limit | `src/upload/` |
-| Review round 1 | none; read-only review of `src/upload/` |
 
 ## Log
 
@@ -1106,11 +1089,6 @@ DONE_MIDNIGHT_TRACKER = f"""# Tracker
 
 {HEAD}| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Upload size limit | `src/upload/` |
 
 ## Log
 
@@ -1149,8 +1127,6 @@ class ClosedIssueHeaderTest(unittest.TestCase):
         return replace(BoardTest().cfg(), backlog=self.HOME)
 
     def closed_sources(self) -> tuple[bs.Sources, bs.Issue]:
-        from datetime import timezone
-
         closed_at = at(TODAY, "01:00").astimezone(timezone.utc)
         key = issue_key(self.URL, self.HOME)
         issue = replace(ISSUE, ref=key, url=self.URL, state="closed", closed_at=closed_at)
@@ -1196,8 +1172,6 @@ class ClosedIssueHeaderTest(unittest.TestCase):
     def test_an_open_held_issue_keeps_needs_input_even_when_a_change_merged(self):
         # #886 must not treat forge_ends "merged" as a finished header while the issue is still open and held —
         # the board and engine-health pages keep NEEDS INPUT (#936).
-        from datetime import timezone
-
         merged_at = at(TODAY, "01:00").astimezone(timezone.utc)
         src = sources(replace(MR, state="merged", merged_at=merged_at, approved=True, pipeline="passed"))
         today = today_tracker()  # #109 waits on Robin (held)
@@ -1207,12 +1181,12 @@ class ClosedIssueHeaderTest(unittest.TestCase):
 
     def test_open_store_human_review_keeps_needs_input_when_a_change_merged(self):
         # Exact #936 / engine-health shape: open forge issue, human_review hold, PR already merged.
-        from datetime import timezone
+        import shutil
         from test_m6_store_board import KEY, make_store_workspace
 
         root, db = make_store_workspace()
         self.addCleanup(db.engine.dispose)
-        self.addCleanup(lambda: __import__("shutil").rmtree(root, True))
+        self.addCleanup(shutil.rmtree, root, True)
         db.upsert_item(KEY, workflow="build", stage="review", forge_state="open",
                        title="Upload size limit", human_review=True)
         merged_at = (NOW - timedelta(minutes=15)).astimezone(timezone.utc)
@@ -1237,6 +1211,184 @@ class ClosedIssueHeaderTest(unittest.TestCase):
         chip = self.header_chip(html)
         self.assertRegex(chip, r"(?i)^needs input$")
         self.assertNotRegex(chip, r"(?i)^(merged|closed|done)$")
+
+
+# 17:16 yesterday plus 8h25m is 01:41 today; an hour later is 02:41. One minute of work is 17:16–17:17.
+OPEN_NOW = at(TODAY, "01:41")
+OPEN_LATER = at(TODAY, "02:41")
+ATTEMPT_TREE = "worktree `trees/upload` (feat/upload)"
+SIDE_TREE = "worktree `trees/side` (feat/side)"
+
+
+def _tracker(rows: str, log: str = "") -> str:
+    return f"""# Tracker
+
+## Tasks
+
+{HEAD}{rows}
+
+## Log
+
+{log}"""
+
+
+def _launch(path: Path, item: str, worker: str, tree: str, start: str, end: str | None, status: str) -> None:
+    one_shot.record_launch(path, item, worker, tree, "claude", "opus", start)
+    if end is not None:
+        one_shot.update_tracker(path, item, worker, "Robin", status, "attempt ended", "src/upload/limits.py", end)
+
+
+def ended_attempts(runs: tuple[tuple[str, str, str], ...], log: str = "",
+                   final: tuple[str, str] | None = None) -> str:
+    """One open issue, each run `(start, end, status)` on Cap uploads. `final` rewrites the last owner cell."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "tracker.md"
+        path.write_text(_tracker(
+            f"| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |\n",
+            log))
+        for start, end, status in runs:
+            if "| Robin | waiting |" in path.read_text():
+                path.write_text(path.read_text().replace("| Robin | waiting |", "| unassigned | open |"))
+            _launch(path, "Cap uploads", "impl-1", ATTEMPT_TREE, start, end, status)
+        text_out = path.read_text()
+    if final:
+        text_out = text_out.replace(*final)
+    return text_out
+
+
+def overlapping_attempts() -> str:
+    """Two ended workers on one issue, 17:16–18:16 and 17:46–18:16, so the second hour overlaps."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "tracker.md"
+        path.write_text(_tracker(
+            f"| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |\n"
+            f"| Side pass | Side item | unassigned | open | {YESTERDAY} |  | S | build | implement | #109 | c |\n",
+        ))
+        _launch(path, "Cap uploads", "impl-1", ATTEMPT_TREE, "17:16", "18:16", "human_review")
+        _launch(path, "Side item", "impl-2", SIDE_TREE, "17:46", "18:16", "human_review")
+        return path.read_text()
+
+
+def worked_line(html: str) -> str:
+    got = flow_section(html)
+    found = re.search(r"Worked .+? waiting", got)
+    if not found:
+        raise AssertionError(f"no worked line in {got!r}")
+    return found.group(0)
+
+
+def open_page(tracker: str, now: datetime, *, pending: bool = False, issue: bs.Issue = ISSUE,
+              day: date | None = None) -> str:
+    refs = {"#109": None} if pending else frozenset()
+    return ip.render(109, [(day or YESTERDAY, tracker)], sources(issue=issue), now, LANES, BoardTest().cfg(), pending_refs=refs)
+
+
+class OpenTaskWaitingTest(unittest.TestCase):
+    """(#913) Elapsed for an open task runs to the render clock, so time after the last worker counts as waiting.
+    A close still freezes the total. Worker outcome, a hold, and a forecast do not."""
+
+    def test_a_failed_attempt_counts_the_wait_after_it_ends(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_the_same_open_task_counts_another_hour_when_rendered_later(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_LATER, pending=True)),
+                         "Worked 1m of 9h25m elapsed · 9h24m waiting")
+
+    def test_a_completed_attempt_does_not_freeze_an_open_task(self):
+        tracker = ended_attempts((("17:16", "17:17", "done"),))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_a_hold_without_a_pending_decision_still_counts_idle_time(self):
+        # Waiting on a person, and an open row with no owner, neither of which has an unanswered decision.
+        held = ended_attempts((("17:16", "17:17", "human_review"),))
+        free = ended_attempts((("17:16", "17:17", "human_review"),),
+                              final=("| Robin | waiting |", "| unassigned | open |"))
+        for name, tracker in (("held", held), ("free slot", free)):
+            with self.subTest(name=name):
+                self.assertEqual(worked_line(open_page(tracker, OPEN_NOW)),
+                                 "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_a_stage_move_at_the_worker_end_does_not_stop_an_open_task(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),),
+                                 log="- 17:00 stage: Upload size limit → implement\n- 17:17 stage: Upload size limit → review\n")
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_waiting_includes_the_gap_and_the_time_after_the_last_attempt(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"), ("18:00", "18:10", "human_review")))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 11m of 8h25m elapsed · 8h14m waiting")
+
+    def test_overlapping_workers_count_once_and_idle_time_after_them_still_waits(self):
+        self.assertEqual(worked_line(open_page(overlapping_attempts(), OPEN_NOW, pending=True)),
+                         "Worked 1h00m of 8h25m elapsed · 7h25m waiting")
+
+    def test_a_worker_still_running_counts_as_work_through_now(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tracker.md"
+            path.write_text(_tracker(
+                f"| Upload size limit | Cap uploads | unassigned | open | {TODAY} |  | M | build | implement | #109 | c |\n",
+                ))
+            _launch(path, "Cap uploads", "impl-1", ATTEMPT_TREE, "00:41", None, "human_review")
+            tracker = path.read_text()
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, day=TODAY)),
+                         "Worked 1h00m of 1h00m elapsed · 0m waiting")
+        self.assertEqual(worked_line(open_page(tracker, OPEN_LATER, day=TODAY)),
+                         "Worked 2h00m of 2h00m elapsed · 0m waiting")
+
+    def test_a_close_after_the_worker_ends_includes_the_wait_and_then_freezes(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),))
+        closed = replace(ISSUE, state="closed", closed_at=at(YESTERDAY, "20:00").astimezone(timezone.utc))
+        line = "Worked 1m of 2h44m elapsed · 2h43m waiting"
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, issue=closed)), line)
+        self.assertEqual(worked_line(open_page(tracker, OPEN_LATER, issue=closed)), line)
+
+    def test_a_task_with_no_launches_has_no_worked_line(self):
+        tracker = _tracker(
+            f"| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |\n",
+            "- 17:00 stage: Upload size limit → implement\n")
+        self.assertNotIn("Worked", flow_section(open_page(tracker, OPEN_NOW)))
+
+
+class StoreOpenTaskWaitingTest(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        from test_m6_store_board import make_store_workspace
+        self.root, self.db = make_store_workspace()
+        self.addCleanup(self.db.engine.dispose)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.key = "github:example/repo#109"
+        self.db.upsert_item(self.key, title="Upload size limit", stage="review")
+
+    def page(self, now=OPEN_NOW):
+        return ip.render(self.key, [], bs.EMPTY, now, LANES, db=task_forge.page_data(self.db))
+
+    def attempt(self, outcome):
+        self.db.record_segment(self.key, "implement", 1, runtime="codex", model="worker",
+                            started_at=at(YESTERDAY, "17:16").isoformat())
+        self.db.end_segment(self.key, "implement", 1, at(YESTERDAY, "17:17").isoformat(), outcome)
+
+    def test_ended_workers_leave_open_store_tasks_counting_waiting_through_now(self):
+        self.attempt("human_review")
+        for outcome in ("human_review", "failed", "done"):
+            with self.subTest(outcome=outcome):
+                self.db.record_segment(self.key, "implement", 1, at(YESTERDAY, "17:16").isoformat(),
+                                       ended_at=at(YESTERDAY, "17:17").isoformat(), outcome=outcome)
+                self.assertEqual(worked_line(self.page()), "Worked 1m of 8h25m elapsed · 8h24m waiting")
+                self.assertEqual(worked_line(self.page(OPEN_LATER)), "Worked 1m of 9h25m elapsed · 9h24m waiting")
+
+    def test_closed_store_task_freezes_at_its_last_worker_end(self):
+        self.attempt("done")
+        self.db.upsert_item(self.key, forge_state="closed")
+        for now in (OPEN_NOW, OPEN_LATER):
+            self.assertEqual(worked_line(self.page(now)), "Worked 1m of 1m elapsed · 0m waiting")
+
+    def test_no_workers_has_no_worked_line(self):
+        self.assertNotIn("Worked", self.page())
 
 
 class DoneClockAfterMidnightTest(unittest.TestCase):
@@ -1698,7 +1850,8 @@ class UnavailableAndStaleIssueTest(unittest.TestCase):
                 linker = ip._issue_linker(issue, key, home, cfg, self.root)
                 for part in (ip._issue_section(issue, linker), ip._acceptance(issue, linker)):
                     self.assertIn(f'href="{base}/issues/10"', part)
-                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+                    self.assertNotIn("/blob/", part)
+                    self.assertIn("src/lib.py:4", text(part))
                     self.assertNotIn('href="https://github.com/new/repo/', part)
 
     def test_conflicting_cached_key_and_url_never_link_to_either_namespace(self) -> None:
@@ -1719,7 +1872,8 @@ class UnavailableAndStaleIssueTest(unittest.TestCase):
         issue = bs.Issue("#12", "https://github.com/old/repo/issues/12", "Old", "open", (), body="See src/lib.py:target.")
         linker = ip._issue_linker(issue, "#12", bs.backlog.GitHubBacklog("old/repo"), self.cfg, self.root)
         part = ip._issue_section(issue, linker)
-        self.assertIn('href="https://github.com/old/repo/blob/HEAD/src/lib.py"', part)
+        self.assertNotIn("/blob/", part)
+        self.assertIn("src/lib.py:target", text(part))
         self.assertNotIn("#L1", part)
 
     def test_unknown_cached_identity_does_not_guess_current_backlog(self) -> None:

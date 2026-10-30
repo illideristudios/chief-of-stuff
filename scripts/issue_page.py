@@ -26,9 +26,9 @@ import tracker_log
 from decision_actions import addresses, state_of
 from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, store_decision_badge, write_if_changed
 from fragment import external_url, href, tab_bar, issue_href, issue_page_name, latest_thread_link
-from page_common import drop_html_comments, markdown_blocks, markdown_inline
+from page_common import STEP_TIMELINE_CSS, drop_html_comments, markdown_blocks, markdown_inline
 from module_graph import section as _graph
-from clock import dur as _dur
+from clock import done_clock, dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
 from tracker import TRAILING_NUMBER, Task, issue_key, issue_number, parse_tracker, resolve_due as _resolve_due
 from workspace import Config, ConfigError, EngineStatus, daily_trackers, engine_health, read_config, read_engine_status
@@ -58,8 +58,77 @@ header .chip.needs-input,header .chip.retries-exhausted{color:var(--dl);border-c
 .fl.total{border-top:1px solid var(--line);margin-top:4px;padding-top:6px}
 .rv{display:grid;grid-template-columns:74px minmax(0,1fr);gap:2px 10px;padding:6px 0;font-size:13px}
 .rv+.rv{border-top:1px dotted var(--line)} .rv>.prose{grid-column:2;margin:0}
+""" + STEP_TIMELINE_CSS + """
 </style>
 """
+_WORKER_LOG_RE = re.compile(
+    r"^worker (?P<stage>\S+) attempt (?P<attempt>\d+): (?P<outcome>[^:\n]+?)(?:: (?P<reason>.*))?\Z",
+    re.S,
+)
+_WORKER_SAID = "; worker said: "
+_SUITE_IN_REASON = "; Suite: "
+
+
+def _truncate_summary_line(line: str, limit: int = 120) -> str:
+    if len(line) <= limit:
+        return line
+    cut = line[:limit].rsplit(" ", 1)[0]
+    return (cut or line[:limit]).rstrip() + "…"
+
+
+def _short_first_line(reason: str) -> str:
+    line = next((ln.strip() for ln in reason.splitlines() if ln.strip()), reason.strip())
+    line = re.sub(r"^#{1,6}\s+", "", line)
+    line = re.sub(r"^(?:[-*+]|\d+\.)\s+", "", line)
+    line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
+    line = re.sub(r"`([^`]+)`", r"\1", line)
+    return _truncate_summary_line(line)
+
+
+def _reason_needs_report_block(reason: str) -> bool:
+    if _WORKER_SAID in reason:
+        return True
+    if "\n" in reason:
+        return True
+    if len(reason) > 140:
+        return True
+    stripped = reason.lstrip()
+    return bool(stripped.startswith("#") or stripped.startswith("```")
+                or re.match(r"^[-*+]\s", stripped) or re.match(r"^\d+\.\s", stripped))
+
+
+def _worker_step_summary(stage: str, attempt: str, outcome: str, short_reason: str) -> str:
+    return f"worker {stage} attempt {attempt}: {outcome}: {short_reason}"
+
+
+def _collapsed_worker_report(body: str, resolve) -> str:
+    prose = f'<div class="prose">{markdown_blocks(body, resolve)}</div>'
+    return f'<details class="step-report"><summary>Worker report</summary>{prose}</details>'
+
+
+def _format_log_step(message: str, resolve) -> str:
+    match = _WORKER_LOG_RE.match(message)
+    if not match or not match.group("reason"):
+        return f"<span>{escape(message)}</span>"
+    stage, attempt, outcome, reason = (match.group("stage"), match.group("attempt"),
+                                         match.group("outcome"), match.group("reason"))
+    if not _reason_needs_report_block(reason):
+        summary = _worker_step_summary(stage, attempt, outcome, reason)
+        return f"<span>{escape(summary)}</span>"
+    if _WORKER_SAID in reason:
+        gate_part, worker_report = reason.split(_WORKER_SAID, 1)
+        short_reason = gate_part.split(_SUITE_IN_REASON, 1)[0]
+        report_body = worker_report.strip()
+        if _SUITE_IN_REASON in gate_part:
+            suite_tail = gate_part.split(_SUITE_IN_REASON, 1)[1]
+            report_body = f"Suite: {suite_tail}\n\n{report_body}" if report_body else f"Suite: {suite_tail}"
+    else:
+        short_reason = _short_first_line(reason)
+        report_body = reason
+    summary = escape(_worker_step_summary(stage, attempt, outcome, short_reason))
+    details = _collapsed_worker_report(report_body, resolve) if report_body.strip() else ""
+    return f"<span>{summary}</span>{details}"
+
 
 
 def _clock(at: datetime, now: datetime) -> str:
@@ -344,6 +413,34 @@ def _next(rows, change: board_sources.Change | None, changes, why_not: str, now:
     return _section("What happens next", '    <div class="card">\n' + "\n".join(f"      <p>{x}</p>" for x in lines) + "\n    </div>")
 
 
+def _account_end(status: str, tasks, completions: dict[str, tuple[datetime, str]], now: datetime,
+                 segment_end: datetime, *, terminal_stage: bool) -> datetime:
+    """Where the worked/elapsed total stops (#913). An open task runs to `now`, so the idle time after the last
+    worker counts as waiting. A merge, a close, a done clock, or a move into a lane's last stage freezes it.
+    A finished row with no recorded time keeps `segment_end`."""
+    finished = status in ("merged", "closed", "done") or (bool(tasks) and all(
+        t.kind == "done" or t.name.strip() in completions for t in tasks))
+    # A grouped row can still read needs-input when one of its tasks has reached the lane's last stage (#220).
+    # Those bars already stop at that move, so the segment end is the completion.
+    if terminal_stage and not finished:
+        return min(segment_end, now)
+    if not finished:
+        return now
+    names = {t.name.strip() for t in tasks}
+    forge = [completions[name][0] for name in names if name in completions]
+    clocks = [clock for t in tasks if t.kind == "done" and t.state_time
+              and (clock := done_clock(t.state_time, now, now.tzinfo))]
+    if forge and clocks:
+        bound = min(max(forge), max(clocks))  # a forge time clips a later done clock, and does not extend an earlier one
+    elif forge:
+        bound = max(forge)
+    elif clocks:
+        bound = max(clocks)
+    else:
+        bound = segment_end
+    return min(bound, now)
+
+
 def render(number: int | str, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            lanes: dict | None = None, cfg: Config | None = None, graph: Graph | None = None, pages: Path | None = None,
            root: Path | None = None, pending: int = 0, kanban: Kanban | None = None,
@@ -394,7 +491,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
                         stage=item.stage, issue=item.issue_key)
             known = [task]
             mine = [task]
-            store_rows = [(s, r) for s, r in flow_chart.build_from_store(db, now, include_hold_bars=True)
+            store_rows = [(s, r) for _key, s, r in flow_chart.build_from_store(db, now, include_hold_bars=True)
                           if r.href == issue_href(item.issue_key)]
     if not mine:
         return None
@@ -442,10 +539,10 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     today = [t for t in today_tasks if not t.standing]
     holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs)
     held = held_names(holds)
-    ended = forge_ends(mine, sources, now.tzinfo)
+    completions = forge_ends(mine, sources, now.tzinfo)
     rows = store_rows if store_rows is not None else [
         (s, r) for s, r in flow_chart.build(log, mine, lanes or {}, held, ends, now,
-                                            ended=ended, home=sources.home)
+                                            ended=completions, home=sources.home)
         if r.ref and r.ref in selected
     ]
     log = [m for m in log if m.name.strip().casefold() in keys]
@@ -460,7 +557,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     # still open — store human_review and tracker holds keep NEEDS INPUT (#936 engine health).
     exhausted = db.exhaustion(item.issue_key) if item is not None and db is not None else None
     forge_word = next((word for word in ("merged", "closed")
-                       if any(ended.get(t.name.strip(), (None, ""))[1] == word for t in mine)), None)
+                       if any(completions.get(t.name.strip(), (None, ""))[1] == word for t in mine)), None)
     issue_closed = ((item is not None and item.forge_state == "closed")
                     or (issue is not None and issue.state == "closed"))
     if exhausted is not None:
@@ -510,8 +607,12 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             what[m] = f"ended {escape(ENDED.get(m.stage, 'ended'))} · {escape(w[3])} · {escape(runs[-1][1][4])}"
     steps = "\n".join(f'      <div class="step"><span class="when">{_step_when(m.at, now)}</span><span class="dot" data-k="{escape(m.stage)}">'
                       f"</span><span>{what.get(m) or markdown_inline(m.line.split(' ', 2)[2], linker.resolve)}</span></div>" for m in log)
-    # (#200, #220) the same clipped rows end both a still-running worker's span and elapsed, below
-    end = max((g.end for _, r in rows for g in r.segments if g.kind == "done"), default=now)
+    # (#200, #220) a still-running worker stops at the same boundary as elapsed.
+    # (#913) done bars stop at the last move while a task is held; that graphic is not the elapsed end.
+    segment_end = max((g.end for _, r in rows for g in r.segments if g.kind == "done"), default=now)
+    last_stage = {lane.stages[-1] for lane in (lanes or {}).values() if lane.stages}
+    terminal_stage = any(not m.launch and m.stage in last_stage for m in log)
+    end = _account_end(status, tuple(current), completions, now, segment_end, terminal_stage=terminal_stage)
     lines, spans = [], []
     for who, runs in workers.items():
         task = latest.get(runs[-1][0].name.strip().casefold())
@@ -545,12 +646,13 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             lines.append((took, f'<div class="wk"><b>{escape(who)}</b><span>{escape(seg.runtime)} '
                                f'{escape(seg.model)} · {escape(seg.stage)} · attempt {seg.attempt}</span>'
                                f'<span>{escape(run_status)} · {_dur(took)}</span></div>'))
-        steps_list.extend((parse_stamp(entry.at, now), escape(entry.message))
+        steps_list.extend((parse_stamp(entry.at, now), _format_log_step(entry.message, linker.resolve))
                           for entry in db.log(item.issue_key))
         steps = "\n".join(f'<div class="step"><span class="when">{_step_when(at, now)}</span>'
-                          f'<span class="dot"></span><span>{text}</span></div>'
+                          f'<span class="dot"></span><div class="step-body">{text}</div></div>'
                           for at, text in sorted(steps_list, key=lambda step: step[0]))
-        end = max((e for _, e in spans), default=now)
+        # A worker ending does not finish its issue; open store tasks keep accruing waiting time.
+        end = max((e for _, e in spans), default=now) if item.forge_state == "closed" else now
     # Worked: the union of every launch's interval, so overlapping workers count once.
     first = min((s for s, _ in spans), default=now)
     worked, reach = timedelta(), first

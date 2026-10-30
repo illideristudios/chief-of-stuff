@@ -385,7 +385,7 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
         self.assertEqual(self.db.item(KEY).stage, "review")
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "review", "attempt": 1})
-        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue")])
+        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue", stage="review")])
         self.assertEqual(self.launched, [])
 
     def test_unpublished_suite_hold_retries_without_accepting_the_failed_work(self):
@@ -506,6 +506,56 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
         self.assertIn(OTHER, self.cleanup.call_args.kwargs["completed"])
+
+    def test_reopen_clears_verified_landing_and_keeps_other_resume_keys(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="main-sha")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        data = dict(self.db.resume(KEY) or {})
+        data.update({"verified_landing": "main-sha", "verified_landing_head": "head", "marker": 1})
+        self.db.set_resume(KEY, data)
+        self.forge.rows[0]["forge_state"] = "open"
+        self.forge.rows[0]["merge_state"] = ""
+        self.forge.rows[0].pop("landing_sha", None)
+        self.run_pass()
+        data = self.db.resume(KEY)
+        self.assertNotIn("verified_landing", data)
+        self.assertNotIn("verified_landing_head", data)
+        self.assertEqual(data.get("marker"), 1)
+
+    def test_a_new_main_merge_commit_reclear_memo_and_recalls_landings(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="new-sha")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        data = dict(self.db.resume(KEY) or {})
+        data["verified_landing"] = True
+        self.db.set_resume(KEY, data)
+        self.forge.branch_head = lambda ref: tf.forge.Pipeline(1, "main", "new-sha", "failed", "")
+        reads = []
+
+        def landings(pipeline, keys, **kwargs):
+            reads.append(tuple(keys))
+            return {key: (False, False) for key in keys}
+
+        self.forge.landings = landings
+        self.run_pass()
+        self.assertEqual(reads, [(KEY,)])
+        self.assertNotIn("verified_landing", self.db.resume(KEY) or {})
+        self.assertNotIn(KEY, self.cleanup.call_args.kwargs["completed"])
+
+    def test_a_proved_landing_is_stored_as_the_snapshot_commit_and_not_reread(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="new-sha")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        self.forge.branch_head = lambda ref: tf.forge.Pipeline(1, "main", "new-sha", "passed", "")
+        merged = {"number": 21, "headRefOid": "source-head", "body": "Closes #1",
+                  "baseRefName": "main", "mergeCommit": {"oid": "new-sha"}}
+        self.forge.landings = tf.forge.Forge(tf.backlog.GitHubBacklog("example/project"),
+                                             gh=tf.FakeGh(merged=[merged])).landings
+        self.run_pass()
+        self.assertEqual(self.db.resume(KEY)["verified_landing"], "new-sha")
+        self.assertEqual(self.db.resume(KEY)["verified_landing_head"], "source-head")
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+        self.forge.landings = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("reread"))
+        self.run_pass()
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
 
     def test_landing_comparison_failures_reach_the_deduplicated_wait_log(self):
         self.forge.rows[0].update(forge_state="closed", merge_state="merged")
@@ -677,7 +727,7 @@ class EngineTest(unittest.TestCase):
         self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
         self.addCleanup(self.db.engine.dispose)
         actions = self.run_pass()
-        self.assertEqual(actions, [reconcile.Escalate(KEY, "park: two failures on this issue")])
+        self.assertEqual(actions, [reconcile.Escalate(KEY, "park: two failures on this issue", stage="review")])
         self.assertEqual(len(self.launched), 2)
         self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "exhausted")
 
@@ -998,6 +1048,14 @@ class EngineTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "partial read"):
                 self.run_pass()
         self.assertEqual(self.db.items()[0].forge_state, "open")
+
+    def test_a_repeated_dispatch_failure_is_logged_once(self):
+        self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
+        self.run_pass()
+        self.run_pass()
+        # A failed start also parks the issue for human review, which logs its own wait; only the failure repeats.
+        self.assertEqual([log.message for log in self.db.log(KEY) if log.message.startswith("dispatch failed")],
+                         ["dispatch failed: spawn failed"])
 
     def test_one_failed_action_does_not_stop_the_next(self):
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
@@ -1337,7 +1395,7 @@ class EngineTest(unittest.TestCase):
         unknown = self.db.segments(KEY)[-1]
         self.assertEqual((unknown.runtime, unknown.model, unknown.effort), ("", "", ""))
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "implement", "attempt": 2})
-        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue")])
+        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue", stage="implement")])
 
     def assert_cursor_start_failure(self, *, review=False, verification=False, restore_error=False):
         worker = engine.worker
@@ -1472,7 +1530,7 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(self.forge, "add_human_hold", create=True, return_value="offline"):
             with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
                 self.run_pass()
-            self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue")])
+            self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue", stage="implement")])
         self.assertTrue(self.db.items()[0].human_review)
         self.assertTrue(self.db.resume(KEY)["park"]["research"]["attempts"])
         self.assertEqual(self.launched, [])
@@ -1490,7 +1548,7 @@ class EngineTest(unittest.TestCase):
         self.pending_release()
         self.db.record_segment(KEY, "implement", 2, NOW.isoformat(), NOW.isoformat(), "failed")
         self.forge.rows[0]["human_review"] = False
-        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue")])
+        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue", stage="implement")])
         self.assertEqual(self.launched, [])
         self.assertTrue(self.db.resume(KEY)["park"]["recommendation"])
 
@@ -2248,7 +2306,7 @@ class EngineTest(unittest.TestCase):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
         self.db.set_resume(KEY, {"quota_percent": 100,
                                  "quota": {"retry_at": (NOW + timedelta(hours=1)).isoformat()}})
-        self.assertEqual(self.run_pass(max_concurrency=0), [reconcile.Limit(KEY, "quota", "reached quota limit")])
+        self.assertEqual(self.run_pass(max_concurrency=0), [reconcile.Limit(KEY, "quota", "reached quota limit", stage="review")])
         self.assertEqual(self.db.resume(KEY)["interrupt"]["stage"], "review")
         self.now += timedelta(hours=1)
         self.run_pass(max_concurrency=0)
@@ -2589,7 +2647,7 @@ class EngineTest(unittest.TestCase):
         self.db.upsert_item(KEY, stage="implement")
         self.db.set_resume(KEY, {"quota_percent": 100,
                                  "quota": {"reset": "in two hours", "retry_at": (NOW + timedelta(hours=2)).isoformat()}})
-        self.assertEqual(self.run_pass(), [reconcile.Limit(KEY, "quota", "reached quota limit")])
+        self.assertEqual(self.run_pass(), [reconcile.Limit(KEY, "quota", "reached quota limit", stage="implement")])
         self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "limit")
         self.assertEqual(self.launched, [])
         self.now += timedelta(hours=2)
@@ -2651,7 +2709,6 @@ class EngineTest(unittest.TestCase):
         self.db.add_decision(KEY, "design", "Rework?", record={"reversed": True})
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, start, "builder", 2)])
         self.assertNotIn("decision_interrupts", self.db.resume(KEY))
-
 
 
 
@@ -2981,6 +3038,168 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(datetime.fromisoformat(self.db.resume(KEY)["quota"]["retry_at"]),
                          self.now + timedelta(minutes=1))
 
+    def test_expired_quota_clears_its_hold_without_quota_percent(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        quota = {"retry_at": (NOW - timedelta(minutes=1)).isoformat()}
+        self.db.set_resume(KEY, {"quota": quota, "interrupt": {
+            "kind": "limit", "reason": "reached quota limit", "stage": "review"}})
+        self.run_pass(max_concurrency=0)
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.db.set_resume(KEY, {"quota": quota, "interrupt": {
+            "kind": "limit", "reason": "reached spend limit", "stage": "review"}})
+        self.run_pass(max_concurrency=0)
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["reason"], "reached spend limit")
+
+    def test_an_answered_ask_with_no_decision_row_can_be_reversed(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        ask_id = self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "ctx")
+        self.db.answer_ask(KEY, ask_id, "Keep")
+        model = mock.Mock()
+        self.run_pass(model=model)
+        model.assert_not_called()
+        row = self.db.decisions(KEY)[-1]
+        self.assertEqual((row.topic, row.question, row.answer, row.decided_by),
+                         ("ask", "Which parser?", "Keep", "user"))
+        self.assertEqual(row.record["decision"]["instance"], f"ask-{ask_id}")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "ask", "Which parser?")
+        self.db.add_decision(KEY, rev.topic, rev.question, rev.answer, rev.decided_by, rev.record)
+        self.assertTrue(decision_escalation.is_reversed(self.db.decisions(KEY)[-1]))
+        other = self.db.add_ask(KEY, "implement", 1, "s1", "Which backend?", ["Local", "Remote"], "")
+        with self.assertRaises(ValueError):
+            self.db.answer_ask(KEY, other, "Neither")
+        self.assertIsNone(self.db.asks(KEY)[-1].answer)
+
+    def test_a_human_answer_during_consult_wins_and_a_matching_one_adds_no_row(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        ask_id = self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "ctx")
+
+        def during(choice):
+            def call(request):
+                if call.n == 0:
+                    self.db.answer_ask(KEY, ask_id, choice)
+                vote, picked = pending.pop(0)
+                call.n += 1
+                return model_port.Reply("", {"vote": vote, "choice": picked, "reasoning": "because"}, "", 0.1, 1)
+            pending = [("adopt", "Split")] * 3
+            call.n = 0
+            return call
+
+        self.run_pass(model=during("Keep"))
+        self.assertEqual(self.db.asks(KEY)[0].answer, "Keep")
+        self.assertEqual((self.db.decisions(KEY)[-1].answer, self.db.decisions(KEY)[-1].decided_by), ("Keep", "user"))
+        # A fresh issue: the same human answer as the trio does not add a second row.
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        self.db.upsert_item(OTHER, stage="implement")
+        other_ask = self.db.add_ask(OTHER, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "ctx")
+
+        def same(request):
+            if same.n == 0:
+                self.db.answer_ask(OTHER, other_ask, "Split")
+            same.n += 1
+            return model_port.Reply("", {"vote": "adopt", "choice": "Split", "reasoning": "because"}, "", 0.1, 1)
+        same.n = 0
+        self.run_pass(model=same)
+        rows = [row for row in self.db.decisions(OTHER)]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(self.db.asks(OTHER)[0].answer, "Split")
+
+    def _finished_restart(self):
+        self._trio()
+        self.db.clock = lambda: self.now
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split", record={
+            "decision": {"options": ["Split", "Keep"], "context": "original", "instance": "parser"}})
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        self.db.add_decision(KEY, rev.topic, rev.question, rev.answer, rev.decided_by, rev.record)
+        self.run_pass()
+        self.finish("implement")
+
+    def test_completed_restart_without_a_model_still_asks(self):
+        self._finished_restart()
+        self.run_pass(model=None)
+        ask, = self.db.asks(KEY)
+        self.assertEqual((ask.question, ask.options), ("Which parser?", ["Split", "Keep"]))
+        self.assertEqual([stage for _, stage, _, _ in self.launched], ["implement"])
+
+    def test_quota_backoff_asks_once_about_a_finished_restart(self):
+        self._finished_restart()
+        data = dict(self.db.resume(KEY) or {})
+        data["quota"] = {"retry_at": (self.now + timedelta(hours=1)).isoformat()}
+        self.db.set_resume(KEY, data)
+        model = mock.Mock()
+        self.run_pass(model=model)
+        model.assert_not_called()
+        ask, = self.db.asks(KEY)
+        self.assertEqual((ask.question, ask.options), ("Which parser?", ["Split", "Keep"]))
+        self.assertEqual([stage for _, stage, _, _ in self.launched], ["implement"])
+        rows = len(self.db.decisions(KEY))
+        self.run_pass(model=model)
+        model.assert_not_called()
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+        self.assertEqual(len(self.db.decisions(KEY)), rows)
+
+    def _open_reversal_at_merge(self):
+        self._merge_gate()
+        self.p.stages["review"] = policy.Place("review", "critic")
+        self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split",
+                             record={"decision": {"options": ["Split", "Keep"]}})
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
+
+    def test_restart_claim_rejected_for_an_existing_segment_drops_the_route(self):
+        self._open_reversal_at_merge()
+        real = engine.reconcile.plan
+
+        def plan(*args, **kwargs):
+            actions = real(*args, **kwargs)
+            for action in actions:
+                if isinstance(action, reconcile.Dispatch):
+                    self.db.record_segment(KEY, action.stage, action.attempt, self.now.isoformat())
+            return actions
+
+        with mock.patch.object(engine.reconcile, "plan", side_effect=plan):
+            self.run_pass()
+        self.assertNotIn("pending_stage", self.db.resume(KEY) or {})
+        self.assertEqual(self.forge.writes, [])
+        self.assertEqual(self.forge.rows[0]["stage"], "merge")
+
+    def test_launch_failure_keeps_fail_start_pending_stage(self):
+        self._open_reversal_at_merge()
+        with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")), \
+             mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.run_pass()
+        pending = self.db.resume(KEY)["pending_stage"]
+        self.assertEqual(pending["stage"], "implement")
+        self.assertIn("restore_hold", pending)
+        self.assertNotIn("attempt", pending)
+
+    def test_trio_retry_keys_hide_context_and_a_user_answer_drops_them(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        context = "parser constraints that must not sit in the resume key"
+        ask_id = self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], context)
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "timeout"))
+        self.run_pass(model=failed)
+        token, = self.db.resume(KEY)["trio_retries"]
+        self.assertNotIn(context, token)
+        parts = json.loads(token)
+        self.assertEqual([len(parts[5]), len(parts[6])], [64, 64])
+        data = self.db.resume(KEY)
+        legacy = json.dumps([parts[0], parts[1], parts[2], parts[3], parts[4], context, ["Split", "Keep"]])
+        other = json.dumps(["ask", "Which backend?", "ask-9", "implement", 1, "a" * 64, "b" * 64])
+        data["trio_retries"][legacy] = {"failures": 1, "retry_at": (self.now + timedelta(hours=1)).isoformat()}
+        data["trio_retries"][other] = {"failures": 1, "retry_at": (self.now + timedelta(hours=1)).isoformat()}
+        self.db.set_resume(KEY, data)
+        self.db.answer_ask(KEY, ask_id, "Keep")
+        self.run_pass(model=failed)
+        left = self.db.resume(KEY).get("trio_retries") or {}
+        self.assertNotIn(token, left)
+        self.assertNotIn(legacy, left)
+        self.assertIn(other, left)
+
 
 class MainTest(unittest.TestCase):
     def setUp(self):
@@ -3021,8 +3240,10 @@ class MainTest(unittest.TestCase):
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
         self.assertEqual(passed.call_args.kwargs["workers"].claude_as_profile, "secondary")
         self.assertEqual(passed.call_args.kwargs["teardown_command"], "exit 7")
-        self.assertEqual(passed.call_args.kwargs["launch"].keywords["teardown_command"], "exit 7")
+        self.assertEqual(passed.call_args.kwargs["launch"].keywords["config"].workers.teardown, "exit 7")
         self.assertEqual(passed.call_args.kwargs["launch"].keywords["launcher"], "t3")
+        launched = passed.call_args.kwargs["launch"].keywords
+        self.assertEqual(launched["t3_providers"], launched["config"].workers.t3_providers)
         sleep.assert_not_called()
 
     def test_the_production_pass_consults_the_trio_through_the_claude_adapter(self):
@@ -3040,7 +3261,38 @@ class MainTest(unittest.TestCase):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
-        self.assertEqual(passed.call_args.kwargs["launch"].keywords["rules"], ("Keep tests.",))
+        self.assertEqual(passed.call_args.kwargs["launch"].keywords["config"].workers.rules, ("Keep tests.",))
+
+    def test_each_pass_pins_rules_and_stage_defaults_and_refreshes_together(self):
+        path = self.root / "settings.toml"
+        original = path.read_text()
+
+        def write_settings(version):
+            path.write_text(original + f'rules = ["Rule {version}."]\n'
+                            f'[stages.implement]\nagent = "builder{version}"\nskills = ["skill{version}"]\n')
+
+        write_settings(1)
+        launches = []
+        worker_configs = []
+
+        def passed(**kwargs):
+            launches.append(kwargs["launch"])
+            worker_configs.append(kwargs["workers"])
+            write_settings(len(launches) + 1)
+
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass", side_effect=passed) as run, \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(run.call_count, 2)
+        # The engine passes one snapshot; test_worker exercises the launch after an on-disk edit.
+        for version, launch in enumerate(launches, 1):
+            config = launch.keywords["config"]
+            self.assertEqual(config.workers.rules, (f"Rule {version}.",))
+            self.assertEqual(config.stages["implement"].agent, f"builder{version}")
+            self.assertEqual(config.stages["implement"].skills, (f"skill{version}",))
+            self.assertIs(worker_configs[version - 1], config.workers)
+        self.assertIsNot(launches[0].keywords["config"], launches[1].keywords["config"])
 
     def test_loaded_suite_policy_reaches_collect_and_launch(self):
         with (self.root / "settings.toml").open("a") as config:
@@ -3049,7 +3301,7 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
         self.assertTrue(passed.call_args.kwargs["require_green"])
-        self.assertTrue(passed.call_args.kwargs["launch"].keywords["require_green"])
+        self.assertTrue(passed.call_args.kwargs["launch"].keywords["config"].workers.require_green_tests)
 
     def test_rules_that_exceed_a_stage_budget_refuse_before_the_engine_loop(self):
         from dataclasses import replace
@@ -3081,6 +3333,124 @@ class MainTest(unittest.TestCase):
                     self.assertIn("implement", errors.getvalue())
                 else:
                     passed.assert_called_once()
+
+    def test_bad_reload_keeps_the_last_good_snapshot_and_still_runs_the_pass(self):
+        path = self.root / "settings.toml"
+        original = path.read_text()
+        for problem in ("missing", "empty", "truncated", "unreadable"):
+            with self.subTest(problem=problem):
+                if problem == "unreadable" and os.geteuid() == 0:
+                    self.skipTest("root reads a mode-0 file, so the reload would succeed")
+                path.write_text(original + 'max_concurrency = 2\nrules = ["Keep tests."]\n'
+                                '[stages.implement]\nagent = "builder"\nskills = ["original-skill"]\n')
+                configs = []
+
+                def passed(**kwargs):
+                    config = kwargs["launch"].keywords["config"]
+                    configs.append(config)
+                    self.assertIs(kwargs["workers"], config.workers)
+                    self.assertEqual(kwargs["max_concurrency"], 2)
+                    if len(configs) != 1:
+                        return
+                    if problem == "missing":
+                        path.unlink()
+                    elif problem == "unreadable":
+                        path.chmod(0)
+                    else:
+                        path.write_text("" if problem == "empty" else "[workers")
+
+                errors = io.StringIO()
+                try:
+                    with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+                         mock.patch.object(engine, "run_pass", side_effect=passed) as run, \
+                         mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
+                         contextlib.redirect_stderr(errors):
+                        self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+                finally:
+                    if path.exists():
+                        path.chmod(0o600)
+                self.assertEqual(run.call_count, 2)
+                self.assertIs(configs[0], configs[1])
+                self.assertEqual(configs[1].workers.rules, ("Keep tests.",))
+                self.assertEqual(configs[1].stages["implement"].skills, ("original-skill",))
+                self.assertIn("settings reload failed", errors.getvalue())
+                if problem in ("missing", "empty"):
+                    self.assertIn("settings.toml", errors.getvalue())
+
+    def test_reload_failure_outside_settings_error_keeps_the_snapshot(self):
+        configs = []
+
+        def passed(**kwargs):
+            configs.append(kwargs["launch"].keywords["config"])
+
+        real = engine.settings.load
+        loads = []
+
+        def load(*args):
+            loads.append(1)
+            if len(loads) == 1:
+                return real(*args)
+            raise ValueError("invalid literal for int() with base 10: '²'")
+
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine.settings, "load", side_effect=load), \
+             mock.patch.object(engine, "run_pass", side_effect=passed), \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
+             contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(len(configs), 2)
+        self.assertIs(configs[0], configs[1])
+        self.assertIn("settings reload failed", errors.getvalue())
+
+    def test_reload_that_exceeds_a_stage_budget_keeps_the_last_good_snapshot(self):
+        configs = []
+        loaded = []
+        real = engine.settings.load
+
+        def load(*args):
+            config = real(*args)
+            # Startup keeps the real object; each reload is a distinct snapshot the validator can tell apart.
+            loaded.append(config if not loaded else replace(config))
+            return loaded[-1]
+
+        def validate(root, config, policies):
+            if len(loaded) > 2 and config is loaded[2]:
+                raise engine.dispatch_prompt.RefusedError("[workers] rules do not fit the implement assignment")
+
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine.settings, "load", side_effect=load), \
+             mock.patch.object(engine.dispatch_prompt, "validate_worker_rules", side_effect=validate), \
+             mock.patch.object(engine, "run_pass", side_effect=lambda **kw: configs.append(kw["launch"].keywords["config"])), \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, None, KeyboardInterrupt]), \
+             contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(len(loaded), 4)
+        self.assertEqual(len(configs), 3)
+        self.assertIs(configs[0], loaded[1])
+        self.assertIs(configs[1], loaded[1])
+        self.assertIs(configs[2], loaded[3])
+        self.assertEqual(errors.getvalue().count("settings reload failed"), 1)
+        self.assertIn("do not fit", errors.getvalue())
+
+    def test_once_bad_reload_runs_on_the_valid_startup_snapshot(self):
+        path = self.root / "settings.toml"
+        original = engine.startup.workspace_forge
+
+        def startup(root):
+            result = original(root)
+            path.write_text("[workers")
+            return result
+
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine.startup, "workspace_forge", side_effect=startup), \
+             mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        self.assertEqual(passed.call_count, 1)
+        self.assertEqual(passed.call_args.kwargs["workers"].claude_as_profile, "secondary")
+        self.assertIn("settings reload failed", errors.getvalue())
 
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):
         errors = io.StringIO()

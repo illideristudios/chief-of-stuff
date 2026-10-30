@@ -513,8 +513,10 @@ class CardFactsTest(unittest.TestCase):
     def test_finished_tasks_have_no_looping_mark(self):
         log = "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n- 11:00 stage: Cut the release → fix\n"
         lanes = {"build": st.Lane(("implement", "review", "fix", "merge", "main"))}
+        # A done task draws no card at all outside `main` (#1153), so it carries no mark.
+        self.assertNotRegex(self.cols([], log, tracker=TRACKER.replace("running 10:30", "done 10:30"), lanes=lanes),
+                            r">Cut the release</(?:a|div)>")
         for tracker, changes in (
-                (TRACKER.replace("running 10:30", "done 10:30"), []),
                 (TRACKER.replace("| build | review |", "| build | main |"), []),
                 (TRACKER, [change("!3", state="merged", issues=("#9",))])):
             with self.subTest(tracker=tracker, changes=changes):
@@ -593,6 +595,30 @@ class HomeProjectUrlTest(unittest.TestCase):
         bare = replace(self.sources, changes={}, issues={})
         card = card_named(rb.build_columns(self.tasks, LANES, KANBAN, bare, NOW), "Ship it")
         self.assertEqual(card.refs, (("#8", fragment.issue_href("gitlab:example.com/o/app#8")),))
+
+
+class ForeignProjectUrlTest(unittest.TestCase):
+    """#416: a card naming another project on the home host uses that identity's task page, not `/issues/<n>`."""
+
+    HOME = backlog.Backlog(host="https://example.com", project="o/app")
+    CELL = "https://example.com/acme/web/-/issues/8"
+    IDENTITY = "gitlab:example.com/acme/web#8"
+
+    def card(self, issues: dict) -> columns.Card:
+        sources = bs.Sources({}, issues, {}, (), {}, self.HOME)
+        tracker = TRACKER.replace("## Decisions", f"| Ship it | Ship | Robin | waiting | 09:00 |  | S | build | review | {self.CELL} | c |\n\n## Decisions")
+        return card_named(rb.build_columns(rb.parse_tracker(tracker).tasks, LANES, KANBAN, sources, NOW), "Ship it")
+
+    def test_the_name_and_the_ref_open_the_other_projects_issue(self) -> None:
+        # Main routes verified foreign identities through issue_href, not the forge URL (#1173).
+        known = {self.IDENTITY: bs.Issue(self.IDENTITY, self.CELL, "Locale", "open", ())}
+        expected = ((self.IDENTITY, fragment.issue_href(self.IDENTITY)),)
+        for issues in ({}, known):
+            with self.subTest(cached=bool(issues)):
+                card = self.card(issues)
+                self.assertEqual(card.refs, expected)
+                self.assertEqual(card.href, fragment.issue_href(self.IDENTITY))
+                self.assertNotEqual(card.href, "/issues/8")
 
 
 class CardLinkTest(unittest.TestCase):

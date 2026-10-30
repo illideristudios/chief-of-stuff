@@ -28,6 +28,7 @@ LEAVES = ("fragment", "gantt", "columns", "panels", "page_reload")
 
 # Every script module that draws nothing. A new one belongs here unless it renders a page.
 DRAWS_NOTHING = (
+    "transcripts",
     "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "forge_review",
     "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "kanban_cli", "pipeline_cli", "audit_tasks",
     "one_shot", "spawn_session", "session_exec", "shell_setup", "process_status", "one_shot_result", "adopt_one_shots", "merge_approved", "merge_ready",
@@ -56,6 +57,7 @@ DRAWS_NOTHING = (
     "decisions_cli",  # Frameworks and Drivers: coordinator/architect/owner decision graph CLI.
     "performance",
     "performance_report",
+    "bake",
     "limits", "limits_history", "limits_probe", "limits_cli", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
     "supervisor", "release_selection", "engine_intent",
     "startup",
@@ -234,6 +236,8 @@ CIRCLES: dict[str, frozenset[str]] = {
         "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance", "heartbeat",
     }),
     "adapters": frozenset({
+        "transcripts",  # Claude transcript file ingestion and normalization.
+        "migrations/versions/0013_transcripts",  # Store schema, with its gateway.
         "fragment", "page_common", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
         "decision_graph_page", "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store",
         "forge", "private_state",
@@ -263,7 +267,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
         "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
-        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "architect_signals_cli", "decisions_cli",
+        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "bake", "architect_signals_cli", "decisions_cli",
         "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }
@@ -277,7 +281,6 @@ OUTWARD_IMPORTS = frozenset({
     "dispatch_prompt→backlog_ref",
     "dispatch_prompt→settings",
     "dispatch_prompt→workspace",
-    "estimate→workspace",
     "kanban→backlog",
     "kanban→settings",
     "merge_approved→backlog",

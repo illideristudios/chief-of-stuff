@@ -28,8 +28,10 @@ inflight or designed; `hot` marks what waits on this decision. A reference's `at
 
 Text is escaped; `code`, **bold** and http(s) URLs are marked up, and references link to the forge the
 `Backlog:` line names: `#12`, `!58` (`!58#note_1`), a commit sha, `pipeline #8812`, `path/file.py:42`
-(`:24-58`, `:symbol`), `docs/x.md §4.2` or `docs/x.md#anchor`, `src/dir/`. A section or symbol is placed from a
-copy under `--root` when there is one. With no forge, or a reference it cannot place, the text stays text.
+(`:24-58`, `:symbol`), `docs/x.md §4.2` or `docs/x.md#anchor`, `src/dir/`. A path links only when `--root`
+contains it in the repository whose `origin` is that forge, committed at the reference's `at`, or at HEAD when
+unpinned. A section or symbol is placed from the bounded local copy. With no forge, no root, a different origin,
+or a path the repository does not contain, the text stays text.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from html import escape
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 import board_sources
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
@@ -54,7 +57,7 @@ from decision_actions import DecisionState, OPEN_STATES, addresses, state_of, st
 from fragment import DECISIONS_ANCHOR, FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
 from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
-from module_graph import section as _graph
+from module_graph import reference_path, section as _graph
 from notify_service import atomic_write
 from settings import Graph, SettingsError, load as load_settings
 from task_forge import PageData
@@ -148,23 +151,44 @@ GITHUB = {"issue": "issues/{}", "MR": "pull/{}", "commit": "commit/{}", "blob": 
 GITLAB = {"issue": "-/issues/{}", "MR": "-/merge_requests/{}", "commit": "-/commit/{}", "blob": "-/blob/{at}/{}",
           "tree": "-/tree/{at}/{}", "pipeline": "-/pipelines/{}"}
 DOCS = (".md", ".markdown", ".rst", ".adoc", ".txt")
+def _forge_identity(forge: Backlog | GitHubBacklog) -> tuple[str, str] | None:
+    """(host, project) the backlog names. GitHub is always github.com."""
+    if isinstance(forge, GitHubBacklog):
+        host, project = "github.com", forge.repo
+    else:
+        host, project = (urlsplit(forge.host).hostname or "").lower(), forge.project
+    project = project.strip("/")
+    return (host, project) if host and project else None
+
+
 REFERENCE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
 class Linker:
-    """Turns a reference into its place on the workspace's forge (the `Backlog:` line). `root` holds local copies
-    that place a `§` section or a symbol; `at` pins files to a commit. With no forge nothing is linked."""
+    """Turns a reference into its place on the workspace's forge (the `Backlog:` line). A path links only when
+    `root` contains it in the repository whose origin is that forge, committed at `at` (HEAD when unpinned);
+    otherwise it stays text. `root` also places a `§` section or a symbol in its bounded local copy. `cache` lives
+    for one render and is shared with every pinned row linker."""
 
     forge: Backlog | GitHubBacklog | None = None
     root: Path | None = None
     at: str | None = None
     _files: dict[str, tuple[str, ...]] = field(default_factory=dict, compare=False, repr=False)
+    cache: dict = field(default_factory=dict, compare=False, repr=False)
 
     def _url(self, what: str, target: str) -> str:
         gh = isinstance(self.forge, GitHubBacklog)
         base = f"https://github.com/{self.forge.repo}" if gh else f"{self.forge.host.rstrip('/')}/{self.forge.project}"
-        return f"{base}/" + (GITHUB if gh else GITLAB)[what].format(target, at=self.at or "HEAD")
+        rev = quote(self.at, safe="") if isinstance(self.at, str) else "HEAD"
+        if what in ("blob", "tree"):
+            target = "/".join(quote(part, safe="") for part in target.split("/"))
+        return f"{base}/" + (GITHUB if gh else GITLAB)[what].format(target, at=rev)
+
+    def _lookup(self, workspace_path: str, need: str) -> str | None:
+        if self.root is None or self.forge is None:
+            return None
+        return reference_path(self.root, workspace_path, _forge_identity(self.forge), self.at, need, self.cache)
 
     def _find(self, path: str, sec: str | None, sym: str | None) -> str:
         """The `#` fragment for a section heading or a symbol's definition in a local copy, or "" (never guessed)."""
@@ -211,18 +235,23 @@ class Linker:
         path = m["path"]
         if not path:
             return None
-        if path.endswith("/"):
-            return "code", m[0], self._url("tree", path.rstrip("/")) + "/"
-        if "/" not in path and not (m["line"] or m["sym"] or m["sec"] or m["anchor"]):
+        directory = path.endswith("/")
+        bare = path[:-1] if directory else path
+        if not bare or (not directory and "/" not in bare and not (m["line"] or m["sym"] or m["sec"] or m["anchor"])):
             return None  # a bare `name.ext` is too often a word
+        repo_rel = self._lookup(bare, "tree" if directory else "blob")
+        if not repo_rel:
+            return None
+        if directory:
+            return "code", m[0], self._url("tree", repo_rel) + "/"
         frag = ""
         if m["line"]:
             frag = f"#L{m['line']}" + (f"-{'L' if gh else ''}{m['end']}" if m["end"] else "")
         elif m["anchor"]:
             frag = f"#{m['anchor']}"
         elif m["sec"] or m["sym"]:
-            frag = self._find(path, m["sec"], m["sym"])
-        return ("doc" if path.lower().endswith(DOCS) else "code"), m[0], self._url("blob", path) + frag
+            frag = self._find(bare, m["sec"], m["sym"])
+        return ("doc" if bare.lower().endswith(DOCS) else "code"), m[0], self._url("blob", repo_rel) + frag
 
     def href(self, text: str) -> str | None:
         """The first placeable reference in `text` (already escaped)."""
@@ -337,6 +366,23 @@ def answer_key(d: dict) -> str:
     return (a.get("key") or "") if isinstance(a, dict) else (a or "")
 
 
+def tracker_answer(root: Path | None, slug: str) -> Row | None:
+    """The latest Decisions row naming `decision-<slug>` across the workspace's daily trackers, or None. A tracker
+    that cannot be read raises (OSError, ConfigError, ValueError): the caller decides whether that fails closed."""
+    if root is None or not slug:
+        return None
+    cfg = read_config(root)
+    rows = [Row(d, leading(t, d, cfg.zone), item, words)
+            for d, path in daily_trackers(root, cfg)
+            for t, item, words in decision_rows(path.read_text())]
+    return Context(datetime.now(cfg.zone), tuple(rows)).answer(slug)
+
+
+def is_answered(d: dict, slug: str = "", root: Path | None = None) -> bool:
+    """True when `d` carries an answer or a tracker Decisions row names `decision-<slug>`."""
+    return bool(d.get("answer")) or tracker_answer(root, slug) is not None
+
+
 def _saved_html(d: dict, when) -> str:
     """The saved answer: its option, the user's words, and when it was saved."""
     a = saved(d)
@@ -344,6 +390,18 @@ def _saved_html(d: dict, when) -> str:
     key = f'<span><span class="key">{escape(a["key"])}</span>{escape(title)}</span>' if a.get("key") else ""
     words = f'<span class="words">“{markdown_inline(str(a["words"]).strip())}”</span>' if str(a.get("words") or "").strip() else ""
     return f'{key}{words}<span class="saved">answered, saved {when(datetime.fromisoformat(a["at"]))}</span>'
+
+
+def _answered_html(d: dict, when, chosen: str = "", row: Row | None = None, link: Linker = Linker()) -> str:
+    """The recorded answer. A page save keeps its markup until a Decisions row takes it up."""
+    if row is None and saved(d):
+        return _saved_html(d, when)
+    title = next((o.get("title", "") for o in d["options"] if o["key"] == chosen), "")
+    key = f'<span><span class="key">{escape(chosen)}</span>{escape(title)}</span>' if chosen else ""
+    raw = row.words.strip().strip('"“”').strip() if row is not None else ""
+    words = f'<span class="words">“{_md(raw, link)}”</span>' if raw else ""
+    stamp = f'<span class="saved">answered {when(row.when)}</span>' if row and row.when else '<span class="saved">answered</span>'
+    return f"{key}{words}{stamp}"
 
 
 def _answer_form(slug: str, cls: str, opts: str, back: str = "") -> str:
@@ -379,28 +437,41 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
             + f'></span><span>{md(t["text"])}</span></div>' for t in d["timeline"])
         left.append(_section("How it got here", f'    <div class="card timeline">\n{steps}\n    </div>'))
     page = saved(d)
+    keys = [o["key"] for o in d["options"]]
+    fmt = (lambda t: ctx.when(t)) if ctx else (lambda t: f"{t:%H:%M}")
+    # A Decisions row outranks a page-saved answer, as index() does.
+    row = ctx.answer(slug) if ctx else None
+    chosen = ctx.key(row, keys) if row else answer_key(d)
+    answered = bool(chosen or row or page)
     opts = []
     for o in d["options"]:
         tag = '<span class="tag">recommended</span>' if o["key"] == d["recommended"] else ""
-        on = " checked" if (selected == o["key"] if refusal else page and page.get("key") == o["key"]) else ""
-        opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value="{escape(o["key"])}"{on}> {escape(o["key"])}</span>'
-                    f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </label>')
+        if answered:
+            opts.append(f'      <div class="opt"><span class="k">{escape(o["key"])}</span>'
+                        f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </div>')
+        else:
+            on = " checked" if (selected == o["key"] if refusal else False) else ""
+            opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value="{escape(o["key"])}"{on}> {escape(o["key"])}</span>'
+                        f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </label>')
     # The write-in is the next option: same look, key "" (a words-only save), the next letter after the real ones.
     wi_key = chr(ord("A") + len(d["options"]))
-    on = " checked" if (not selected if refusal else page and page.get("key") == "") else ""
-    draft_value = f' value="{escape(draft)}"' if refusal else ""
-    opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value=""{on}> {wi_key}</span>'
-                f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer"{draft_value}>'
-                f'<button type="submit">save</button></span>\n      </label>')
-    fmt = (lambda t: ctx.when(t)) if ctx else (lambda t: f"{t:%H:%M}")
-    done = f'    <div class="card answered">{_saved_html(d, fmt)}</div>\n' if page else ""
-    right.append(_section("Options", done + "    " + _answer_form(slug, "options", "\n" + "\n".join(opts), back) + "\n    </form>"))
+    if answered:
+        done = f'    <div class="card answered">{_answered_html(d, fmt, chosen, row, link)}</div>\n'
+        options = done + '    <div class="options">\n' + "\n".join(opts) + "\n    </div>"
+    else:
+        on = " checked" if (not selected if refusal else False) else ""
+        draft_value = f' value="{escape(draft)}"' if refusal else ""
+        opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value=""{on}> {wi_key}</span>'
+                    f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer"{draft_value}>'
+                    f'<button type="submit">save</button></span>\n      </label>')
+        options = "    " + _answer_form(slug, "options", "\n" + "\n".join(opts), back) + "\n    </form>"
+    right.append(_section("Options", options))
     right.append(_section("Recommendation", f'    <div class="card prose">{markdown_blocks(d["why"], link.resolve)}</div>'))
     right.append(_section("If you don't answer", f'    <div class="card default prose">{markdown_blocks(d["default"], link.resolve)}</div>'))
     if d.get("references"):
         rows = []
         for r in d["references"]:
-            pin = Linker(forge, root, r.get("at"))
+            pin = Linker(forge, root, r.get("at"), cache=link.cache)
             label = f" {escape(r['label'])}" if r.get("kind") and r.get("label") else ""
             one = TOKEN.fullmatch(escape(r["value"], quote=False))
             one = one and pin.resolve(one)
@@ -412,13 +483,9 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
             rows.append(f'      <span class="cap">{escape(r.get("kind") or r.get("label", ""))}</span><span>{what}</span>'
                         f'<span class="st">{status}</span>')
         right.append(_section("References", '    <div class="card refs">\n' + "\n".join(rows) + "\n    </div>"))
-    keys = [o["key"] for o in d["options"]]
     sources = f" from {md(d['sources'])}" if d.get("sources") else ""
     at = ctx.asked(slug, d, mtime) if ctx else None
     asked = f"asked {ctx.when(at)}" if at else f"asked {d['asked']}" if d.get("asked") else None
-    row = ctx.answer(slug) if ctx and not answer_key(d) else None
-    chosen = answer_key(d) or (ctx.key(row, keys) if row else "")
-    answered = bool(chosen or row or page)
     eyebrow = " · ".join([escape(x) for x in ("Decision", d.get("topic"), _day(day), asked) if x]
                          + ['<a href="/decisions">decisions</a>', '<a href="/">board</a>'])
     chip = f"ANSWERED · {escape(chosen)}" if chosen else "ANSWERED" if answered else "PENDING"
@@ -441,8 +508,9 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
             + where
             + '  <div class="cols">\n  <div class="col">\n' + "".join(left) + '  </div>\n  <div class="col">\n'
             + "".join(right) + "  </div>\n  </div>\n"
-            + f'\n  <p class="foot">Prepared by the coordinator{sources}. Answer here or in chat: '
-            + ", ".join(keys) + f", or {wi_key} in your own words.</p>\n</main>\n{ANSWER_JS}</body>\n</html>\n")
+            + f'\n  <p class="foot">Prepared by the coordinator{sources}.'
+            + ("" if answered else " Answer here or in chat: " + ", ".join(keys) + f", or {wi_key} in your own words.")
+            + f"</p>\n</main>\n{'' if answered else ANSWER_JS}</body>\n</html>\n")
 
 
 def forge(root: Path) -> Backlog | GitHubBacklog | None:
@@ -897,6 +965,9 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
         topic = f'<span class="topic">{escape(d["topic"])}</span>' if d.get("topic") else ""
         if saved(d):
             opts = f'<span class="stack">{_saved_html(d, ctx.when)}</span>'
+        elif key := answer_key(d):
+            title = next((o.get("title", "") for o in d["options"] if o["key"] == key), "")
+            opts = f'<span class="stack"><span><span class="key">{escape(key)}</span>{escape(title)}</span></span>'
         else:
             opts = "".join(f'<label class="o"><input type="radio" name="key" value="{escape(o["key"])}"><span class="key">{escape(o["key"])}</span>'
                            f'{escape(o.get("title", ""))}{"<span class=\"tag\">recommended</span>" if o["key"] == d["recommended"] else ""}</label>'
@@ -1057,7 +1128,7 @@ code{font-family:ui-monospace,monospace;font-size:.88em;background:var(--ref-bg)
 .options{display:flex;flex-direction:column;background:var(--surface);border-top:3px solid var(--brass);border-radius:5px;padding:4px 14px;box-shadow:0 2px 6px color-mix(in srgb,var(--fg) 8%,transparent)}
 .opt{display:grid;grid-template-columns:44px minmax(0,1fr);gap:2px 8px;padding:8px 6px;margin:0 -6px;width:calc(100% + 12px);border-radius:3px}
 .opt+.opt{border-top:1px dotted var(--line)}
-.opt:hover{background:var(--bg)}
+label.opt:hover{background:var(--bg)}
 label.opt,label.o{cursor:pointer} label.o:hover{border-color:var(--brass)}
 .opt .k{font:700 16px/1.3 ui-monospace,monospace;color:var(--muted)}
 .opt input,.o input{accent-color:var(--brass);margin:0 4px 0 0}
@@ -1156,7 +1227,7 @@ ANSWER_JS = """<script>
 document.querySelectorAll('form[action^="/decisions/"]').forEach(function (f) {
   function send() {
     fetch(f.action, {method: 'POST', body: new URLSearchParams(new FormData(f))})
-      .then(function (r) { if (r.ok) location.reload(); });
+      .then(function (r) { if (r.ok || r.status === 409) location.reload(); });
   }
   f.addEventListener('change', function (e) { if (e.target.name === 'key' && e.target.value) send(); });
   f.addEventListener('submit', function (e) { e.preventDefault(); send(); });
