@@ -507,6 +507,56 @@ class EngineTest(unittest.TestCase):
         self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
         self.assertIn(OTHER, self.cleanup.call_args.kwargs["completed"])
 
+    def test_reopen_clears_verified_landing_and_keeps_other_resume_keys(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="main-sha")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        data = dict(self.db.resume(KEY) or {})
+        data.update({"verified_landing": "main-sha", "verified_landing_head": "head", "marker": 1})
+        self.db.set_resume(KEY, data)
+        self.forge.rows[0]["forge_state"] = "open"
+        self.forge.rows[0]["merge_state"] = ""
+        self.forge.rows[0].pop("landing_sha", None)
+        self.run_pass()
+        data = self.db.resume(KEY)
+        self.assertNotIn("verified_landing", data)
+        self.assertNotIn("verified_landing_head", data)
+        self.assertEqual(data.get("marker"), 1)
+
+    def test_a_new_main_merge_commit_reclear_memo_and_recalls_landings(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="new-sha")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        data = dict(self.db.resume(KEY) or {})
+        data["verified_landing"] = True
+        self.db.set_resume(KEY, data)
+        self.forge.branch_head = lambda ref: tf.forge.Pipeline(1, "main", "new-sha", "failed", "")
+        reads = []
+
+        def landings(pipeline, keys, **kwargs):
+            reads.append(tuple(keys))
+            return {key: (False, False) for key in keys}
+
+        self.forge.landings = landings
+        self.run_pass()
+        self.assertEqual(reads, [(KEY,)])
+        self.assertNotIn("verified_landing", self.db.resume(KEY) or {})
+        self.assertNotIn(KEY, self.cleanup.call_args.kwargs["completed"])
+
+    def test_a_proved_landing_is_stored_as_the_snapshot_commit_and_not_reread(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="new-sha")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        self.forge.branch_head = lambda ref: tf.forge.Pipeline(1, "main", "new-sha", "passed", "")
+        merged = {"number": 21, "headRefOid": "source-head", "body": "Closes #1",
+                  "baseRefName": "main", "mergeCommit": {"oid": "new-sha"}}
+        self.forge.landings = tf.forge.Forge(tf.backlog.GitHubBacklog("example/project"),
+                                             gh=tf.FakeGh(merged=[merged])).landings
+        self.run_pass()
+        self.assertEqual(self.db.resume(KEY)["verified_landing"], "new-sha")
+        self.assertEqual(self.db.resume(KEY)["verified_landing_head"], "source-head")
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+        self.forge.landings = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("reread"))
+        self.run_pass()
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+
     def test_landing_comparison_failures_reach_the_deduplicated_wait_log(self):
         self.forge.rows[0].update(forge_state="closed", merge_state="merged")
         self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")

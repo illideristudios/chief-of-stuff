@@ -89,8 +89,30 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def _remember_verified(store: Any, facts: reconcile.Facts) -> None:
+def _clear_stale_verified_landings(store: Any, snapshots: list[dict]) -> None:
+    """Drop a recorded landing when forge state changed or main's merge commit no longer matches."""
+    by_key = {row["issue_key"]: row for row in snapshots}
+    for item in store.items():
+        data = _resume(store, item.issue_key)
+        if "verified_landing" not in data:
+            continue
+        snap = by_key.get(item.issue_key, {})
+        closed_merged = item.forge_state == "closed" and item.merge_state == "merged"
+        if not closed_merged:
+            data.pop("verified_landing", None)
+            data.pop("verified_landing_head", None)
+            store.set_resume(item.issue_key, data)
+            continue
+        landing_sha = snap.get("landing_sha")
+        if isinstance(landing_sha, str) and landing_sha and data.get("verified_landing") != landing_sha:
+            data.pop("verified_landing", None)
+            data.pop("verified_landing_head", None)
+            store.set_resume(item.issue_key, data)
+
+
+def _remember_verified(store: Any, facts: reconcile.Facts, landing_shas: dict[str, str] | None = None) -> None:
     """A closed merge proved on main with green CI is not re-read on later gathers."""
+    landing_shas = landing_shas or {}
     on_main = dict(facts.on_main)
     suite = dict(facts.suite_on_main)
     for item in store.items():
@@ -100,9 +122,11 @@ def _remember_verified(store: Any, facts: reconcile.Facts) -> None:
         if on_main.get(key) is not True or suite.get(key) is not True:
             continue
         data = _resume(store, key)
-        if data.get("verified_landing") is True:
+        memo = data.get("verified_landing")
+        if memo is True or isinstance(memo, str) and memo:
             continue
-        data["verified_landing"] = True
+        sha = landing_shas.get(key)
+        data["verified_landing"] = sha if isinstance(sha, str) and sha else True
         if head := dict(facts.landing_heads).get(key):
             data["verified_landing_head"] = head
         store.set_resume(key, data)
@@ -779,6 +803,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
+    _clear_stale_verified_landings(store, snapshots)
+    landing_shas = {row["issue_key"]: row["landing_sha"] for row in snapshots
+                    if isinstance(row.get("landing_sha"), str) and row["landing_sha"]}
 
     worker.deliver_messages(store, root, clock)
     facts = worker.collect(store, root, clock, trees,
@@ -913,7 +940,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     items = [item for item in store.items()
              if _resume(store, item.issue_key).get("stall_recovery", {}).get("phase") != "stopping"
              and (not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold"))]
-    _remember_verified(store, facts)
+    _remember_verified(store, facts, landing_shas)
     inputs = _planning_inputs(store, items)
     free_slots = slots.free_slots(max_concurrency, slots.running(store))
 
