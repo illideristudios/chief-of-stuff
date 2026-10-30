@@ -89,34 +89,89 @@ def _github_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
     return out
 
 
+# GitLab has no project-wide REST links list. One page of open issues carries their blockers.
+_GITLAB_BLOCKERS = """query($path: ID!, $after: String) {
+  project(fullPath: $path) {
+    issues(state: opened, first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        iid
+        blockedByIssues(first: 100) {
+          pageInfo { hasNextPage }
+          nodes { iid webUrl state }
+        }
+      }
+    }
+  }
+}"""
+
+
+def _gitlab_iid(raw: Any, label: str) -> int:
+    if type(raw) is int or (isinstance(raw, str) and raw.isdigit()):
+        return int(raw)
+    raise ForgeError(label)
+
+
+def _gitlab_issue_page(body: Any) -> dict:
+    if not isinstance(body, dict) or body.get("errors") or not isinstance(body.get("data"), dict):
+        raise ForgeError("GitLab blockers are unreadable")
+    project = body["data"].get("project")
+    issues = project.get("issues") if isinstance(project, dict) else None
+    nodes = issues.get("nodes") if isinstance(issues, dict) else None
+    page = issues.get("pageInfo") if isinstance(issues, dict) else None
+    if not isinstance(nodes, list) or not isinstance(page, dict) or "hasNextPage" not in page:
+        raise ForgeError("GitLab blockers are unreadable")
+    return issues
+
+
 def _gitlab_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
-    # shortcut: one links read per open issue; page the list when a workspace exceeds one issues() page
-    got = forge.issues()
-    if not got.ok:
-        raise ForgeError(got.error)
     secret = forge._token()
     if not secret:
         raise ForgeError(forge.home.missing_token)
+    url = f"{forge.home.host.rstrip('/')}/api/graphql"
     out: dict[str, tuple[str, ...]] = {}
-    for issue in got.issues:
-        body, headers, error = backlog._get(f"{forge.home.issues_url}/{issue.iid}/links", secret, backlog.TIMEOUT)
-        if error or not isinstance(body, list):
-            raise ForgeError(error or f"links of #{issue.iid} are not a list")
-        if (headers.get("x-next-page") or "").strip():
-            raise ForgeError(f"links of #{issue.iid} span more than one page")
-        keys = []
-        for link in body:
-            if not isinstance(link, dict) or link.get("link_type") != "is_blocked_by" or link.get("state") != "opened":
-                continue
-            if type(link.get("iid")) is not int:
-                raise ForgeError(f"a link of #{issue.iid} has no iid")
-            ref = backlog.issue_ref(link.get("web_url", ""), forge.home)
-            if ref is None:
-                raise ForgeError(f"a blocker of #{issue.iid} has no readable project URL")
-            keys.append(f"gitlab:{ref.host}/{ref.repo}#{ref.number}")
-        if keys:
-            out[forge.key(issue.iid)] = tuple(keys)
-    return out
+    after = None
+    for _page in range(backlog.MAX_PAGES):
+        body, _headers, error = backlog._call(
+            "POST", url, secret, backlog.TIMEOUT,
+            {"query": _GITLAB_BLOCKERS, "variables": {"path": forge.home.project, "after": after}},
+            retries=len(backlog.RETRY_BACKOFF))
+        if error:
+            raise ForgeError(error)
+        issues = _gitlab_issue_page(body)
+        for node in issues["nodes"]:
+            if not isinstance(node, dict):
+                raise ForgeError("an issue has no iid")
+            iid = _gitlab_iid(node.get("iid"), "an issue has no iid")
+            links = node.get("blockedByIssues")
+            link_nodes = links.get("nodes") if isinstance(links, dict) else None
+            info = links.get("pageInfo") if isinstance(links, dict) else None
+            if not isinstance(link_nodes, list) or not isinstance(info, dict) or "hasNextPage" not in info:
+                raise ForgeError(f"links of #{iid} are unreadable")
+            if info.get("hasNextPage"):
+                raise ForgeError(f"links of #{iid} span more than one page")
+            keys = []
+            for link in link_nodes:
+                if not isinstance(link, dict):
+                    raise ForgeError(f"a link of #{iid} has no iid")
+                state = link.get("state")
+                if state != "opened":
+                    if state not in ("closed", "locked"):
+                        raise ForgeError(f"a link of #{iid} has no state")
+                    continue
+                _gitlab_iid(link.get("iid"), f"a link of #{iid} has no iid")
+                ref = backlog.issue_ref(str(link.get("webUrl") or ""), forge.home)
+                if ref is None:
+                    raise ForgeError(f"a blocker of #{iid} has no readable project URL")
+                keys.append(f"gitlab:{ref.host}/{ref.repo}#{ref.number}")
+            if keys:
+                out[forge.key(iid)] = tuple(keys)
+        if not issues["pageInfo"].get("hasNextPage"):
+            return out
+        after = issues["pageInfo"].get("endCursor")
+        if not isinstance(after, str) or not after:
+            raise ForgeError("GitLab issues page has no cursor")
+    raise ForgeError(f"more than {backlog.MAX_PAGES} pages of issues; refusing a partial blocker read")
 
 
 def _gh_json(gh, args: list[str]):
@@ -139,32 +194,127 @@ def _github_issue(gh, ref: backlog.IssueRef):
     return tuple(str(x["name"]) for x in row["labels"] if isinstance(x, dict) and "name" in x), ""
 
 
-def _project_rows(gh, project):
-    # item-list serializes values using at most 100 field definitions, even with a larger item limit.
+# shortcut: 20 memberships and chunks of 25, page or raise the chunk when a tracker or an issue exceeds that.
+_PROJECT_PAGE = 20
+_PROJECT_CHUNK = 25
+
+
+def _project_query(project, refs):
+    grouped, order = {}, []
+    for ref in refs:
+        if ref.repo not in grouped:
+            order.append(ref.repo)
+            grouped[ref.repo] = []
+        grouped[ref.repo].append(ref)
+    parts, layout = [], []
+    field = json.dumps(project.field)
+    for index, repo in enumerate(order):
+        owner, name = repo.split("/", 1)
+        issues = []
+        for ref in grouped[repo]:
+            alias = f"n{ref.number}"
+            issues.append(
+                f"{alias}: issue(number: {ref.number}) {{ "
+                f"projectItems(first: {_PROJECT_PAGE}) {{ pageInfo {{ hasNextPage }} nodes {{ id "
+                f"project {{ number owner {{ ... on User {{ login }} ... on Organization {{ login }} }} }} "
+                f"fieldValueByName(name: {field}) {{ __typename "
+                f"... on ProjectV2ItemFieldSingleSelectValue {{ name }} }} }} }} }}")
+            layout.append((f"r{index}", alias, ref))
+        parts.append(f"r{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                     f"{{ {' '.join(issues)} }}")
+    return "query { " + " ".join(parts) + " }", layout
+
+
+def _graphql_messages(body) -> str:
+    errors = body.get("errors")
+    if not isinstance(errors, list):
+        return "GitHub Project query failed"
+    messages = [str(item.get("message", item)) if isinstance(item, dict) else str(item) for item in errors]
+    return "; ".join(message for message in messages if message) or "GitHub Project query failed"
+
+
+def _owner_login(item):
+    project_node = item.get("project") if isinstance(item, dict) else None
+    owner = project_node.get("owner") if isinstance(project_node, dict) else None
+    login = owner.get("login") if isinstance(owner, dict) else None
+    return login if isinstance(login, str) and login else None
+
+
+def _read_membership(node, project):
+    """(present, status, error). A missing membership is present=False with no error; a short read is an error."""
+    if not isinstance(node, dict):
+        return False, None, "GitHub issue could not be read"
+    connection = node.get("projectItems")
+    if not isinstance(connection, dict):
+        return False, None, "GitHub Project items could not be parsed"
+    page = connection.get("pageInfo")
+    if isinstance(page, dict) and page.get("hasNextPage") is True:
+        return False, None, "GitHub Project memberships exceed one page"
+    nodes = connection.get("nodes")
+    if not isinstance(page, dict) or page.get("hasNextPage") is not False or not isinstance(nodes, list):
+        return False, None, "GitHub Project items could not be parsed"
+    matched = None
+    for item in nodes:
+        login = _owner_login(item)
+        if login is None:
+            return False, None, "GitHub Project owner could not be read"
+        if item["project"].get("number") == project.number and login.casefold() == project.owner.casefold():
+            if matched is not None:
+                return False, None, "GitHub Project has two items for this issue"
+            matched = item
+    if matched is None:
+        return False, None, ""
+    value = matched.get("fieldValueByName")
+    if value is None:
+        return True, None, ""
+    if not isinstance(value, dict) or value.get("__typename") != "ProjectV2ItemFieldSingleSelectValue":
+        return False, None, "GitHub Project status is not a single-select value"
+    name = value.get("name")
+    if name is not None and not isinstance(name, str):
+        return False, None, "GitHub Project status is not a single-select value"
+    return True, name, ""
+
+
+def _project_rows(gh, project, refs):
+    """Read the requested issue memberships, retaining item IDs for guarded writes. A missing key is absence."""
+    refs = tuple(dict.fromkeys(refs))
+    if not refs:
+        return {}, ""
     fields, error = _project_fields(gh, project)
     if error:
         return {}, error
-    # item-list omits an unknown field's key, which would read as every item having no stage.
     if not any(isinstance(f, dict) and f.get("name") == project.field for f in fields):
         return {}, f"GitHub Project has no field named {project.field}"
-    row, error = _gh_json(gh, ["project", "item-list", str(project.number), "--owner", project.owner,
-                               "--format", "json", "--limit", "5000"])
-    if error:
-        return {}, error
-    if not isinstance(row, dict) or not isinstance(row.get("items"), list):
-        return {}, "GitHub Project items could not be parsed"
-    # totalCount says whether a full page is the whole Project. shortcut: a Project over 5,000 items is refused, not
-    # paged; query the issue's projectItems instead when one exists (#662).
-    total = row.get("totalCount")
-    if total > len(row["items"]) if isinstance(total, int) else len(row["items"]) >= 5000:
-        return {}, "GitHub Project item list was truncated"
-    items = {}
-    for item in row["items"]:
-        if isinstance(item, dict) and isinstance(item.get("content"), dict):
-            url = item["content"].get("url")
-            if isinstance(url, str):
-                items[url.casefold()] = item
-    return items, ""
+    found = {}
+    for start in range(0, len(refs), _PROJECT_CHUNK):
+        query, layout = _project_query(project, refs[start:start + _PROJECT_CHUNK])
+        code, stdout, stderr = gh(["api", "graphql", "-f", f"query={query}"])
+        if code:
+            return {}, stderr.strip() or f"gh exited {code}"
+        try:
+            body = json.loads(stdout)
+        except ValueError:
+            return {}, "gh did not answer with JSON"
+        if not isinstance(body, dict):
+            return {}, "GitHub Project items could not be parsed"
+        if body.get("errors"):
+            return {}, _graphql_messages(body)
+        data = body.get("data")
+        if not isinstance(data, dict):
+            return {}, "GitHub Project items could not be parsed"
+        for repo_alias, issue_alias, ref in layout:
+            repo = data.get(repo_alias)
+            if not isinstance(repo, dict) or issue_alias not in repo:
+                return {}, "GitHub issue could not be read"
+            present, status, error = _read_membership(repo[issue_alias], project)
+            if error:
+                return {}, error
+            if present:
+                matched = next(item for item in repo[issue_alias]["projectItems"]["nodes"]
+                               if item["project"].get("number") == project.number
+                               and _owner_login(item).casefold() == project.owner.casefold())
+                found[ref.url.casefold()] = {**matched, project.field[:1].lower() + project.field[1:]: status}
+    return found, ""
 
 
 def _project_status(item, project):
@@ -174,14 +324,14 @@ def _project_status(item, project):
     return str(value) if value is not None else None
 
 
-def project_items(gh, project):
-    """URL → Status option for every issue item in the Project (empty Status is None)."""
-    items, error = _project_rows(gh, project)
+def project_items(gh, project, refs):
+    """URL → Status option for the requested issues in the Project (empty Status is None)."""
+    items, error = _project_rows(gh, project, refs)
     return {url: _project_status(item, project) for url, item in items.items()}, error
 
 
 def _project_item(gh, project, ref: backlog.IssueRef):
-    items, error = _project_rows(gh, project)
+    items, error = _project_rows(gh, project, (ref,))
     item = items.get(ref.url.casefold())
     return item, _project_status(item, project) if item is not None else None, error
 
@@ -699,9 +849,10 @@ class Forge:
         found = {key: (None, None) for key in keys}
         if pipeline.ref != "main" or not isinstance(pipeline.sha, str) or not pipeline.sha:
             return found
+        opened = self._open_closers(pipeline.ref)
         merged = self._merged_requests()
         newest = {}
-        for row in [*merged, *self._open_closers(pipeline.ref)]:
+        for row in [*merged, *opened]:
             if row.get("baseRefName" if self.github else "target_branch") != pipeline.ref:
                 continue
             identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))
@@ -802,7 +953,8 @@ class Forge:
         if self.kanban is not None:
             statuses: dict[str, str | None] | None = None
             if self.kanban.github_project is not None and self.github:
-                statuses, error = project_items(self.gh, self.kanban.github_project)
+                statuses, error = project_items(self.gh, self.kanban.github_project,
+                                                (IssueRef(self.home.repo, issue.iid),))
                 if error:
                     raise ForgeError(f"project status: {error}")
             snap["stage"] = self._stage(issue, statuses)
@@ -834,7 +986,8 @@ class Forge:
         merged = self._merged_closes()
         statuses: dict[str, str | None] = {}
         if self.kanban is not None and self.kanban.github_project is not None and self.github:
-            statuses, error = project_items(self.gh, self.kanban.github_project)
+            statuses, error = project_items(self.gh, self.kanban.github_project,
+                                            tuple(IssueRef(self.home.repo, one.iid) for one in (*got.issues, *closed.issues)))
             if error:
                 raise ForgeError(f"project status: {error}")
         out = []
@@ -944,7 +1097,8 @@ class Forge:
                 try:  # same decode as snapshot: Project Status when configured, else labels
                     statuses = None
                     if self.kanban.github_project is not None and self.github:
-                        statuses, error = project_items(self.gh, self.kanban.github_project)
+                        statuses, error = project_items(self.gh, self.kanban.github_project,
+                                                        (IssueRef(self.home.repo, got.issue.iid),))
                         if error:
                             raise ForgeError(f"project status: {error}")
                     observed = self._stage(got.issue, statuses)

@@ -351,7 +351,7 @@ def render_session(db: PageData, segment_id: int, trees: Path, *, config_dir: Pa
     labels = {"queued": "Queued", "sending": "Sending / unconfirmed", "delivered": "Delivered to Claude CLI", "failed": "Failed"}
     message_rows = "".join(
         f'<div class="session-event"><span class="session-time">{escape(str(m.created_at))}</span>'
-        f'<div><b>Operator · {escape(labels.get(m.status, m.status))}</b>'
+        f'<div><b>Operator · {escape("Sent to the T3 thread" if m.status == "delivered" and m.evidence.startswith("T3 ") else labels.get(m.status, m.status))}</b>'
         f'<div class="session-text">{escape(m.body)}</div><p class="meta">{escape(m.evidence or ("Delivery is unconfirmed; it will not be resent automatically." if m.status == "sending" else ""))}</p></div></div>'
         for m in messages)
     if csrf:
