@@ -15,6 +15,7 @@ import re
 import math
 import tomllib
 import unicodedata
+import warnings
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -88,7 +89,6 @@ class Workflow:
     architecture_reviewer: str | None = None
     reviewer_session: str | None = None
     delivery: str = "pull-request"
-    merge_owner: str = "coordinator"
     approver: str | None = None
 
 
@@ -450,14 +450,13 @@ def _workflow(table) -> Workflow:
     delivery = table.get("delivery", "pull-request")
     if delivery not in ("pull-request", "branch"):
         raise SettingsError("[workflow] delivery must be `pull-request` or `branch`")
-    # Accept old settings without retaining their owner wait. The engine owns every merge.
-    merge_owner = table.get("merge_owner", "coordinator")
-    if merge_owner not in ("user", "worker", "approval", "coordinator"):
-        raise SettingsError("[workflow] merge_owner must be `coordinator` (legacy values are accepted)")
+    # Compatibility only: no runtime merge authority is configured by this retired key.
+    if "merge_owner" in table:
+        warnings.warn("[workflow] merge_owner is retired and ignored; the engine owns merges", stacklevel=2)
     approver = table.get("approver")  # optional review-thread filter, never merge authority
     if approver is not None and (not isinstance(approver, str) or not approver.strip()):
         raise SettingsError("[workflow] approver must be a non-empty forge username")
-    return Workflow(**names, delivery=delivery, merge_owner="coordinator", approver=approver)
+    return Workflow(**names, delivery=delivery, approver=approver)
 
 
 def _lane(name: str, table) -> Lane:
@@ -524,9 +523,9 @@ def _kanban(table) -> Kanban:
     for name, index in mapping.items():
         if not name.strip() or type(index) is not int or not 0 <= index < len(stages):
             raise SettingsError(f"[kanban.map] {name!r} must be a stage index in 0..{len(stages)-1}")
-    holds, terminal = table.get("hold_stages", []), table.get("terminal_stages", [])
-    if not isinstance(holds, list) or not all(isinstance(x, str) for x in holds) or not set(holds) <= set(mapping):
-        raise SettingsError("[kanban] hold_stages must be mapped stages")
+    if "hold_stages" in table:
+        warnings.warn("[kanban] hold_stages is retired and ignored; stages advance automatically", stacklevel=2)
+    terminal = table.get("terminal_stages", [])
     if (not isinstance(terminal, list) or not all(isinstance(x, str) and x.strip() for x in terminal)
             or len(terminal) != len({x.casefold() for x in terminal}) or any("," in x for x in terminal)
             or human.casefold() in {x.casefold() for x in terminal} or set(terminal) & set(mapping)

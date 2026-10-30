@@ -34,7 +34,7 @@ verify = 4
 merge = 4
 ```
 
-New code tasks pass through planning, tests, implementation and review without owner yes-gates. Fixes return to review. Legacy lane `gates` and kanban `hold_stages` settings are accepted and ignored. A problem hold records an architectural question or two failures, with research, options and a recommendation; a split or retry-exhausted trio also waits on the owner. The worker guard remains in force. Existing tasks already in later stages stay there.
+New code tasks pass through planning, tests, implementation and review without owner yes-gates. Fixes return to review. Legacy lane `gates` settings are accepted and ignored. Kanban `hold_stages` settings are accepted as a no-op with a warning that they are ignored. A problem hold records an architectural question or two failures, with research, options and a recommendation; a split or retry-exhausted trio also waits on the owner. The worker guard remains in force. Existing tasks already in later stages stay there.
 
 For a GitHub backlog, omit `[kanban.github_project]` to use issue labels as the columns. To use a GitHub Project's single-select Status field instead, add:
 

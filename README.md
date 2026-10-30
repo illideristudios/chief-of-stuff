@@ -60,7 +60,9 @@ An optional `[workflow] reviewer_session = "<session-name>"` routes pull request
 
 Every reviewer reports in one shape, [`skills/review-pipeline/review-report.md`](skills/review-pipeline/review-report.md), whatever its runtime, because Triage reads each finding's axis, severity, confidence and suggestion off it. Every worker assignment points a reviewing worker at it.
 
-`[workflow] delivery = "pull-request"` remains the default. The engine owns merges through its automated review and CI gate. Legacy `merge_owner = "user"`, `"approval"` and `"worker"` values normalize to `"coordinator"`; none waits on the owner. `approver` is an optional review-thread filter. `merge-approved` is a compatibility readiness listing; run the engine to execute a merge. Set `delivery = "branch"` for branch handoff. Code tasks finish only after integration into main and a green suite there.
+`[workflow] delivery = "pull-request"` remains the default. The engine owns merges through its automated review and CI gate. Legacy `merge_owner` settings are accepted as a no-op with a warning that they are ignored. `approver` is an optional review-thread filter. `merge-approved` is a compatibility readiness listing; run the engine to execute a merge. Set `delivery = "branch"` for branch handoff. Code tasks finish only after integration into main and a green suite there.
+
+The retired policy key `zach_gates` is also accepted as a no-op with a warning that it is ignored, including in persona, stage and room overrides. It creates no runtime policy field or owner wait.
 
 ## Runtime limits
 

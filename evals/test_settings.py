@@ -142,16 +142,15 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaises(st.SettingsError):
             st.load(self.root, self.write('[workflow]\nreviewer_session = "a b"\n'))
 
-    def test_code_delivery_and_merge_owner(self):
-        self.assertEqual((st.load(self.root, None).workflow.delivery,
-                          st.load(self.root, None).workflow.merge_owner), ("pull-request", "coordinator"))
+    def test_code_delivery_and_legacy_merge_owner(self):
+        self.assertEqual(st.load(self.root, None).workflow.delivery, "pull-request")
         workflow = st.load(self.root, self.write('[workflow]\ndelivery = "branch"\n')).workflow
         self.assertEqual(workflow.delivery, "branch")
-        workflow = st.load(self.root, self.write('[workflow]\nmerge_owner = "worker"\n')).workflow
-        self.assertEqual(workflow.merge_owner, "coordinator")
-        for text in ('delivery = "direct"', 'merge_owner = "bot"'):
-            with self.subTest(text=text), self.assertRaises(st.SettingsError):
-                st.load(self.root, self.write('[workflow]\n' + text + '\n'))
+        with self.assertWarnsRegex(UserWarning, "merge_owner.*ignored"):
+            workflow = st.load(self.root, self.write('[workflow]\nmerge_owner = "worker"\n')).workflow
+        self.assertNotIn("merge_owner", vars(workflow))
+        with self.assertRaises(st.SettingsError):
+            st.load(self.root, self.write('[workflow]\ndelivery = "direct"\n'))
 
     def test_worker_cap_is_absent_or_a_positive_whole_number(self):
         self.assertIsNone(st.load(self.root, None).workers.max_concurrency)
@@ -573,7 +572,6 @@ class KanbanSettingsTest(unittest.TestCase):
         for bad in (
             KANBAN.replace('plan = 0', 'plan = 6'),
             KANBAN.replace('plan = 0', 'plan = true'),
-            KANBAN.replace('"triage", "merge"', '"unknown", "merge"'),
             KANBAN.replace('"00 - PLAN", ', '"01 - PLAN REVIEW", '),
             KANBAN.replace('terminal_stages = ["main"]', 'terminal_stages = ["review"]'),
         ):

@@ -17,6 +17,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from math import isfinite
+import warnings
 
 from runtimes import EFFORTS
 
@@ -37,7 +38,6 @@ class Approval:
 
 @dataclass(frozen=True)
 class Policy:
-    zach_gates: tuple[str, ...] = ()  # gates only the owner's own word passes; none by default (decision 6)
     blocking_severity: str = "minor"  # a finding at or above it blocks merge; minor is "burn down to no open findings"
     architect: bool = False  # the architect is consulted where this holds
     retry_limit: int = 3  # fix rounds before an unrecoverable-failure ping (the owner, 2026-10-11)
@@ -129,7 +129,7 @@ class Policies:
         return next((w for w in self.workflows.values() if issue_type in w.issue_types), self.workflows[self.default_workflow])
 
 
-FIELDS = {f.name for f in fields(Policy)}
+FIELDS = {f.name for f in fields(Policy)} | {"zach_gates"}  # legacy input only, never runtime policy
 
 
 def _table(where: str, value, allowed: set[str] | None = None) -> dict:
@@ -195,7 +195,8 @@ def _policy(where: str, value, personas: set[str], gates: set[str]) -> dict:
         if key in ("spend_usd", "quota_percent", "time_minutes"):
             v = _limit(at, v)
         elif key == "zach_gates":
-            v = _names(at, v)
+            warnings.warn(f"{at} is retired and ignored; workflow gates advance automatically", stacklevel=2)
+            continue
         elif key == "trio":
             v = _trio(at, v, personas)
         elif key == "trios":

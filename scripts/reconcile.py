@@ -153,17 +153,6 @@ class Merge:
 
 
 @dataclass(frozen=True)
-class Ask:
-    issue_key: str
-    gate: str
-    reason: str
-    source: str = field(default="", compare=False)
-    context: str = field(default="", compare=False)
-    stage: str = field(default="", compare=False)
-    attempt: int = field(default=0, compare=False)
-
-
-@dataclass(frozen=True)
 class Escalate:
     issue_key: str
     reason: str
@@ -197,7 +186,7 @@ class Close:
     suite_hold: bool = False
 
 
-Action = Dispatch | Review | Merge | Ask | Escalate | Limit | Wait | Close
+Action = Dispatch | Review | Merge | Escalate | Limit | Wait | Close
 
 
 @dataclass(frozen=True)
@@ -258,12 +247,6 @@ def _policy(policies: Policies, stage: str, room: str | None) -> Policy:
     return policies.resolve(policies.stages[stage].persona, stage, room)
 
 
-def passed_gates(workflow: Workflow, policies: Policies, room: str | None, now: datetime,
-                 waived: Sequence[str] = ()) -> set[str]:
-    """Legacy workflow gates no longer require a person or a trio consultation."""
-    return {e.gate for e in workflow.edges if e.gate} | set(waived)
-
-
 def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
     blocking = SEVERITIES[:SEVERITIES.index(resolved.blocking_severity) + 1]
     return any(counts.get(severity, 0) > 0 for severity in blocking)
@@ -287,7 +270,7 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
 
 def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], policies: Policies,
            room: str | None, now: datetime, counts: Mapping[str, int] | None, edges: Sequence[Edge],
-           decisions: Sequence[Decision], waived: Sequence[str] = (),
+           decisions: Sequence[Decision],
            latest_segment: Segment | None = None, architect_review: ArchitectReview | None = None) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
@@ -425,8 +408,8 @@ def _stalled(item: WorkItem, segment: Segment, facts: Facts, now: datetime,
 
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
-          decisions: Sequence[Decision], hold_stages: Sequence[str], launcher_hold: Mapping[str, object], facts: Facts | None = None,
-          waived: Sequence[str] = (), architect_review: ArchitectReview | None = None) -> Action | None:
+          decisions: Sequence[Decision], launcher_hold: Mapping[str, object], facts: Facts | None = None,
+          architect_review: ArchitectReview | None = None) -> Action | None:
     key = item.issue_key
     workflow = policies.workflow_for(issue_type)
     if item.forge_state == "closed" and item.merge_state == "merged" and facts is not None:
@@ -454,8 +437,8 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
         return Wait(key, "human review" if item.human_review else "segments tie at the latest start")
     if item.human_review:
         # Only a failed launch, whose hold the engine restored itself, can release an extra hold.
-        # Quota and unknown exits, human outcomes, completed work and stage-required holds need a human.
-        if (item.stage and stage not in hold_stages and latest and latest.stage == stage
+        # Quota and unknown exits, human outcomes and completed work do not carry that ownership.
+        if (item.stage and latest and latest.stage == stage
                 and launcher_hold.get("stage") == stage and launcher_hold.get("attempt") == latest.attempt
                 and latest.outcome == "failed"):
             if launcher_hold.get("release_failures", 0) > _policy(policies, stage, room).retry_limit:
@@ -475,7 +458,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if stage == "merge":
         incoming = ((return_edge,) if return_edge else
                     tuple(e for e in workflow.edges if e.target == stage and latest and e.source == latest.stage))
-        return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions, waived, latest, architect_review)
+        return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions, latest, architect_review)
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
         return _work(key, stage, workflow, history, policies, room)
@@ -500,7 +483,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if edge is None:
         return Wait(key, "no unique workflow edge")
     if edge.target == "merge":
-        return _merge(item, workflow, history, policies, room, now, counts, (edge,), decisions, waived, latest, architect_review)
+        return _merge(item, workflow, history, policies, room, now, counts, (edge,), decisions, latest, architect_review)
     action = _work(key, edge.target, workflow, history, policies, room)
     if isinstance(action, Escalate):
         return action
@@ -559,11 +542,9 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          rooms: Mapping[str, str] | None = None,
          decisions: Mapping[str, Sequence[Decision]] | None = None,
          quota_resets: Mapping[str, datetime] | None = None,
-         hold_stages: Sequence[str] = (),
          launcher_holds: Mapping[str, Mapping[str, object]] | None = None,
          facts: Facts | None = None,
          usage: Mapping[str, Mapping[str, float]] | None = None,
-         waived_gates: Mapping[str, Sequence[str]] | None = None,
          pending_asks: Mapping[str, bool] | None = None,
          pending_stages: Mapping[str, Mapping] | None = None,
          architect_reviews: Mapping[str, ArchitectReview] | None = None,
@@ -575,7 +556,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
     Gates use their source stage's policy; retries use the destination stage's policy. Completed reviews do not spend retries.
     Merge requires answered decisions and, where policy requires it, the architect's approval for the forge head.
     Without creation times, issue numbers order work within each forge namespace.
-    Attempt-owned extra holds on failed current-stage work can be released for relaunch; hold_stages always wait for a human.
+    Attempt-owned extra holds on failed current-stage work can be released for relaunch.
     `facts` are this pass's blockers, stops, tree and stall readings. Without them a running segment
     still suppresses actions.
     """
@@ -615,26 +596,24 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         else:
             action = _item(item, history, policies, issue_types.get(item.issue_key),
                            room, now, open_findings.get(item.issue_key),
-                           item_decisions, hold_stages,
+                           item_decisions,
                            (launcher_holds or {}).get(item.issue_key, {}), facts,
-                           tuple((waived_gates or {}).get(item.issue_key) or ()),
                            (architect_reviews or {}).get(item.issue_key))
         if facts is not None and action is not None:
             action = _with_facts(action, item, facts)
         if isinstance(action, Merge) and (pending_asks or {}).get(item.issue_key):
             action = Wait(item.issue_key, "decision pending")
-        if isinstance(action, (Dispatch, Review, Ask)):
-            target = action.source if isinstance(action, Ask) else action.stage if isinstance(action, Dispatch) else "review"
+        if isinstance(action, (Dispatch, Review)):
+            target = action.stage if isinstance(action, Dispatch) else "review"
             kind = breach(_policy(policies, target, room), (usage or {}).get(item.issue_key)) if target in policies.stages else None
             reset = (quota_resets or {}).get(item.issue_key)  # quota holds launches only; merges and gates go on
             if kind:
                 action = Limit(item.issue_key, kind, f"reached {kind} limit", stage=target)
             elif reset is not None and _time(reset) > now:
-                # #750 ruling 1: a gate Ask is a trio consult that spends model quota, so it waits too; merges go on.
                 action = Wait(item.issue_key, "quota reset pending")
             elif (pending_asks or {}).get(item.issue_key):
                 action = Wait(item.issue_key, "decision pending")
-            elif not isinstance(action, Ask):
+            else:
                 if free_slots:
                     free_slots -= 1
                 else:

@@ -153,7 +153,7 @@ class ExecutorTest(unittest.TestCase):
         read.return_value = backlog.Notes(notes=(backlog.Note("architect", body=f"Architect: CHANGES {tma.HEAD}"),))
         with mock.patch.object(forge.Forge, "merge") as merge:
             self.assertFalse(engine_merge.execute(self.action, self.forge, self.db, self.at, policies=self.p,
-                                                 inputs=inputs, hold_stages=()))
+                                                 inputs=inputs))
         merge.assert_not_called()
 
     def test_architect_approved_head_must_still_match_the_final_forge_read(self):
@@ -210,7 +210,7 @@ class ExecutorTest(unittest.TestCase):
     def test_an_expired_merge_approval_is_rechecked_at_execution_time(self):
         now = datetime.fromisoformat(self.at)
         self.p.stages["review"] = policy.Place("review", "critic", {
-            "zach_gates": ("merge",), "approvals": (policy.Approval("merge", now + timedelta(seconds=1)),)})
+            "approvals": (policy.Approval("merge", now + timedelta(seconds=1)),)})
         self.planned()
         self.db.clock = lambda: now + timedelta(seconds=1)  # the pass's `at` is still the planning time
         self.assertTrue(self.execute())
@@ -398,8 +398,7 @@ class ExecutorTest(unittest.TestCase):
     def execute(self):
         item = next(i for i in self.db.items() if i.issue_key == self.key)
         return engine_merge.execute(self.action, self.forge, self.db, at=self.at, policies=self.p,
-                                    inputs=engine._planning_inputs(self.db, [item]),
-                                    hold_stages=getattr(self.forge.kanban, "hold_stages", ()))
+                                    inputs=engine._planning_inputs(self.db, [item]))
 
     def message(self):
         entries = self.db.log(self.key)

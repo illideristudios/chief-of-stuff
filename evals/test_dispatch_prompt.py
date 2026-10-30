@@ -392,7 +392,7 @@ class PositiveHalfTest(unittest.TestCase):
 
 
 
-    def test_the_commit_line_is_zachs_rule_not_its_opposite(self):
+    def test_the_commit_line_carries_the_owners_rule(self):
         """the owner, 2026-09-18 23:00: every session makes meaningful small commits; uncommitted work is how work gets lost."""
         self.assertNotIn("do not commit", self.body)
         self.assertIn("Commit small and often", self.body)
@@ -830,8 +830,8 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         self.assertIn("chief-of-stuff backlog --create", self.content)
         self.assertNotIn("~/.claude/plugins/cache/ai-additions", self.content)
 
-    def test_live_prompt_does_not_name_the_original_workspace_user(self):
-        self.assertNotIn("the owner", self.content)
+    def test_live_prompt_addresses_the_owner_by_role(self):
+        self.assertIn("coordinator for the owner's day", self.content)
 
 
     # #391, the user, 2026-10-06: a review finding that is a clear fix "should have automatically been a fix". The rule is gated (review of
@@ -1131,7 +1131,7 @@ class ReviewerRoutingTest(unittest.TestCase):
 
     def test_legacy_merge_modes_keep_the_engine_merge_gate(self):
         for mode in ("user", "approval", "worker", "coordinator"):
-            text = dp.commit_rule(Workflow(merge_owner=mode), Path("."))
+            text = dp.commit_rule(Workflow(), Path("."))
             self.assertIn("The engine merges", text)
             self.assertNotIn("user approves", text)
 

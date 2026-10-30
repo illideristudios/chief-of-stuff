@@ -2583,7 +2583,7 @@ class EngineTest(unittest.TestCase):
 
     def _merge_gate(self):
         self._trio()
-        self.p.stages["review"] = policy.Place("review", "critic", {"zach_gates": ("merge",)})
+        self.p.stages["review"] = policy.Place("review", "critic", {})
         self.p.workflows["standard"] = policy.Workflow("standard", "implement", (
             policy.Edge("implement", "review"), policy.Edge("review", "implement"),
             policy.Edge("review", "merge", "merge")))
@@ -2592,34 +2592,6 @@ class EngineTest(unittest.TestCase):
         self.db.record_segment(KEY, "review", 1, (NOW - timedelta(minutes=2)).isoformat(),
                                (NOW - timedelta(minutes=1)).isoformat(), "done")
         self.findings()
-
-
-    def _superseded_merge_gate(self, mode):
-        self._merge_gate()
-        if mode == "exhausted":
-            model = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
-            for _ in range(8):
-                self.run_pass(model=model)
-                self.now += timedelta(hours=2)
-        else:
-            model = self._votes([(mode, "hold")] * 3)
-            self.run_pass(model=model)
-        self.assertEqual(len(self.db.resume(KEY)["decision_interrupts"]), 1)
-        self.now += timedelta(hours=1)
-        self.db.record_segment(KEY, "review", 2, self.now.isoformat(), self.now.isoformat(), "done")
-        self.findings(attempt=2)
-        fresh = self._votes([("adopt", "approve")] * 3)
-        self.assertIsInstance(self.run_pass(model=fresh)[0], reconcile.Ask)
-        self.assertEqual(fresh.n, 3)
-        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
-        self.assertEqual(self.run_pass(model=fresh), [reconcile.Merge(KEY)])
-
-
-
-
-
-
-
 
 
     def _restart_clears_downstream_owner_interrupts(self, start):
