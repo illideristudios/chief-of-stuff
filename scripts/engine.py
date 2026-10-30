@@ -815,7 +815,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                   account=workers.claude_as_profile,
                                   hold_observations=tuple((row["issue_key"], row.get("human_review")) for row in snapshots)),
                    finish=partial(_finish_worker, forge, store, policies=policies),
-                   require_green=require_green, teardown_command=teardown_command)
+                   require_green=require_green, teardown_command=teardown_command,
+                   transcript_max_bytes=workers.transcript_max_bytes)
 
     now = clock()
     at = now.isoformat()

@@ -14,6 +14,7 @@ from typing import Any
 from collections.abc import Callable
 
 import claude_adapter
+import transcripts
 import clock as engine_clock
 import dispatch_prompt
 import guard_binding
@@ -722,12 +723,39 @@ def _runner_live(record: dict, run_dir: Path) -> bool:
     return process_status.identity(record["runner_pid"], record["session_id"]) == record.get("runner_identity")
 
 
+def _capture_transcript(store, segment, record: dict, max_bytes: int) -> None:
+    if record.get("launcher") == "t3" or record.get("runtime", "claude") != "claude":
+        return  # T3's source is its thread, never the provider's local files.
+    session = record.get("session_id")
+    if not isinstance(session, str) or not session:
+        return  # no safe launch identity to bind
+    path, error = None, ""
+    try:
+        path = claude_adapter.transcript_path(record)
+    except (OSError, ValueError, KeyError, TypeError):
+        error = "transcript launch source unavailable or identity unverified"
+    try:
+        directory = record.get("run_dir")
+        exited = isinstance(directory, str) and bool(directory) and (Path(directory) / "exit.json").is_file()
+        transcripts.capture(store, segment.issue_key, segment.stage, segment.attempt, session, path,
+                            ended=segment.ended_at is not None or exited,
+                            max_bytes=max_bytes, source_error=error)
+    except ValueError as exc:
+        store.add_log(segment.issue_key, f"transcript capture refused: {exc}", engine_clock.system().isoformat())
+
+
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
             trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False,
-            finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None) -> reconcile.Facts | None:
+            finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None,
+            transcript_max_bytes: int = transcripts.DEFAULT_MAX_BYTES) -> reconcile.Facts | None:
     """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
     completed = []
     for segment in store.segments():
+        data = _resume(store, segment.issue_key)
+        runs = data.get("runs", {})
+        saved = runs.get(f"{segment.stage}-{segment.attempt}") if isinstance(runs, dict) else None
+        if isinstance(saved, dict):
+            _capture_transcript(store, segment, saved, transcript_max_bytes)
         if segment.ended_at is not None:
             continue
         key = segment.issue_key
@@ -755,6 +783,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     _save_run(store, key, segment.stage, segment.attempt, record)
                     data = _resume(store, key)
                     record = data["runs"][f"{segment.stage}-{segment.attempt}"]
+                    _capture_transcript(store, segment, record, transcript_max_bytes)
             if not isinstance(record, dict):
                 raise ValueError("missing run record")
             if record.get("launcher") == "t3":
