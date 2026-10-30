@@ -19,10 +19,6 @@ Coordinator: coordinator. Board: none.
 |---|---|---|---|---|---|---|---|---|
 | a1b2c3 | retry-worker | running | Retry backoff | none |  | none | none | {{now-1h|hhmm}} |
 
-## File ownership
-
-- Retry backoff: src/retry/ (reads and edits in place)
-
 ## Log
 
 - {{now-2h|hhmm}} Retry backoff assigned to retry-worker

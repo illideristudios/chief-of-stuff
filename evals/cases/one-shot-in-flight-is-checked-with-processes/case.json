@@ -15,7 +15,7 @@
   "graders": [
     {
       "name": "the running task is not launched again",
-      "rule": "Ready means an open, unassigned task with clear scope, File ownership, an issue when required, no conflicting owner, and no unresolved human-review hold or lane gate.",
+      "rule": "Ready means an open task with clear scope, an issue when required, no running owner, and no unresolved architectural decision or exhausted failure budget.",
       "type": "tool_used",
       "tool": "Bash",
       "input_match": "\"command\": \"(?:[^\"\\\\]|\\\\.)*?(?:spawn_session\\.py|(?:chief[-_]of[-_]stuff(?:\\.py)?|(?:\\\\\")?\\$\\{?\\w+\\}?(?:\\\\\")?)\\s+worker)\\b(?:[^\"\\\\]|\\\\.)*?--task[\\s=]+\\$?\\\\?[\"\\']?Rate limit headers|\"command\": \"(?:[^\"\\\\]|\\\\.)*?(\\w+)=\\$?\\\\?[\"\\']?Rate limit headers(?:[^\"\\\\]|\\\\.)*?(?:spawn_session\\.py|(?:chief[-_]of[-_]stuff(?:\\.py)?|(?:\\\\\")?\\$\\{?\\w+\\}?(?:\\\\\")?)\\s+worker)\\b(?:[^\"\\\\]|\\\\.)*?--task[\\s=]+\\\\?[\"\\']?\\$\\{?\\1\\b",

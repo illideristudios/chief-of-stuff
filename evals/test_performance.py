@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -153,6 +154,28 @@ class PerformanceReportTest(unittest.TestCase):
         store.command.upgrade(cfg, "0001")
         with redirect_stdout(io.StringIO()):
             self.assertEqual(performance_report.main(["--root", str(old), "--since", "2026-10-09"]), 0)
+
+    def test_raw_json_keeps_each_attempt_and_filters_in_the_workspace_zone(self) -> None:
+        self.db.record_segment(KEY, "implement", 1, "2026-10-09T09:00:00+00:00", workflow="delivery")
+        self.db.record_segment(KEY, "implement", 2, "2026-10-10T09:00:00+00:00", outcome="failed")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = performance_report.main(["--root", str(self.root), "--since", "2026-10-09",
+                                            "--until", "2026-10-09", "--raw"])
+        self.assertEqual(code, 0)
+        rows = json.loads(buf.getvalue())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["issue_key"], rows[0]["attempt"], rows[0]["workflow"],
+                          rows[0]["outcome"], rows[0]["minutes"]), (KEY, 1, "delivery", "done", 25))
+        self.assertNotIn("success", rows[0])
+
+    def test_report_table_includes_workflow(self) -> None:
+        self.db.record_segment(KEY, "implement", 1, "2026-10-09T09:00:00+00:00", workflow="delivery")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            performance_report.main(["--root", str(self.root), "--since", "2026-10-09"])
+        self.assertIn("workflow", buf.getvalue())
+        self.assertIn("delivery", buf.getvalue())
 
     def test_the_router_runs_it_as_performance(self) -> None:
         sys.path.insert(0, str(ROOT))

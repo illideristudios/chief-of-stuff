@@ -36,7 +36,7 @@ from git_trees import audit_env, clean, discover, git, read_state, trusted_commo
 from one_shot import launcher_copy, trees_lock  # noqa: E402
 from process_status import PIDFILE, check, one_shot_runs, registrations  # noqa: E402
 from store import Store, WorkItem  # noqa: E402
-from tree_state import at_risk, unsaved  # noqa: E402
+from tree_state import at_risk, cursor_channel_only, unsaved  # noqa: E402
 from settings import SettingsError, load as load_settings  # noqa: E402
 from workspace import settings_path, worktrees_dir  # noqa: E402
 
@@ -75,6 +75,12 @@ def git_guards(tree: Path, expected_common: Path | None = None) -> list[str]:
             code, status = git(["status", "--porcelain", "--ignored"], tree, view)
             flags_code, _ = git(["ls-files", "-v"], tree, view)
             state = read_state(tree, view)
+            lost = unsaved(status) if not code else ()
+            if ".cursor/" in lost or ".cursor" in lost:
+                cursor_code, cursor_status = git(
+                    ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ".cursor"], tree, view)
+                if not cursor_code and cursor_channel_only(cursor_status):
+                    lost = tuple(path for path in lost if path not in (".cursor/", ".cursor"))
     except git_view.CacheError as exc:
         return [f"git view cache configuration error: {exc}"]
     except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError):
@@ -83,7 +89,6 @@ def git_guards(tree: Path, expected_common: Path | None = None) -> list[str]:
         return ["git status --ignored is unreadable"]
     if flags_code:
         return ["git ls-files -v is unreadable"]
-    lost = unsaved(status)
     out = [f"{len(lost)} unsaved by git status --ignored ({', '.join(lost[:3])})"] if lost else []
     hidden = view.hidden_index_entries
     if hidden:
@@ -93,6 +98,10 @@ def git_guards(tree: Path, expected_common: Path | None = None) -> list[str]:
 
 def inside(path: Path, tree: Path) -> bool:
     return path == tree or path.is_relative_to(tree)
+
+
+def binds(mounts: list[Path], tree: Path) -> bool:
+    return any(inside(m, tree) or inside(tree, m) for m in (mount.resolve() for mount in mounts))
 
 
 def processes() -> list[tuple[int, Path]] | None:
@@ -143,8 +152,8 @@ def claims(root: Path, trees: Path, tree: Path) -> list[str]:
     current = processes()
     if current is None:
         out.append("open processes cannot be checked")
-    else:
-        out += [f"live process in tree (pid {pid})" for pid, cwd in current if pid != os.getpid() and inside(cwd, tree)]
+    elif any(pid != os.getpid() and inside(cwd, tree) for pid, cwd in current):
+        out.append("live process in tree")
     # Adoption reads a dead worker's dispatch, result and logs until this run's launcher report exists. Do not parse
     # the worker-written pid file here: an unreadable claim must also keep its evidence, without scanning trackers.
     pidfile = tree / PIDFILE
@@ -159,7 +168,7 @@ def claims(root: Path, trees: Path, tree: Path) -> list[str]:
 
 
 def owned_items(root: Path, db: Store) -> list[tuple[Path, WorkItem]]:
-    return [((root / row.path).resolve(), item) for item in db.items() for row in db.ownership(item.issue_key)]
+    return [((root / row.path).resolve(), item) for item in db.items() for row in db.trees(item.issue_key)]
 
 
 def owner_guards(tree: Path, owned: list[tuple[Path, WorkItem]],
@@ -207,7 +216,10 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
     trees_dir = str(trees) if trees is not None else ""
     trees = trees if trees is not None else root
     settings = load_settings(root, settings_path((root / "CLAUDE.md").read_text()))
-    commons = trusted_commons([root / path for path in settings.repos.values()])
+    clones = [root / path for path in settings.repos.values()]
+    if not clones and (root / ".git").exists():
+        clones.append(root)  # the engine cuts from the workspace when [repos] is omitted
+    commons = trusted_commons(clones)
     owned = owned_items(root, db)
     mounts = containers()
     failed = False
@@ -220,8 +232,8 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
         kept += claims(root, trees, tree)
         if mounts is None:
             kept.append("containers cannot be checked")
-        elif any(inside(mount.resolve(), tree) for mount in mounts):
-            kept.append("a container binds a path in it")
+        elif binds(mounts, tree):
+            kept.append("a container mount overlaps it")
         if layout is not None and layout.tree is not None:
             kept += git_guards(tree, common)
         if not kept and remove:
@@ -235,14 +247,14 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
                     current_mounts = containers()
                     if current_mounts is None:
                         kept.append("containers cannot be checked")
-                    elif any(inside(mount.resolve(), tree) for mount in current_mounts):
-                        kept.append("a container binds a path in it")
+                    elif binds(current_mounts, tree):
+                        kept.append("a container mount overlaps it")
                     try:
                         items, owners_kept = owner_guards(tree, owned_items(root, db), completed)
                         kept += owners_kept
                     except SQLAlchemyError as exc:
                         failed = True
-                        kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
+                        kept.append(f"store trees cannot be checked ({type(exc).__name__})")
                     if not kept:
                         removal_started = True
                         shutil.rmtree(tree)

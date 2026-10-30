@@ -19,7 +19,6 @@ import forge
 import git_trees
 import git_view
 import kanban
-import ownership
 import runtimes
 import tracker_write
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode as toon_encode
@@ -30,7 +29,7 @@ from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
 from tracker import parse_tracker
-from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
+from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, started_trees, timed_out_line
 from workspace import settings_path, worktrees_dir
 from settings import load as load_settings
 from shell_setup import clean_env, login_argv, resolve
@@ -225,7 +224,7 @@ def _carried(name: str) -> re.Pattern:
 
 
 def _tree_note(root: Path, cwd: Path, expected_common: Path | None = None) -> str:
-    """How the File ownership row names the tree: relative to the Worktrees dir, as audit reads it."""
+    """How the Log's started line names the tree: relative to the Worktrees dir, as audit reads it."""
     claude_md = (root / "CLAUDE.md").read_text()
     base = (root / worktrees_dir(claude_md)).resolve()
     if expected_common is None:
@@ -246,41 +245,21 @@ def _tree_note(root: Path, cwd: Path, expected_common: Path | None = None) -> st
     else:
         branch = out.stdout.strip()
     if any(c in tree + branch for c in "|`()\n"):
-        raise ValueError(f"tree {tree!r} on {branch!r} cannot be written into a File ownership row")
+        raise ValueError(f"tree {tree!r} on {branch!r} cannot be written into the Log's started line")
     return f"worktree `{tree}` ({branch or 'detached'})"
 
 
 def record_launch(path: Path, task: str, name: str, tree: str, runtime: str, model: str, at: str,
                   effort: str = "") -> None:
-    """Before the worker runs: the row is the worker's and running, File ownership names its tree, and the Log says so."""
+    """Before the worker runs: the row is the worker's and running, and the Log's started line names its tree."""
     if "|" in name or "\n" in name:
         raise ValueError("worker name cannot be written as a tracker owner")
 
     def change(text: str) -> str:
         lines = text.splitlines(keepends=True)
         i = _task_line(lines, task)
-        dispatch_prompt.refuse_overlap(text, task)  # under the lock, so two launches that share a path cannot both pass
         lines[i] = _set_owner_state(lines[i], re.compile(r"\|\s*unassigned\s*\|\s*open\s*\|", re.I),
                                     f"| {name} | running {at} |", "task owner/state is not an unassigned open row")
-        keys = dispatch_prompt.task_keys(task, dispatch_prompt.task_name(text, task))
-        section = False
-        owned = None
-        for j, line in enumerate(lines):
-            if line.startswith("## "):
-                section = line.rstrip() == ownership.HEADING
-            elif section and any(row.context in keys for row in ownership.parse(line)):
-                owned = j
-                break
-        if owned is None:
-            raise ValueError(f"no File ownership row for {task!r}")
-        body = lines[owned].rstrip("\n")
-        if body.lstrip().startswith("|"):
-            if len(_cells(body)) != 2:
-                raise ValueError("the File ownership row is not a two-cell `| context | paths |` row")
-            cut = body.rstrip().rstrip("|").rstrip()
-            lines[owned] = f"{cut}; {tree} |\n"
-        else:
-            lines[owned] = f"{body.rstrip()}; {tree}\n"
         return tracker_write.append_log("".join(lines), started_line(at, name, runtime, model, tree, task, effort), create=True)
 
     tracker_write.edit(path, change)
@@ -350,7 +329,7 @@ def _launch_row_running(launch: Path, task: str, name: str) -> bool:
 
 
 def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: int,
-              before_head: str | None = None, read_only: bool = False, runtime: str = "", model: str = "",
+              before_head: str | None = None, runtime: str = "", model: str = "",
               *, adopted: bool = False, expected_common: Path | None = None) -> dict:
     """Reconcile a worker run against its launch day, task and tree; git violations precede suite gating; return a report with counts and evidence."""
     cfg = dispatch_prompt.config(root)
@@ -373,10 +352,6 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         # the same row, so the run lands on it. The launch day's row tells the twin from a changed row.
         carried = launch != end and _launch_row_running(launch, task, name)
         path = end
-    if status == "done" and read_only and (actual or commits != NO_COMMITS):
-        # A task that owns nothing changed something: whatever the worker wrote, someone looks (#57).
-        left = "\n".join(x for x in (actual, commits) if x and x != NO_COMMITS)
-        status, reason = "human_review", f"read-only task left changes: {left}; worker said: {reason}"
     if status == "done" and actual:
         status = "human_review"
         reason = f"worker reported completion but the worktree is not clean: {actual}"
@@ -579,7 +554,7 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
                 (cwd / RESULT).unlink(missing_ok=True)
             exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2)
     report = reconcile(root, chosen_day, task, name, cwd, exit_code, before_head, runtime=runtime, model=model,
-                       read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common)  # held to what it was told
+                       expected_common=expected_common)
     print(toon_encode(report))
     return 0 if report["status"] == "done" and not report["errors"] else 1
 
@@ -627,8 +602,7 @@ ADOPT_LOOKBACK = 7  # days of trackers one adoption sweep scans for a dead run's
 
 def _running_row(root: Path, cfg, task: str, cwd: Path, days: list[str]) -> tuple[str, str] | None:
     """The day and worker name of `task`'s running row in the latest of `days` whose tracker holds one
-    and whose File ownership names this tree; None when no recent tracker says running here (#99)."""
-    tree = f"worktree `{cwd.resolve().name}`"
+    and whose Log's last started line for it names this tree; None when no recent tracker says running here (#99)."""
     for day in days:  # latest first
         try:
             text = (root / cfg.tracker_path(day)).read_text()
@@ -637,8 +611,7 @@ def _running_row(root: Path, cfg, task: str, cwd: Path, days: list[str]) -> tupl
         rows = [row for row in parse_tracker(text).tasks if row.item.strip() == task]
         if len(rows) != 1 or rows[0].kind != "running" or not rows[0].owner.strip():
             continue
-        owned = ownership.cell(text, dispatch_prompt.task_keys(task, dispatch_prompt.task_name(text, task)))
-        if owned is None or tree not in owned:
+        if started_trees(text).get(task) != cwd.resolve().name:
             continue  # the row's running work lives in some other tree
         return day, rows[0].owner.strip()
     return None
@@ -667,10 +640,6 @@ def adopt(root: Path, day: str | None = None) -> list[dict]:
         if found is None:
             continue
         row_day, name = found
-        stale = cwd / dispatch_prompt.DISPATCH_FILE
-        body = stale.read_text() if stale.is_file() else ""
-        # The dispatch is the launcher's own writing, so its Read-only line is trusted (#57).
-        adopted.append(reconcile(root, row_day, task, name, cwd, 0,
-                                 read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
+        adopted.append(reconcile(root, row_day, task, name, cwd, 0, adopted=True,
                                  expected_common=commons.get(cwd.resolve())))
     return adopted

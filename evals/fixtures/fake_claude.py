@@ -15,7 +15,9 @@ def one_answer(args):
     """`claude -p --output-format json ... -- <prompt>`, as the M0 spike measured it. A `claude-as run <profile>` lead is
     skipped. Sessions live in `.fake-claude-sessions/` in cwd. The prompt picks the outcome: QUOTA is a 429 quota stop on
     stderr, FAIL an error envelope with subtype success, SLEEP hangs; anything else is answered."""
-    prompt = args[args.index("--") + 1]
+    tail = args[args.index("--") + 1:]
+    # Stream input (engine workers, #1160): the prompt is the first stdin message.
+    prompt = tail[0] if tail else json.loads(sys.stdin.readline())["message"]["content"]
     flag = {key: value for key, value in zip(args, args[1:]) if key.startswith("--")}
     sessions = Path(".fake-claude-sessions")
     session = flag.get("--resume") or flag.get("--session-id") or str(uuid.uuid4())
