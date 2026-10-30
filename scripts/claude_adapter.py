@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import selectors
 import signal
 import shutil
@@ -41,6 +42,58 @@ class ClockError(ShellError):
 def available() -> str | None:
     """Claude's executable on the user's interactive login PATH; no model call."""
     return resolve(RUNTIME.binary)
+
+
+PLUGIN = "chief-of-stuff@chief-of-stuff"
+
+
+def _plugin(*args: str, cwd: str | None = None) -> str:
+    """One `claude plugin` command's stdout; ShellError when claude is missing or the command fails."""
+    binary = available()
+    if not binary:
+        raise ShellError(f"`{RUNTIME.binary}` is not on the login shell's PATH")
+    try:
+        done = subprocess.run(login_argv([binary, "plugin", *args]), cwd=cwd, env=clean_env(),
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ShellError(f"claude plugin {' '.join(args)}: {exc}") from None
+    if done.returncode:
+        raise ShellError(f"claude plugin {' '.join(args)}: {done.stderr.strip() or f'exit {done.returncode}'}")
+    return done.stdout
+
+
+def _installed() -> list[dict]:
+    return [entry for entry in json.loads(_plugin("list", "--json")) if entry.get("id") == PLUGIN]
+
+
+def update_plugin(current: Path, version: str) -> dict:
+    """§14: bring every installed scope of the plugin to `version`; what it cannot reach is reported, never silent."""
+    note = "running Claude sessions load the new plugin when they restart"
+    before = None
+    try:
+        market = next((m for m in json.loads(_plugin("marketplace", "list", "--json"))
+                       if m.get("name") == PLUGIN.split("@")[1]), {})
+        before = _installed()
+        if not before:
+            return {"plugin": "not installed"}
+        _plugin("marketplace", "update", PLUGIN.split("@")[1])
+        for entry in before:
+            if entry.get("version") != version:
+                _plugin("update", PLUGIN, "--scope", entry["scope"], cwd=entry.get("projectPath"))
+        behind = {entry["scope"]: entry.get("version") for entry in _installed() if entry.get("version") != version}
+    except (ShellError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        try:
+            observed = _installed()
+        except (ShellError, ValueError, KeyError, TypeError, AttributeError):
+            observed = before
+        versions = (", ".join(f"{entry.get('scope', 'unknown')} at {entry.get('version', 'unknown')}"
+                              for entry in observed) or "not installed") if observed is not None else "unknown"
+        return {"plugin": f"not updated: release {version}; plugin {versions}; {exc}", "note": note}
+    if not behind:
+        return {"plugin": version, "note": note}
+    source = market.get("path") or "no source"
+    where = "" if Path(source).resolve() == current.resolve() else f"; the marketplace reads {source}, not {current}"
+    return {"plugin": f"behind {version}: " + ", ".join(f"{s} at {v}" for s, v in behind.items()) + where, "note": note}
 
 
 def command(request: Request, claude_as_profile: str = "", *, extra_args: tuple[str, ...] = (),
@@ -161,6 +214,27 @@ def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
     prepared.pop()  # stream input has no positional prompt, as in drive_turns
     config_dir = overlay.get("CLAUDE_CONFIG_DIR") or str(session_logs.claude_home())
     return spawn(prepared, request, run_dir, overlay, stdin_prompt=request.prompt, config_dir=config_dir)
+
+
+def transcript_path(record: dict) -> Path:
+    """The exact Claude log in the launch's pinned account, never the current engine account.
+
+    Older launches without a pinned config directory are unknown; guessing after a restart
+    could select another account's transcript. T3 callers must use their thread instead.
+    """
+    if record.get("launcher") == "t3":
+        raise ValueError("T3 transcripts come from the thread")
+    prepared = json.loads((Path(record["run_dir"]) / "command.json").read_text())
+    session = record["session_id"]
+    if (not isinstance(prepared, dict)
+            or not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session)
+            or prepared.get("session_id") != session
+            or Path(prepared["cwd"]).resolve() != Path(record["tree"]).resolve()):
+        raise ValueError("transcript launch identity mismatch")
+    config = Path(prepared.get("config_dir") or prepared["env"]["CLAUDE_CONFIG_DIR"])
+    if not config.is_absolute():
+        raise ValueError("transcript account directory was not pinned absolutely")
+    return config / "projects" / session_logs._slug(Path(record["tree"])) / f"{session}.jsonl"
 
 
 def spawn(prepared: list[str], request: Request, run_dir: Path, env: dict[str, str] | None = None,

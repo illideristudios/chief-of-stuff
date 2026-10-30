@@ -508,6 +508,30 @@ class CliWriteTest(unittest.TestCase):
                 closer.assert_called_once()
                 self.assertEqual(closer.call_args.args[1], 226)
 
+    def test_close_of_a_sibling_project_url_closes_that_projects_issue(self):
+        """#416: the audit names another project on the home host by URL; its issue closes, not the home's same number."""
+        from urllib.parse import urlparse
+
+        server, base = serve({})
+        self.addCleanup(stop, server)
+        # issue_ref matches https URLs whose host equals home_of (including the test server's port).
+        sibling = f"https://{urlparse(base).netloc}/zachgardner/other/-/issues/5"
+        done = bl.Written(bl.CLOSE, "#5", done=True, iid=5)
+        with patch.object(bl, "close", return_value=done) as closer, patch("sys.stdout", new=io.StringIO()):
+            code = bl.main(["--config", self.config_at(base), "--close", sibling])
+        self.assertEqual(code, 0)
+        cfg_, number = closer.call_args.args[:2]
+        self.assertEqual((cfg_.project, number), ("zachgardner/other", 5))
+
+    def test_close_refuses_a_foreign_host_and_a_github_reference(self):
+        server, base = serve({})
+        self.addCleanup(stop, server)
+        for arg in ("https://evil.example/a/b/-/issues/5", "other/repo#5"):
+            with self.subTest(arg=arg), patch.object(bl, "close") as closer, patch("sys.stderr", new=io.StringIO()):
+                code = bl.main(["--config", self.config_at(base), "--close", arg])
+            self.assertEqual(code, 2)
+            closer.assert_not_called()
+
 
 # ---- GitHub -------------------------------------------------------------------------------------
 #

@@ -12,10 +12,11 @@ A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the se
 `.sources.json`) is newer than its last render, or differs in bytes from what that render read, and `/workers` on every GET (it reads the session logs too), and a thread refreshes `.sources.json` from the forge every minute. An open tab
 reloads itself when the file changes.
 
-    python3 pages.py --ensure [--root R]              # start it unless it is already serving; print status only
-    python3 pages.py serve --dir D --port P --root R  # what --ensure starts, detached
-    python3 pages.py install|uninstall|status [--root R]  # the independent board LaunchAgent (#935)
-    python3 pages.py supervise [--root R]             # what that LaunchAgent runs: ensure, every POLL seconds
+    chief-of-stuff pages [--ensure] [--root R]            # start it unless it is already serving; print status only
+    chief-of-stuff pages serve --dir D --port P --root R  # what --ensure starts, detached
+    chief-of-stuff pages install|uninstall|status [--root R]  # the independent board LaunchAgent (#935)
+    chief-of-stuff pages supervise [--root R]             # what that LaunchAgent runs: ensure, every POLL seconds
+    chief-of-stuff pages --board [--date D] [--root R]    # what `chief-of-stuff board` runs: write the board file, no server
 
 A decision page posts the user's answer to `POST /decisions/<slug>` (`key` and/or `words`, form-encoded).
 The server saves it as the decision JSON's `answer` ({key, words, at}) for the coordinator's next pass, and
@@ -1248,6 +1249,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except decision_page.BAD:
                 return self._refusal(409, "The decision cannot be read. Your answer was not saved; try reloading it later.",
                                      answer=draft, words_name="words", link=f"/decisions/{m[1]}")
+            try:
+                answered = decision_page.is_answered(d, m[1], getattr(self.server, "root", None))
+            except (OSError, ValueError, ConfigError) as e:
+                return self.send_error(503, f"cannot tell whether the decision is answered: {e}")
+            if answered:
+                return self.send_error(409, "the decision is already answered")
             if (key and key not in [o["key"] for o in d["options"]]) or not (key or words):
                 root = getattr(self.server, "root", None)
                 pages_dir = Path(self.directory)
@@ -1786,18 +1793,83 @@ def status(root: Path, jobs_dir: Path | None = None) -> dict:
     return report
 
 
+PAGES_EPILOG = """\
+When not to use:
+  To open the board for the user, use a browser: nothing here ever opens it. To write the board file without a
+  server, use chief-of-stuff board. To write a decision page, use chief-of-stuff decision. Agents do not run
+  serve: --ensure starts it detached.
+
+Output:
+  Text, not TOON or JSON, except status (a TOON record). Ensuring prints exactly one stdout status line, never
+  the URL: pages: serving (the same or a newer version already answers), pages: started, or pages: restarted
+  (an older pages server was replaced). install and uninstall print one line saying what changed. status prints
+  the board and the engine separately: board state, port, pid, whether the LaunchAgent exists, whether a
+  supervisor holds the board. serve and supervise print no status line; a detached serve appends its stdout and
+  stderr to <root>/.chief-of-stuff/pages.log. Failures print pages: not served - <reason> (ensuring) or
+  pages: <reason> (install, uninstall, status) on stderr; usage faults print usage and an error on stderr.
+
+Exit codes:
+  0  serving, started or restarted; install, uninstall or status succeeded; help printed; serve and
+     supervise run until stopped (SIGTERM or SIGINT end supervise with 0).
+  1  ensuring failed: missing Board line or unreadable config, a foreign server owns the port, an older server
+     cannot be identified or stopped, the new server did not come up, or a connection was denied (often a sandbox).
+  2  usage fault (unknown argument, serve without --dir and --port, --port not an integer), or install,
+     uninstall or status failed (pages: <reason> on stderr).
+
+Side effects:
+  Ensuring reads the Board line, probes HEAD http://127.0.0.1:<port>/all and, for an older server, reads
+  <pages dir>/.pid and checks that process's command line. It creates the pages and log directories, appends
+  <root>/.chief-of-stuff/pages.log, writes .pid only after a new server answers, and may SIGTERM an older pages
+  serve on that port. It never switches to another port.
+  install needs macOS and a Board line; it writes the board LaunchAgent under the supervisor lock and loads it; uninstall removes the agent and
+  leaves a running page server serving until it stops or the Mac restarts; status writes nothing. supervise
+  checks the server every few seconds and restarts it (what the LaunchAgent runs).
+  The server binds only to 127.0.0.1 and accepts only a 127.0.0.1 or localhost Host. Routes: / is today's board
+  once today's tracker exists, else the newest board; /workers (and /workers/) the running workers and today's
+  ends; /decisions (and /decisions/) the list; /decisions/<slug> an authored decision; /decisions/<id> (digits)
+  a store decision rendered from the store; /issues/<n> and /issues/<n>/source; /all every other non-hidden
+  file a session wrote there. Rendered HTML files are served only through their routes, not their filenames.
+  A GET (and HEAD) re-renders a page when its sources change in time or bytes; /workers renders on every GET.
+  Rendering writes HTML into the pages directory, keeping unchanged files; an open tab reloads itself. A render
+  failure keeps the last good page with an error banner. A background thread reads forge and worker facts at
+  start and about every 60 seconds and writes <pages dir>/.sources.json.
+  POST /decisions/<slug> (form: key and/or words) writes that decision JSON's answer {key, words, at}. POST / (a
+  store decision's form) records an answer, reversal or re-route as an intent row that the engine alone
+  applies: the request never touches the forge or a card. POST /workers/sessions/<n>/messages records a message
+  for that worker session in the store (same-origin form only). Only this machine's own pages may post.
+  No forge writes and no --commit, preview or dry run: writes happen as the server runs.
+
+Examples:
+  chief-of-stuff pages --ensure --root ~/work/field-notes
+  chief-of-stuff pages status --root ~/work/field-notes
+  chief-of-stuff pages install --root ~/work/field-notes
+  chief-of-stuff pages --help
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
     args_list = list(sys.argv[1:] if argv is None else argv)
     if args_list[:1] == ["--board"]:
         import render_board
         render_board.main(args_list[1:], writer=write_board)
         return 0
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--ensure", action="store_true", help="start the server unless it is serving; print status only")
-    ap.add_argument("--root", help="workspace root holding CLAUDE.md (default: the current directory)")
-    ap.add_argument("command", nargs="?", choices=("serve", "supervise", "install", "uninstall", "status"))
-    ap.add_argument("--dir")
-    ap.add_argument("--port", type=int)
+    ap = argparse.ArgumentParser(prog="chief-of-stuff pages", description=__doc__, epilog=PAGES_EPILOG,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    # shortcut: --ensure is unused; the bare command already ensures; drop the flag when every caller stops passing it.
+    ap.add_argument("--ensure", action="store_true", help="flag; default off; ensure the server (also the bare command's behavior)")
+    ap.add_argument("--root", help="path; default . when ensuring, none with serve; workspace holding CLAUDE.md")
+    dir_action = ap.add_argument("--dir", help="path; default none; required with serve, ignored otherwise; pages directory")
+    port_action = ap.add_argument("--port", type=int, help="integer; default none; required with serve, ignored otherwise; listen port")
+
+    class ServeNeedsDirAndPort(argparse.Action):  # argparse checks `required` once the whole line is parsed
+        def __call__(self, parser, namespace, value, option_string=None):
+            namespace.command = value
+            dir_action.required = port_action.required = value == "serve"
+
+    ap.add_argument("command", nargs="?", choices=("serve", "supervise", "install", "uninstall", "status"),
+                    action=ServeNeedsDirAndPort,
+                    help="string; default omitted (ensure); serve is the internal foreground server, supervise "
+                         "the LaunchAgent's loop, install|uninstall|status manage that LaunchAgent")
     ap.add_argument("--handoff-ready-fd", type=int, help=argparse.SUPPRESS)
     args = ap.parse_args(args_list)
     if args.command == "serve":

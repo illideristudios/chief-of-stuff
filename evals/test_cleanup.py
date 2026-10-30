@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+from sqlalchemy.exc import SQLAlchemyError
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "evals"))
@@ -31,6 +33,7 @@ import git_trees  # noqa: E402
 import make_repo  # noqa: E402
 import one_shot  # noqa: E402
 import session_exec  # noqa: E402
+import shell_setup  # noqa: E402
 import store  # noqa: E402
 from evals import git_taint as taint  # noqa: E402
 from tree_state import unsaved  # noqa: E402
@@ -118,6 +121,462 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(self.store.log(f"{KEY}-done"), [])
 
     # removal
+
+    def configure_teardown(self) -> None:
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `settings.toml`\n")
+        (self.root / "settings.toml").write_text('[workers]\nteardown = "stack-stop"\n')
+
+    def test_teardown_stops_a_stack_under_the_launch_lock_before_the_mount_check_and_removal(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        mounted = True
+
+        def stop(command, cwd, **kwargs):
+            nonlocal mounted
+            self.assertEqual((command, cwd), ("stack-stop", self.root))
+            self.assertEqual(kwargs, {"workspace": self.root, "worker": "done", "worktree": str(tree)})
+            probe = os.open(self.trees, os.O_RDONLY)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(probe)
+            mounted = False
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(shell_setup, "run_command", side_effect=stop) as command, \
+                mock.patch.object(cleanup, "containers", side_effect=lambda: [tree / "data"] if mounted else []):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        command.assert_called_once()
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse(tree.exists())
+        self.assertIn("removed done", self.store.log(f"{KEY}-done")[0].message)
+
+    def test_failed_teardown_reports_and_logs_the_error_and_the_mount_still_keeps_the_tree(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        with mock.patch.object(shell_setup, "run_command", return_value=
+                               subprocess.CompletedProcess([], 7, "", "stack service unavailable")) as command, \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            _, out = self.run_cleanup("--remove")
+        command.assert_called_once()
+        line = self.kept(out)["done"]
+        self.assertIn("teardown: exit 7: stack service unavailable", line)
+        self.assertIn("a container mount overlaps it", line)
+        self.assertTrue(tree.is_dir())
+        self.assertEqual(self.store.log(f"{KEY}-done")[0].message, line)
+
+    def test_a_teardown_warning_does_not_block_guarded_removal(self) -> None:
+        self.configure_teardown()
+        with mock.patch.object(shell_setup, "teardown", return_value=["teardown: exit 7"]) as stop, \
+                mock.patch.object(cleanup, "containers", return_value=[]):
+            _, out = self.run_cleanup("--remove")
+        stop.assert_called_once_with(self.root, self.trees / "done", "done", "stack-stop")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertIn("teardown: exit 7", out)
+        self.assertIn("teardown: exit 7", self.store.log(f"{KEY}-done")[0].message)
+
+    def test_successful_teardown_does_not_bypass_a_remaining_or_unreadable_mount(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        for number, mounts in enumerate(([tree / "data"], None)):
+            (self.root / "settings.toml").write_text(f'[workers]\nteardown = "stack-stop {number}"\n')
+            with self.subTest(mounts=mounts), \
+                    mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
+                    mock.patch.object(cleanup, "containers", return_value=mounts):
+                _, out = self.run_cleanup("--remove")
+                stop.assert_called_once()
+                self.assertIn("container", self.kept(out)["done"])
+                self.assertTrue(tree.is_dir())
+
+    def test_a_retained_tree_is_torn_down_once_across_cleanup_restarts(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        for mounts in ([tree / "data"], None):
+            with self.subTest(mounts=mounts), \
+                    mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
+                    mock.patch.object(cleanup, "containers", return_value=mounts):
+                for _ in range(2):
+                    code, out = self.run_cleanup("--remove")  # a new Store on each pass
+                    self.assertEqual(code, 0, out)
+                    self.assertIn("container", self.kept(out)["done"])
+                self.assertEqual(stop.call_count, 1 if mounts is not None else 0)
+        self.assertEqual(len(self.store.log(f"{KEY}-done")), 2)  # the guard reason changed
+        with mock.patch.object(shell_setup, "teardown") as stop, \
+                mock.patch.object(cleanup, "containers", return_value=[]):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        stop.assert_not_called()
+        self.assertEqual(self.removable(out), ["done"])
+
+    def test_new_tree_at_the_same_path_gets_its_own_teardown(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        with mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            self.run_cleanup("--remove")
+            make_repo.git(["worktree", "remove", str(tree)], self.clone)
+            make_repo.git(["worktree", "add", str(tree), "done"], self.clone)
+            self.run_cleanup("--remove")
+        self.assertEqual(stop.call_count, 2)
+
+    def test_tree_recreated_after_the_outer_attempt_check_gets_its_own_teardown(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        with mock.patch.object(shell_setup, "teardown", return_value=[]), \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            self.run_cleanup("--remove")
+        real_lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def recreate(trees):
+            with real_lock(trees):
+                make_repo.git(["worktree", "remove", str(tree)], self.clone)
+                make_repo.git(["worktree", "add", str(tree), "done"], self.clone)
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", recreate), \
+                mock.patch.object(cleanup, "containers", return_value=[]), \
+                mock.patch.object(shell_setup, "teardown", return_value=[]) as stop:
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        stop.assert_called_once()
+        self.assertFalse(tree.exists())
+
+    def test_an_attempt_recorded_by_another_pass_still_checks_owners_after_mounts(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        real_lock = cleanup.trees_lock
+        locked = False
+
+        @contextlib.contextmanager
+        def another_pass(trees):
+            nonlocal locked
+            with real_lock(trees):
+                layout = cleanup.git_view.locate(tree)
+                self.store.claim_teardown(str(tree), cleanup.teardown_identity(layout, "stack-stop"))
+                locked = True
+                yield
+                locked = False
+
+        def reopen():
+            if locked:
+                self.finish("done", state="open")
+            return []
+
+        with mock.patch.object(cleanup, "trees_lock", another_pass), \
+                mock.patch.object(cleanup, "containers", side_effect=reopen), \
+                mock.patch.object(shell_setup, "teardown") as stop:
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        stop.assert_not_called()
+        self.assertEqual(self.kept(out)["done"], f"keep done — {KEY}-done is not finished")
+        self.assertTrue(tree.is_dir())
+
+    def test_each_new_teardown_warning_is_logged_while_unchanged_guard_refusals_are_deduplicated(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        with mock.patch.object(shell_setup, "run_command", side_effect=[
+                subprocess.TimeoutExpired(["shell", "chief-command-first"], 120),
+                subprocess.TimeoutExpired(["shell", "chief-command-second"], 120)]) as command, \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            _, first = self.run_cleanup("--remove")
+            # An explicitly changed command permits another attempt, even for this same tree.
+            (self.root / "settings.toml").write_text('[workers]\nteardown = "stack-stop --retry"\n')
+            _, second = self.run_cleanup("--remove")
+            _, repeated = self.run_cleanup("--remove")
+        self.assertEqual(command.call_count, 2)
+        self.assertIn("chief-command-first", first)
+        self.assertIn("chief-command-second", second)
+        self.assertNotIn("teardown:", self.kept(repeated)["done"])
+        self.assertEqual([entry.message for entry in self.store.log(f"{KEY}-done")],
+                         [self.kept(first)["done"], self.kept(second)["done"]])
+
+    def test_teardown_is_one_tree_attempt_even_when_an_owner_resume_write_would_fail(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        second = f"{KEY}-second"
+        self.store.upsert_item(second, forge_state="closed")
+        self.store.set_tree(second, str(tree / "shared.txt"))
+        real_set = store.Store.set_resume
+        writes = 0
+
+        def fail_second(db, key, state):
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise SQLAlchemyError("second owner write failed")
+            real_set(db, key, state)
+
+        with mock.patch.object(store.Store, "set_resume", fail_second), \
+                mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            self.run_cleanup("--remove")
+            self.run_cleanup("--remove")
+        stop.assert_called_once()
+        self.assertIsNone(self.store.resume(f"{KEY}-done"))
+        self.assertIsNone(self.store.resume(second))
+
+    def test_engine_resume_updates_and_cleanup_attempts_cannot_overwrite_each_other(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        key = f"{KEY}-done"
+        stale = {"pending_stage": "implement"}
+        recovered = {"pending_stage": "review"}
+        self.store.set_resume(key, stale)
+
+        with mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            with mock.patch.object(store.Store, "resume", autospec=True, side_effect=store.Store.resume) as read, \
+                    mock.patch.object(store.Store, "set_resume", autospec=True,
+                                      side_effect=store.Store.set_resume) as write:
+                self.run_cleanup("--remove")
+                read.assert_not_called()
+                write.assert_not_called()
+            # Cleanup must neither read nor replace the engine's resume document.
+            self.assertEqual(self.store.resume(key), stale)
+            self.store.set_resume(key, recovered)  # a later engine writer replaces its entire document
+            self.run_cleanup("--remove")
+        stop.assert_called_once()
+        self.assertEqual(self.store.resume(key), recovered)
+
+    def test_recorded_attempts_with_mount_refusals_skip_the_launch_lock_and_rechecks(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        with mock.patch.object(shell_setup, "teardown", return_value=[]), \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            self.run_cleanup("--remove")
+        for mounts in ([tree / "data"], None):
+            with self.subTest(mounts=mounts), \
+                    mock.patch.object(cleanup, "trees_lock") as lock, \
+                    mock.patch.object(cleanup, "owned_items", wraps=cleanup.owned_items) as owners, \
+                    mock.patch.object(cleanup, "containers", return_value=mounts) as containers, \
+                    mock.patch.object(shell_setup, "teardown") as stop:
+                code, out = self.run_cleanup("--remove")
+            self.assertEqual(code, 0, out)
+            self.assertIn("container", self.kept(out)["done"])
+            stop.assert_not_called()
+            lock.assert_not_called()
+            owners.assert_called_once()
+            containers.assert_called_once()
+
+    def test_replacing_an_owner_resume_document_does_not_forget_the_teardown(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        key = f"{KEY}-done"
+        with mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            self.run_cleanup("--remove")
+            self.store.set_resume(key, {"pending_stage": "review"})
+            self.run_cleanup("--remove")
+        stop.assert_called_once()
+        self.assertEqual(self.store.resume(key), {"pending_stage": "review"})
+
+    def test_attempt_store_failures_skip_teardown_and_postchecks_but_retain_mount_diagnostics(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        for method in ("teardown_attempt", "claim_teardown"):
+            with self.subTest(method=method), \
+                    mock.patch.object(store.Store, method, side_effect=SQLAlchemyError("unreadable")), \
+                    mock.patch.object(cleanup, "owned_items", wraps=cleanup.owned_items) as owners, \
+                    mock.patch.object(cleanup, "containers", return_value=[tree / "data"]) as containers, \
+                    mock.patch.object(shell_setup, "teardown") as stop:
+                code, out = self.run_cleanup("--remove")
+            self.assertEqual(code, 1, out)
+            self.assertIn("store teardown attempt cannot be checked", self.kept(out)["done"])
+            self.assertIn("a container mount overlaps it", self.kept(out)["done"])
+            self.assertEqual(owners.call_count, 1 if method == "teardown_attempt" else 2)
+            containers.assert_called_once()
+            stop.assert_not_called()
+            self.assertTrue(tree.is_dir())
+
+    def test_locked_teardown_identity_failure_keeps_its_diagnostic_and_skips_teardown(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        identity = cleanup.teardown_identity(cleanup.git_view.locate(tree), "stack-stop")
+        with mock.patch.object(cleanup, "teardown_identity", side_effect=[identity, OSError("unreadable")]), \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]), \
+                mock.patch.object(shell_setup, "teardown") as stop:
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.kept(out)["done"],
+                         "keep done — store teardown attempt cannot be checked (OSError); "
+                         "a container mount overlaps it")
+        stop.assert_not_called()
+        self.assertTrue(tree.is_dir())
+        self.assertEqual(self.store.log(f"{KEY}-done")[-1].message, self.kept(out)["done"])
+
+    def test_locked_precheck_refusals_retain_mount_diagnostics_without_running_teardown(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        real_lock = cleanup.trees_lock
+        admin = cleanup.git_view.locate(tree).gitdir
+        for refusal in ("layout", "claim", "git", "owner", "store"):
+            for mounts, reason in (([tree / "data"], "a container mount overlaps it"),
+                                   (None, "containers cannot be checked")):
+                with self.subTest(refusal=refusal, mounts=mounts):
+                    @contextlib.contextmanager
+                    def refuse(trees):
+                        with real_lock(trees):
+                            if refusal == "layout":
+                                (admin / "locked").touch()
+                            elif refusal == "claim":
+                                self.lsof.return_value = subprocess.CompletedProcess(
+                                    ["lsof"], 0, f"p12345\nn{tree}\n", "")
+                            elif refusal == "git":
+                                (tree / "new.txt").write_text("unsaved\n")
+                            elif refusal == "owner":
+                                self.finish("done", state="open")
+                            with contextlib.ExitStack() as stack:
+                                if refusal == "store":
+                                    stack.enter_context(mock.patch.object(
+                                        cleanup, "owned_items", side_effect=SQLAlchemyError("unreadable")))
+                                yield
+
+                    with mock.patch.object(cleanup, "trees_lock", refuse), \
+                            mock.patch.object(cleanup, "containers", return_value=mounts) as containers, \
+                            mock.patch.object(shell_setup, "teardown") as stop:
+                        code, out = self.run_cleanup("--remove")
+                    (admin / "locked").unlink(missing_ok=True)
+                    (tree / "new.txt").unlink(missing_ok=True)
+                    self.lsof.return_value = subprocess.CompletedProcess(["lsof"], 1, "", "")
+                    self.finish("done")
+                    stop.assert_not_called()
+                    containers.assert_called_once()
+                    self.assertEqual(code, 1 if refusal == "store" else 0, out)
+                    line = self.kept(out)["done"]
+                    self.assertIn(reason, line)
+                    self.assertEqual(self.store.log(f"{KEY}-done")[-1].message, line)
+                    if refusal == "owner":
+                        self.assertEqual(line, f"keep done — {KEY}-done is not finished; {reason}")
+
+    def test_teardown_deleting_the_tree_or_its_git_link_reports_partial_removal(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        admin = cleanup.git_view.locate(tree).gitdir
+        original = (tree / ".git").read_text()
+        for target in (tree / ".git", tree):
+            with self.subTest(target=target):
+                def stop(*args):
+                    if target == tree:
+                        cleanup.shutil.rmtree(tree)
+                    else:
+                        target.unlink()
+                    return []
+
+                with mock.patch.object(shell_setup, "teardown", side_effect=stop) as teardown:
+                    code, out = self.run_cleanup("--remove")
+                teardown.assert_called_once()
+                self.assertEqual(code, 1, out)
+                line = next(line for line in out.splitlines() if line.startswith("partially removed done:"))
+                self.assertIn(f"admin dir remains ({admin})", line)
+                self.assertTrue(admin.is_dir())
+                self.assertEqual(self.store.log(f"{KEY}-done")[-1].message, line)
+                if target != tree:
+                    (tree / ".git").write_text(original)
+                    # A changed command represents an explicit second attempt for the next subcase.
+                    (self.root / "settings.toml").write_text('[workers]\nteardown = "stack-stop --retry"\n')
+
+    def test_outer_refusals_retain_mount_reasons_with_teardown_configured(self) -> None:
+        self.configure_teardown()
+        self.finish("done", state="open")
+        for mounts, reason in (([self.trees / "done" / "data"], "a container mount overlaps it"),
+                               (None, "containers cannot be checked")):
+            with self.subTest(mounts=mounts), \
+                    mock.patch.object(cleanup, "containers", return_value=mounts), \
+                    mock.patch.object(shell_setup, "teardown") as stop:
+                _, preview = self.run_cleanup()
+                _, out = self.run_cleanup("--remove")
+            stop.assert_not_called()
+            self.assertEqual(self.kept(out), self.kept(preview))
+            self.assertIn(reason, self.kept(out)["done"])
+            self.assertEqual(self.store.log(f"{KEY}-done")[-1].message, self.kept(out)["done"])
+
+    def test_preview_explains_that_teardown_can_make_a_mounted_tree_removable(self) -> None:
+        self.configure_teardown()
+        with mock.patch.object(cleanup, "containers", return_value=[self.trees / "done" / "data"]):
+            _, out = self.run_cleanup()
+        self.assertIn("--remove runs teardown before rechecking mounts", out)
+
+    def test_preview_with_teardown_configured_never_runs_it(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        with mock.patch.object(shell_setup, "teardown") as stop, \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            code, out = self.run_cleanup()
+        self.assertEqual(code, 0, out)
+        stop.assert_not_called()
+        self.assertIn("container", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
+
+    def test_unconfigured_teardown_is_not_called(self) -> None:
+        with mock.patch.object(shell_setup, "teardown") as stop:
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        stop.assert_not_called()
+        self.assertEqual(self.removable(out), ["done"])
+
+    def test_teardown_never_runs_for_unfinished_unowned_dirty_or_unlanded_trees(self) -> None:
+        self.configure_teardown()
+        self.finish("done", state="open")
+        make_repo.git(["worktree", "add", "-b", "stray", str(self.trees / "stray"), "main"], self.clone)
+        with mock.patch.object(shell_setup, "teardown") as stop:
+            _, out = self.run_cleanup("--remove")
+        stop.assert_not_called()
+        self.assertEqual(self.removable(out), [])
+
+    def test_a_worker_claim_in_the_locked_recheck_prevents_teardown(self) -> None:
+        self.configure_teardown()
+        real_lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def claim_then_lock(trees):
+            with real_lock(trees):
+                self.lsof.return_value = subprocess.CompletedProcess(["lsof"], 0, f"p12345\nn{trees / 'done'}\n", "")
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", claim_then_lock), \
+                mock.patch.object(shell_setup, "teardown") as stop:
+            _, out = self.run_cleanup("--remove")
+        stop.assert_not_called()
+        self.assertIn("live process in tree", self.kept(out)["done"])
+
+    def test_an_owner_reopened_before_the_locked_recheck_prevents_teardown(self) -> None:
+        self.configure_teardown()
+        real_lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def reopen_then_lock(trees):
+            with real_lock(trees):
+                self.finish("done", state="open")
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", reopen_then_lock), \
+                mock.patch.object(shell_setup, "teardown") as stop:
+            _, out = self.run_cleanup("--remove")
+        stop.assert_not_called()
+        self.assertEqual(self.kept(out)["done"], f"keep done — {KEY}-done is not finished")
+
+    def test_teardown_cannot_invalidate_another_removal_guard(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        admin = cleanup.git_view.locate(tree).gitdir
+
+        def stop(*args):
+            (tree / "keep.txt").write_text("unsaved teardown output\n")
+            (admin / "locked").touch()
+            self.finish("done", state="open")
+            self.lsof.return_value = subprocess.CompletedProcess(["lsof"], 0, f"p12345\nn{tree}\n", "")
+            return []
+
+        with mock.patch.object(shell_setup, "teardown", side_effect=stop) as teardown, \
+                mock.patch.object(cleanup, "containers", return_value=[]):
+            _, out = self.run_cleanup("--remove")
+        teardown.assert_called_once()
+        for reason in ("keep.txt", "locked", "not finished", "live process in tree"):
+            self.assertIn(reason, self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
 
     def test_merged_tree_requires_verified_completion_before_removal(self):
         key = f"{KEY}-done"
