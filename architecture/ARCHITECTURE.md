@@ -238,17 +238,23 @@ B(d) only when d's own intent fails permanently   [never for siblings]
 ∴ one writer, one current intent per issue: a stale write cannot move a card, and no hold wedges another decision
 ```
 
-Every decision has its own page at `/decisions/<id>`. The page server renders it from the store on request, with no authored file (owner, 2026-10-19: "there should be a per-decision page that is automatically rendered by id"; #945). `<id>` is the id of the first row of the decision's identity, so the address never changes as rows are appended, and the id of any later row of the same identity renders the same page. The page shows the identity's newest row as its state: the question, the options, the recommendation, the default, who it waits on, the trio's outcome, and the issue it belongs to, linked to that issue's page. Below that, every row of the identity is listed as its history. An open decision carries the answer form, which posts an intent like any other board action. An answered one shows the answer and who gave it, and no form. An unknown id returns 404. Board decision items, task pages and the `/decisions` list link to the page. `decision_page.py` is the only decision presenter, so the board item and the page render the same fields. Until the legacy coordinator is deleted, its authored pages keep `/decisions/<slug>`, and a path made only of digits is a store id.
+Every decision has its own page at `/decisions/<id>`. The page server renders it from the store on request, with no authored file (owner, 2026-10-19: "there should be a per-decision page that is automatically rendered by id"; #945). `<id>` is the id of the first row of the decision's identity, so the address never changes as rows are appended, and the id of any later row of the same identity renders the same page. The page shows the identity's newest row as its state: the question, the options, the recommendation, the default, who it waits on, the trio's outcome, and the issue it belongs to, linked to that issue's page. Below that, every row of the identity is listed as its history. An open decision carries the answer form, which posts an intent like any other board action. An answered one shows the answer and who gave it, and no answer form. It keeps a Reverse action, which takes the person's reason ("why reverse it") and appends a reversal intent, so the recorded answer is never overwritten (#971; `scripts/decision_page.py:806`). An unknown id returns 404. The board shows no decision items and no answer form (owner, 2026-10-25: "rm inline decisions on the page, they're awful and I hate them"). Its NEEDS INPUT tile and Decisions tab link to the `/decisions` list (`scripts/render_board.py:321`, `scripts/fragment.py:85`), which is rendered from the store and links each decision to its page, as task pages do. `decision_page.py` is the only decision presenter, and a decision's page is the only place it is answered. The page's "Waits on" and the list's pending count read `decision_actions.waits_on_owner` (`scripts/decision_actions.py:105`), which follows `decision_escalation.needs_owner`, so a decision waits on the owner only when its newest row is the owner's unanswered wait or its intent is blocked, and a worker's permission ask never does (#1152). Until the legacy coordinator is deleted, its authored pages keep `/decisions/<slug>`, and a path made only of digits is a store id.
 
 ```
 d := a decision identity in the store      P(d) := /decisions/<id of d's first row> renders d's page
 S := the page is rendered from the store on request, with no authored file
 F(d) := d's page carries a live answer form      A(d) := d's newest row is an answer
+Bd := the board renders a decision item or an answer form      Rv(d) := d's page offers Reverse
+Wo(d) := d's page says it waits on the owner      No(d) := needs_owner names d, or d's intent is blocked      Pa(d) := d is a worker's permission ask
 
 ∀d: P(d) ∧ S          [owner 2026-10-19; #945]
+¬Bd                   [owner, 2026-10-25: "rm inline decisions on the page"]
 A(d) → ¬F(d)          [an answered decision shows its answer and never a live form; #924]
+A(d) → Rv(d)          [Reverse stays, takes a reason, appends; #971]
 a form post is an intent → the page server records it and never acts   [this section]
-∴ every decision has one stable address, and an answer given there goes through the one writer
+Wo(d) ↔ No(d)         [#1152; scripts/decision_actions.py:105]
+Pa(d) → ¬No(d)        [#890: a permission ask is never an owner decision]
+∴ every decision has one stable address, it is answered there and never on the board, an answer is reversed there and never overwritten, both go through the one writer, and a permission ask never shows as waiting on the owner
 ```
 
 Until the engine path replaces it, the legacy one-shot path keeps its `Review:` line: `dispatch_prompt.compose` adds it to a Tasks row whose `stage` cell is `review`.
