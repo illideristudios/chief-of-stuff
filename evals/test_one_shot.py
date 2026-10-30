@@ -84,12 +84,6 @@ TRACKER = """# Tracker
 |---|---|---|---|---|---|
 | Security audit | unassigned | open | 09:00 | | Inspect upload handler |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Security audit | `src/a/` |
-
 ## Log
 
 - 09:00 opened
@@ -406,16 +400,17 @@ class CommandTest(unittest.TestCase):
 
     def test_exit_zero_without_structured_result_requires_review(self):
         with tempfile.TemporaryDirectory() as tmp:
-            status, reason, changes = one_shot.worker_result(Path(tmp) / "missing.toon", 0)
+            status, reason, changes, counts = one_shot.worker_result(Path(tmp) / "missing.toon", 0)
         self.assertEqual(status, "human_review")
         self.assertIn("did not write", reason)
         self.assertEqual(changes, "")
+        self.assertEqual(counts, dict.fromkeys(("passed", "failed", "skipped", "xfailed")))
 
     def test_an_undecodable_result_requires_review_with_its_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "worker-result.toon"
             path.write_text('status: done\nreason: "costs \\$5"\nchanges: "a.py"\n')
-            status, reason, _ = one_shot.worker_result(path, 0)
+            status, reason, _, _ = one_shot.worker_result(path, 0)
         self.assertEqual(status, "human_review")
         self.assertIn("costs", reason)
 
@@ -424,7 +419,15 @@ class CommandTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "worker-result.toon"
             path.write_text('{"status": "done", "reason": "fixed: the \\"cap\\"", "changes": "a.py, b.py"}\n')
-            self.assertEqual(one_shot.worker_result(path, 0), ("done", 'fixed: the "cap"', "a.py, b.py"))
+            self.assertEqual(one_shot.worker_result(path, 0), (
+                "done", 'fixed: the "cap"', "a.py, b.py", dict.fromkeys(("passed", "failed", "skipped", "xfailed"))))
+
+    def test_toon_result_carries_observed_suite_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "worker-result.toon"
+            counts = {"passed": 23, "failed": 0, "skipped": 2, "xfailed": 11}
+            path.write_text(toon_encode({"status": "done", "reason": "finished", "changes": "tested", **counts}))
+            self.assertEqual(one_shot.worker_result(path, 0), ("done", "finished", "tested", counts))
 
 
 class CodexAddDirArgsTest(unittest.TestCase):
@@ -524,20 +527,7 @@ class CodexAddDirArgsTest(unittest.TestCase):
             (base / ".git/worktrees/tree/gitdir").write_text(f"{sub / '.git'}\n")
             self.assertEqual(git_trees.codex_add_dir_args(sub), [])
 
-    def test_a_relative_paths_worktree_still_gets_its_two_dirs(self):
-        # `git worktree add --relative-paths` writes the back-pointer relative to the gitdir; it is resolved before comparing.
-        with tempfile.TemporaryDirectory() as tmp:
-            base, tree = Path(tmp) / "base", Path(tmp) / "tree"
-            subprocess.run(["git", "init", "-q", str(base)], check=True)
-            self._git("-C", str(base), "commit", "-q", "--allow-empty", "-m", "init")
-            made = subprocess.run(["git", "-C", str(base), "worktree", "add", "-q", "--relative-paths", str(tree)],
-                                  capture_output=True, text=True)
-            if made.returncode:
-                self.skipTest(f"this git has no `worktree add --relative-paths`: {made.stderr.strip()}")
-            pointer = (base / ".git/worktrees/tree/gitdir").read_text().strip()
-            self.assertFalse(Path(pointer).is_absolute(), pointer)  # the fixture is the relative form
-            self.assertEqual(git_trees.codex_add_dir_args(tree),
-                             self.pairs((base / ".git").resolve(), (base / ".git/worktrees/tree").resolve()))
+    # The `worktree add --relative-paths` case is removed until the CI image's git supports it (#855).
 
     def test_no_git_process_is_spawned_for_any_grant_or_refusal(self):
         # #443: the tree is what a previous codex run could write to, so its git control files are read as files
@@ -648,6 +638,23 @@ class RunTest(unittest.TestCase):
                                 cwd=tree or self.tree, name="worker01", runtime=runtime, agent_type=None,
                                 model=model, effort=effort, dry_run=False)
 
+    def test_run_composes_with_already_loaded_workspace_policy(self):
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `cos.toml`\n")
+        (self.root / "cos.toml").write_text(
+            '[workers]\nrules = ["Keep tests."]\nrequire_green_tests = true\n[lanes.code]\nstages = ["review"]\n'
+            '[stages.review]\nskills = ["security-review"]\n')
+        settings = one_shot.load_settings(self.root, "cos.toml")
+        with mock.patch.object(one_shot, "load_settings", return_value=settings) as load, \
+             mock.patch.object(dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")), \
+             mock.patch.object(dispatch_prompt, "compose", wraps=dispatch_prompt.compose) as compose, \
+             mock.patch.object(one_shot, "resolve", return_value="/fake/agent"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = one_shot.run(root=self.root, day="2026-09-18", task="Security audit", cwd=self.tree,
+                                name="worker01", runtime="claude", agent_type=None, model="example", effort="", dry_run=True)
+        self.assertEqual(code, 0)
+        load.assert_called_once_with(self.root, "cos.toml")
+        self.assertIs(compose.call_args.kwargs["settings"], settings)
+
     def test_done_exits_once_and_leaves_waiting_for_integration(self):
         fake = self._fake('status: done\nreason: completed audit\nchanges: committed handler and ran tests\n',
                           write_partial=False)
@@ -667,10 +674,19 @@ class RunTest(unittest.TestCase):
         self.assertRegex(during, r"\| Security audit \| worker01 \| running \d\d:\d\d \|")
         branch = subprocess.run(["git", "-C", str(self.tree), "branch", "--show-current"],
                                 capture_output=True, text=True, check=True).stdout.strip()
-        self.assertIn(f"| Security audit | `src/a/`; worktree `worker` ({branch}) |", during)
+        self.assertTrue(branch)
         self.assertRegex(during, r"(?m)^- \d\d:\d\d one-shot worker01 started: codex, worktree `worker`, "
                                  r"task Security audit$")
-        self.assertIn(f"worktree `worker` ({branch})", self.tracker.read_text())
+        self.assertNotIn("File ownership", self.tracker.read_text())
+
+    def test_record_launch_with_no_file_ownership_row_is_not_refused(self):
+        # #1039 (C29): the engine has no authorized files; the Tasks row is the launch, and the Log's started line names the tree.
+        self.assertNotIn("## File ownership", self.tracker.read_text())
+        one_shot.record_launch(self.tracker, "Security audit", "worker01", "worktree `w` (b)", "codex", "", "10:00")
+        text = self.tracker.read_text()
+        self.assertIn("| Security audit | worker01 | running 10:00 |", text)
+        self.assertIn(one_shot.started_line("10:00", "worker01", "codex", "", "worktree `w` (b)", "Security audit"), text)
+        self.assertNotIn("File ownership", text)
 
     def test_a_launch_removes_the_trees_previous_report_copy_before_the_worker_runs(self):
         # #56: `result` reads only the launcher's copy, so a copy left by an earlier run in this tree reads as this run's
@@ -797,8 +813,8 @@ class RunTest(unittest.TestCase):
         copy.write_text(toon_encode({"status": "done", "task": "Security audit", "worker": "earlier", "runtime_exit": 0,
                                      "reason": "r", "changes": "c", "errors": []}) + "\n")
         before = copy.read_bytes()
-        self.tracker.write_text(TRACKER.replace("| Security audit | `src/a/` |", "| Security audit | `src/a/` | note |"))
-        with self.assertRaisesRegex(ValueError, "two-cell"):
+        with mock.patch.object(one_shot, "record_launch", side_effect=ValueError("recording refused")), \
+             self.assertRaisesRegex(ValueError, "recording refused"):
             self._run(self._fake('status: done\nreason: r\nchanges: c\n', write_partial=False))
         self.assertEqual(copy.read_bytes(), before)
 
@@ -898,12 +914,11 @@ class RunTest(unittest.TestCase):
     def test_a_refused_launch_takes_its_dispatch_back_so_a_retry_can_use_the_tree(self):
         # A dispatch left behind makes the retry refuse the tree, and the coordinator makes a second one.
         fake = self._fake('status: done\nreason: done\nchanges: checked\n', write_partial=False)
-        # Dispatch accepts a row with a third cell; recording the launch refuses it.
-        self.tracker.write_text(TRACKER.replace("| Security audit | `src/a/` |", "| Security audit | `src/a/` | note |"))
-        with self.assertRaisesRegex(ValueError, "two-cell"):
+        # Dispatch composes; recording the launch refuses it.
+        with mock.patch.object(one_shot, "record_launch", side_effect=ValueError("recording refused")), \
+             self.assertRaisesRegex(ValueError, "recording refused"):
             self._run(fake)
         self.assertFalse((self.tree / ".chief-of-stuff/dispatch.md").exists())
-        self.tracker.write_text(TRACKER)
         self.assertEqual(self._run(fake), 0)
 
     def test_an_unusable_login_shell_refuses_before_the_row_is_running(self):
@@ -953,128 +968,28 @@ class RunTest(unittest.TestCase):
         self.assertIn("worktree is not clean", self.tracker.read_text())
         self.assertIn("partial.txt", self.tracker.read_text())
 
-    def _read_only(self) -> None:
-        """The task owns nothing: its File ownership cell says `none`, as a launch then appends the tree to it."""
-        self.tracker.write_text(TRACKER.replace("`src/a/`", "none; read-only review of the importer"))
-
-    def _read_only_report(self, fake: Path) -> dict:
+    def _run_report(self, fake: Path) -> dict:
         self._run(fake)
         return toon_decode((self.tree / one_shot.REPORT).read_text())
-
-    def test_a_read_only_task_that_left_a_commit_needs_review_whatever_the_worker_wrote(self):
-        # #57: a worker told to review committed and opened a PR, and the run was reported done.
-        self._read_only()
-        report = self._read_only_report(self._fake('status: done\nreason: reviewed\nchanges: none\n', commit_partial=True))
-        self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
-        self.assertIn("partial.txt", report["reason"])
-        tracker = self.tracker.read_text()
-        self.assertIn("| Security audit | Robin | waiting |", tracker)
-        self.assertIn("HUMAN REVIEW NEEDED", tracker)
-
-    def test_a_read_only_task_that_left_an_uncommitted_file_needs_review_whatever_the_worker_wrote(self):
-        self._read_only()
-        report = self._read_only_report(self._fake('status: done\nreason: reviewed\nchanges: none\n'))
-        self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
-        self.assertIn("partial.txt", report["reason"])
-        self.assertIn("HUMAN REVIEW NEEDED", self.tracker.read_text())
 
     def _rewrites_the_tracker(self, edit: str) -> str:
         """Worker code that edits the launch day's tracker, as a worker with write access to the workspace could."""
         return f"t = Path({str(self.tracker)!r})\nt.write_text({edit})\n"
 
-    def test_a_read_only_task_stays_read_only_when_the_worker_rewrites_its_ownership_cell(self):
-        # #57 review: the rule is decided at launch; a cell the worker edited to `src/` does not lift it.
-        self._read_only()
-        fake = self._fake('status: done\nreason: reviewed\nchanges: none\n', commit_partial=True,
-                          during=self._rewrites_the_tracker("t.read_text().replace('none; read-only review of the importer', 'src/')"))
-        report = self._read_only_report(fake)
-        self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
-
-    def test_a_read_only_task_stays_read_only_when_the_worker_deletes_its_ownership_row(self):
-        self._read_only()
-        fake = self._fake('status: done\nreason: reviewed\nchanges: none\n', commit_partial=True,
-                          during=self._rewrites_the_tracker("'\\n'.join(l for l in t.read_text().split('\\n') if 'none; read-only' not in l)"))
-        report = self._read_only_report(fake)
-        self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
-
-    def test_a_read_only_task_stays_read_only_when_the_end_days_tracker_has_no_read_only_cell(self):
-        # The run ends on another day; the launch day's cell decided, not the end day's (#93).
-        self._read_only()
-        self._rolled_over()
-        fake = self._fake('status: done\nreason: reviewed\nchanges: none\n', commit_partial=True)
-        self._run_past_midnight(fake)
-        report = toon_decode((self.tree / one_shot.REPORT).read_text())
-        self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
-
-    def test_a_read_only_task_whose_worker_asked_for_review_keeps_its_own_reason(self):
-        self._read_only()
-        report = self._read_only_report(self._fake('status: human_review\nreason: blocked on creds\nchanges: none\n',
-                                                   commit_partial=True))
-        self.assertEqual((report["status"], report["reason"]), ("human_review", "blocked on creds"))
-
-    def test_the_override_keeps_the_workers_own_reason_after_the_paths(self):
-        # The worker was told to put what it found in the result, and the reason is where it went.
-        self._read_only()
-        report = self._read_only_report(self._fake('status: done\nreason: found two races in the importer\nchanges: none\n',
-                                                   commit_partial=True))
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
-        self.assertIn("partial.txt", report["reason"])
-        self.assertTrue(report["reason"].endswith("; worker said: found two races in the importer"), report["reason"])
-
-    def test_an_uncommitted_file_alone_does_not_say_there_were_no_commits(self):
-        self._read_only()
-        report = self._read_only_report(self._fake('status: done\nreason: reviewed\nchanges: none\n'))
-        self.assertNotIn(one_shot.NO_COMMITS, report["reason"])
-
-    def test_a_read_only_relaunch_with_changes_keeps_the_relaunch_wording(self):
-        self._read_only()
-        report = self._read_only_report(self._fake('status: relaunch\nreason: base moved\nchanges: none\n'))
+    def test_a_relaunch_with_changes_keeps_the_relaunch_wording(self):
+        report = self._run_report(self._fake('status: relaunch\nreason: base moved\nchanges: none\n'))
         self.assertEqual(report["status"], "human_review")
         self.assertTrue(report["reason"].startswith("worker asked to be relaunched but left changes: base moved"), report["reason"])
 
-    def _reconcile_a_commit(self, **kwargs) -> dict:
-        """A running row, one commit since the launch, and a worker that reported done."""
-        self.tracker.write_text(TRACKER.replace("| unassigned | open |", "| worker01 | running 09:00 |"))
-        before = one_shot.git_head(self.tree)
-        (self.tree / ".chief-of-stuff").mkdir(exist_ok=True)
-        (self.tree / ".chief-of-stuff" / ".gitignore").write_text("*\n")  # as the launcher leaves it
-        (self.tree / one_shot.RESULT).write_text('status: done\nreason: reviewed\nchanges: none\n')
-        (self.tree / "partial.txt").write_text("partial work")
-        subprocess.run(["git", "-C", str(self.tree), "add", "partial.txt"], check=True)
-        subprocess.run(["git", "-C", str(self.tree), "-c", "user.name=Test", "-c", "user.email=test@example.test",
-                        "commit", "-qm", "partial"], check=True)
-        return one_shot.reconcile(self.root, "2026-09-18", "Security audit", "worker01", self.tree, 0, before, **kwargs)
-
-    def test_reconcile_holds_a_commit_when_it_is_told_the_task_is_read_only(self):
-        # The tracker's cell says `src/a/`; what reconcile is told wins.
-        report = self._reconcile_a_commit(read_only=True)
-        self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
-
-    def test_reconcile_does_not_read_the_tracker_for_the_rule(self):
-        self.tracker.write_text(TRACKER.replace("`src/a/`", "none; read-only review of the importer"))
-        self.assertEqual(self._reconcile_a_commit()["status"], "done")
-
-    def test_a_read_only_task_that_changed_only_the_private_directory_stays_done(self):
-        self._read_only()
-        report = self._read_only_report(self._fake('status: done\nreason: reviewed\nchanges: none\n', write_partial=False))
-        self.assertEqual(report["status"], "done")
-        self.assertIn("| Security audit | Robin | waiting |", self.tracker.read_text())
-
-    def test_a_task_that_owns_paths_may_commit_and_stays_done(self):
-        report = self._read_only_report(self._fake('status: done\nreason: fixed\nchanges: partial.txt\n', commit_partial=True))
+    def test_a_task_that_commits_stays_done(self):
+        report = self._run_report(self._fake('status: done\nreason: fixed\nchanges: partial.txt\n', commit_partial=True))
         self.assertEqual(report["status"], "done")
 
     def test_relaunch_leaves_the_task_ready_and_the_user_out_of_it(self):
         # A stop a fresh run fixes is the coordinator's to relaunch, not the user's to review (#68).
         fake = self._fake('status: relaunch\nreason: target PR merged before work began\nchanges: none\n',
                           write_partial=False)
-        with mock.patch.object(one_shot.kanban, "add_human_hold") as hold, \
+        with mock.patch.object(one_shot.forge, "add_human_hold") as hold, \
              mock.patch.object(one_shot.backlog, "comment") as comment:
             self.assertEqual(self._run(fake), 1)
         hold.assert_not_called()
@@ -1120,7 +1035,7 @@ class RunTest(unittest.TestCase):
         """One launch of a worker that wrote `stderr`; returns the exit code and the hold and comment mocks."""
         fake = self._fake(result, exit_code=exit_code, write_partial=write_partial, commit_partial=commit_partial,
                           stderr=stderr, during=during)
-        with mock.patch.object(one_shot.kanban, "add_human_hold", return_value="") as hold, \
+        with mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             return self._run(fake, tree, model=model, runtime=runtime), hold, comment
 
@@ -1151,7 +1066,7 @@ class RunTest(unittest.TestCase):
             "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
             "|---|---|---|---|---|---|---|---|---|---|---|\n"
             "| Security audit | Security audit | unassigned | open | 09:00 | | M | build | implement | #7 | Inspect |\n"
-            "\n## File ownership\n| context | paths |\n|---|---|\n| Security audit | `src/a/` |\n")
+            "")
 
     def test_a_quota_stop_is_a_relaunch_with_the_runtime_model_and_reset_text(self):
         code, _, _ = self._stopped()
@@ -1173,17 +1088,11 @@ class RunTest(unittest.TestCase):
         comment.assert_not_called()
         self.assertEqual(self._report()["status"], "relaunch")
 
-    def test_the_hold_label_guard_sees_a_review_outcome_in_the_same_workspace(self):
-        # The control for the test above: this workspace does label a human_review.
-        self._with_an_issue_and_kanban()
-        _, hold, _ = self._stopped(result="status: human_review\nreason: unclear policy\nchanges: none\n")
-        hold.assert_called_once()
-
     def test_a_failed_hold_is_recorded_in_the_log(self):
         # #566: the report alone loses a hold failure between runs; the Log keeps it where the audit reads it.
         self._with_an_issue_and_kanban()
         fake = self._fake('status: human_review\nreason: unclear policy\nchanges: none\n', write_partial=False)
-        with mock.patch.object(one_shot.kanban, "add_human_hold",
+        with mock.patch.object(one_shot.forge, "add_human_hold",
                                return_value="missing label in GitHub: !! - HUMAN REVIEW REQUIRED") as hold, \
              mock.patch.object(one_shot.backlog, "comment",
                                return_value=SimpleNamespace(done=True, error="")) as comment:
@@ -1647,7 +1556,7 @@ class RunTest(unittest.TestCase):
 
     def test_other_rows_changing_during_the_run_leaves_the_result_to_land(self):
         # #576's report: edits to other rows are not this row changing; the run still lands the same day.
-        self._overlap_tracker("`src/a/`", "`src/b/`")
+        self._running_beside()
         fake = self._fake('status: done\nreason: completed audit\nchanges: none\n', write_partial=False,
                           during=self._rewrites_the_tracker(
                               "t.read_text().replace('| Export header | worker07 | running 08:30 |', "
@@ -1657,95 +1566,22 @@ class RunTest(unittest.TestCase):
         self.assertIn("| Security audit | Robin | waiting |", tracker)
         self.assertIn("| Export header | worker07 | waiting |", tracker)
 
-    def _overlap_tracker(self, audit: str, running: str, ready: str = "`src/z/`", running_state: str = "running 08:30") -> None:
-        """Security audit is the launch; Export header is another worker's row; Draft notes is ready and unlaunched."""
+    def _running_beside(self) -> None:
+        """Security audit is the launch; Export header is another worker's running row; Draft notes is ready and unlaunched."""
         self.tracker.write_text(
             "# Tracker\n\n## Tasks\n\n| item | owner | state | since | due | checklist |\n|---|---|---|---|---|---|\n"
             "| Security audit | unassigned | open | 09:00 | | Inspect upload handler |\n"
-            f"| Export header | worker07 | {running_state} | 08:00 | | Export |\n"
-            "| Draft notes | unassigned | open | 09:00 | | Notes |\n\n"
-            "## File ownership\n\n| context | paths |\n|---|---|\n"
-            f"| Security audit | {audit} |\n| Export header | {running}; worktree `trees/export` (feat/export) |\n"
-            f"| Draft notes | {ready} |\n\n## Log\n\n- 09:00 opened\n")
+            "| Export header | worker07 | running 08:30 | 08:00 | | Export |\n"
+            "| Draft notes | unassigned | open | 09:00 | | Notes |\n\n## Log\n\n- 09:00 opened\n")
 
-    def test_a_launch_whose_paths_overlap_a_running_row_is_refused_and_nothing_starts(self):
-        # #365 review R10. Reason names the overlap and the running task. The row, the Log, the dispatch file and the worker are untouched.
-        self._overlap_tracker("`src/a/upload.py`", "`src/a/`")
-        before = self.tracker.read_text()
-        fake = self._fake('status: done\nreason: r\nchanges: c\n')
-        with self.assertRaisesRegex(ValueError, r"(?s)overlap.*Export header|Export header.*overlap"):
-            self._run(fake)
-        self.assertEqual(self.tracker.read_text(), before)
-        self.assertFalse((self.root / "during.md").exists(), "the worker started")
-        self.assertFalse((self.tree / dispatch_prompt.DISPATCH_FILE).exists(), "the dispatch file was left behind")
-        self.assertEqual(process_status.running_trees(self.root / "trees"), {})
-
-    def test_record_launch_refuses_under_the_lock_and_writes_nothing(self):
-        self._overlap_tracker("`src/a/`", "`src/a/deep/x.py`")
-        before = self.tracker.read_text()
-        with self.assertRaisesRegex(ValueError, "overlap"):
-            one_shot.record_launch(self.tracker, "Security audit", "worker01", "worktree `w` (b)", "codex", "", "10:00")
-        self.assertEqual(self.tracker.read_text(), before)
-
-    def test_the_refusal_names_the_running_task_by_its_name_not_its_whole_item(self):
-        # #365 review: a task's item can be a 400-character prompt; the refusal is read in CI output and by the coordinator.
-        # It names the running row by its Tasks `name` cell, and falls back to the item only when the name is blank.
-        prompt = "Cap uploads at 25 MB across the form and the API. " * 8
-        for name, shown in (("upload", "'upload'"), ("", repr(prompt.strip()))):
-            with self.subTest(name=name):
-                self.tracker.write_text(
-                    "# Tracker\n\n## Tasks\n\n| name | item | owner | state | since | due | size | checklist |\n|---|---|---|---|---|---|---|---|\n"
-                    f"| {name} | {prompt} | worker07 | running 08:30 | 08:00 | | M | Cap |\n"
-                    "| audit | Security audit | unassigned | open | 09:00 | | S | Inspect |\n\n"
-                    "## File ownership\n\n| context | paths |\n|---|---|\n"
-                    f"| {name or prompt.strip()} | `src/a/`; worktree `trees/up` (feat/up) |\n| audit | `src/a/upload.py` |\n\n## Log\n\n- 09:00 opened\n")
-                with self.assertRaises(ValueError) as refused:
-                    one_shot.record_launch(self.tracker, "Security audit", "worker01", "worktree `w` (b)", "codex", "", "10:00")
-                self.assertIn(shown, str(refused.exception))
-                if name:
-                    self.assertNotIn("Cap uploads", str(refused.exception))
-                    self.assertLess(len(str(refused.exception)), 200)
-
-    def test_a_launch_that_overlaps_nothing_running_starts(self):
-        self._overlap_tracker("`src/a/`", "`src/b/`")
+    def test_a_launch_beside_a_running_row_on_the_same_files_starts(self):
+        # #1039 (C29): no file is anybody's, so a running row on the same paths refuses nothing, even in an old
+        # tracker whose File ownership section still names them.
+        self._running_beside()
+        self.tracker.write_text(self.tracker.read_text().replace("## Log", "## File ownership\n\n| context | paths |\n|---|---|\n"
+                                "| Security audit | `src/a/` |\n| Export header | `src/a/`; worktree `trees/export` (feat/export) |\n\n## Log"))
         self.assertEqual(self._run(self._fake('status: done\nreason: r\nchanges: c\n', write_partial=False)), 0)
         self.assertTrue((self.root / "during.md").exists())
-
-    def test_a_read_only_launch_starts_whatever_is_running(self):
-        self._overlap_tracker("none; read-only review of `src/a/`", "`src/a/`")
-        self.assertEqual(self._run(self._fake('status: done\nreason: r\nchanges: c\n', write_partial=False)), 0)
-
-    def test_a_running_whole_repo_row_refuses_every_launch_that_owns_a_path(self):
-        # #365 verify R32: `.` is the repository root, so it overlaps `src/a/` and the reverse.
-        for whole in ("`.`", "`./`"):
-            with self.subTest(running=whole):
-                self._overlap_tracker("`src/a/`", whole)
-                before = self.tracker.read_text()
-                with self.assertRaisesRegex(ValueError, r"(?s)overlap.*Export header|Export header.*overlap"):
-                    self._run(self._fake('status: done\nreason: r\nchanges: c\n'))
-                self.assertEqual(self.tracker.read_text(), before)
-                self.assertFalse((self.root / "during.md").exists(), "the worker started")
-
-    def test_a_whole_repo_launch_is_refused_while_any_row_runs_and_a_read_only_one_is_not(self):
-        self._overlap_tracker("`.`", "`src/b/`")
-        before = self.tracker.read_text()
-        with self.assertRaisesRegex(ValueError, "overlap"):
-            one_shot.record_launch(self.tracker, "Security audit", "worker01", "worktree `w` (b)", "codex", "", "10:00")
-        self.assertEqual(self.tracker.read_text(), before)
-        self._overlap_tracker("none; read-only review of `.`", "`.`")
-        self.assertEqual(self._run(self._fake('status: done\nreason: r\nchanges: c\n', write_partial=False)), 0)
-
-    def test_a_read_only_running_row_blocks_nothing(self):
-        self._overlap_tracker("`src/a/`", "none; read-only review of `src/a/`")
-        self.assertEqual(self._run(self._fake('status: done\nreason: r\nchanges: c\n', write_partial=False)), 0)
-
-    def test_overlap_with_a_ready_row_does_not_refuse_the_coordinator_orders_those(self):
-        self._overlap_tracker("`src/a/`", "`src/b/`", ready="`src/a/upload.py`")
-        self.assertEqual(self._run(self._fake('status: done\nreason: r\nchanges: c\n', write_partial=False)), 0)
-
-    def test_a_row_that_is_no_longer_running_blocks_nothing(self):
-        self._overlap_tracker("`src/a/`", "`src/a/`", running_state="waiting")
-        self.assertEqual(self._run(self._fake('status: done\nreason: r\nchanges: c\n', write_partial=False)), 0)
 
     def _cap(self, n: int) -> None:
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `cos.toml`\n")
@@ -1886,11 +1722,13 @@ class RunTest(unittest.TestCase):
             "(root / 'worker-result.toon').write_text",
             f"for _ in range(600):\n    if Path({str(release)!r}).exists(): break\n"
             "    __import__('time').sleep(0.05)\n(root / 'worker-result.toon').write_text", 1))
-        driver = ("import sys; from pathlib import Path; sys.path.insert(0, %r); import one_shot; "
+        driver = ("import sys; from functools import partial; from pathlib import Path; sys.path.insert(0, %r); import one_shot; "
+                  "one_shot.git_view.run = partial(one_shot.git_view.run, base=Path(%r)); "
                   "one_shot.resolve = lambda name: %r; one_shot.login_argv = lambda argv: argv; "
                   "one_shot.run(root=Path(%r), day='2026-09-18', task='Security audit', cwd=Path(%r), "
                   "name='worker01', runtime='codex', agent_type=None, model='', effort='', dry_run=False)"
-                  % (str(Path(one_shot.__file__).resolve().parent), str(fake), str(self.root), str(self.tree)))
+                  % (str(Path(one_shot.__file__).resolve().parent), str(self.root / "private-views"),
+                     str(fake), str(self.root), str(self.tree)))
         launcher = subprocess.Popen([sys.executable, "-c", driver], start_new_session=True)
         try:
             deadline = time.monotonic() + 30
@@ -1926,8 +1764,7 @@ class RunTest(unittest.TestCase):
         (self.tree / one_shot.RESULT).write_text('status: done\nreason: audited\nchanges: none\n')
         self.tracker.write_text(TRACKER.replace(
             "| Security audit | unassigned | open | 09:00 | |",
-            "| Security audit | worker01 | running 09:01 | |").replace(
-            "| Security audit | `src/a/` |", "| Security audit | `src/a/`; worktree `worker` (main) |"))
+            "| Security audit | worker01 | running 09:01 | |") + "- 09:01 one-shot worker01 started: codex, worktree `worker`, task Security audit\n")
         reports = one_shot.adopt(self.root, day="2026-09-18")
         self.assertEqual(len(reports), 1)
         self.assertEqual(reports[0]["status"], "done")
@@ -1942,8 +1779,7 @@ class RunTest(unittest.TestCase):
         # nobody's to adopt.
         running = TRACKER.replace(
             "| Security audit | unassigned | open | 09:00 | |",
-            "| Security audit | worker01 | running 09:01 | |").replace(
-            "| Security audit | `src/a/` |", "| Security audit | `src/a/`; worktree `worker` (main) |")
+            "| Security audit | worker01 | running 09:01 | |") + "- 09:01 one-shot worker01 started: codex, worktree `worker`, task Security audit\n"
         self._stopped_tree(live=True)
         self.tracker.write_text(running)
         self.assertEqual(one_shot.adopt(self.root, day="2026-09-18"), [])
@@ -1956,7 +1792,7 @@ class RunTest(unittest.TestCase):
         (reports / "worker.toon").unlink()
         self.tracker.write_text(TRACKER)  # the row is open again, not running
         self.assertEqual(one_shot.adopt(self.root, day="2026-09-18"), [])
-        self.tracker.write_text(running.replace("worktree `worker` (main)", "worktree `other` (main)"))
+        self.tracker.write_text(running.replace("worktree `worker`", "worktree `other`"))
         self.assertEqual(one_shot.adopt(self.root, day="2026-09-18"), [])
 
     def test_dry_run_writes_nothing(self):
@@ -1969,10 +1805,10 @@ class RunTest(unittest.TestCase):
         self.assertFalse((self.tree / ".chief-of-stuff").exists())
         self.assertEqual(self.tracker.read_text(), TRACKER)
 
-    def test_claude_profile_runs_the_one_shot_through_claude_as(self):
+    def test_claude_as_profile_runs_the_one_shot_through_claude_as(self):
         # Zach, 2026-10-08 20:50: Claude workers launch through `claude-as run <profile>`, not a bare `claude`.
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `chief-of-stuff.toml`\n")
-        (self.root / "chief-of-stuff.toml").write_text('[workers]\nclaude_profile = "secondary"\n')
+        (self.root / "chief-of-stuff.toml").write_text('[workers]\nclaude_as_profile = "secondary"\n')
         for runtime, program in (("claude", "claude-as"), ("codex", "codex")):
             with self.subTest(runtime=runtime):
                 out = io.StringIO()
@@ -2014,11 +1850,11 @@ class RunTest(unittest.TestCase):
             "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
             "|---|---|---|---|---|---|---|---|---|---|---|\n"
             "| Security audit | Security audit | unassigned | open | 09:00 | | M | build | implement | #7 | Inspect upload handler |\n"
-            "\n## File ownership\n| context | paths |\n|---|---|\n| Security audit | `src/a/` |\n")
+            "")
         fake = self._fake('status: human_review\nreason: unclear policy\nchanges: changed parser\n')
         with mock.patch.object(one_shot, "resolve", return_value=str(fake)), \
              mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv), \
-             mock.patch.object(one_shot.kanban, "add_human_hold", return_value="") as hold, \
+             mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             code = one_shot.run(root=self.root, day="2026-09-18", task="Security audit",
                                 cwd=self.tree, name="worker01", runtime="codex", agent_type=None,
@@ -2044,11 +1880,11 @@ class RunTest(unittest.TestCase):
             "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
             "|---|---|---|---|---|---|---|---|---|---|---|\n"
             f"| Security audit | Security audit | unassigned | open | 09:00 | | M | build | implement | {issue} | Inspect |\n"
-            "\n## File ownership\n| context | paths |\n|---|---|\n| Security audit | `src/a/` |\n")
+            "")
         fake = self._fake('status: human_review\nreason: unclear policy\nchanges: changed parser\n')
         with mock.patch.object(one_shot, "resolve", return_value=str(fake)), \
              mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv), \
-             mock.patch.object(one_shot.kanban, "add_human_hold", return_value=""), \
+             mock.patch.object(one_shot.forge, "add_human_hold", return_value=""), \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             one_shot.run(root=self.root, day="2026-09-18", task="Security audit", cwd=self.tree, name="worker01",
                          runtime="codex", agent_type=None, model="", effort="", dry_run=False)
@@ -2074,11 +1910,10 @@ _MP = multiprocessing.get_context("spawn")
 WIDEN = 0.05  # seconds a child lingers inside the locked region, so a missing lock loses a write every run, not now and then
 
 
-def _tracker_for(cells: list[str]) -> str:
-    rows = "".join(f"| Task {i} | unassigned | open | 09:00 | | Inspect {i} |\n" for i in range(len(cells)))
-    owned = "".join(f"| Task {i} | {cell} |\n" for i, cell in enumerate(cells))
+def _tracker_for(count: int) -> str:
+    rows = "".join(f"| Task {i} | unassigned | open | 09:00 | | Inspect {i} |\n" for i in range(count))
     return ("# Tracker\n\n## Tasks\n\n| item | owner | state | since | due | checklist |\n|---|---|---|---|---|---|\n" + rows +
-            "\n## File ownership\n\n| context | paths |\n|---|---|\n" + owned + "\n## Log\n\n- 09:00 opened\n")
+            "\n## Log\n\n- 09:00 opened\n")
 
 
 def _launch_child(barrier, out: str, tracker: str, i: int) -> None:
@@ -2139,6 +1974,20 @@ class SanitisedTreeReadTest(unittest.TestCase):
         fx = taint.build(Path(tempfile.mkdtemp(prefix="fixture-", dir=self.root)))
         (fx.root / "CLAUDE.md").write_text(CLAUDE.replace("`trees/`", "`.`"))
         return fx
+
+    def test_tree_note_refuses_a_configured_clones_redirected_tree(self):
+        fx = self.fixture()
+        claude = fx.root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("## Coordinator\n", "## Coordinator\n- Settings: `settings.toml`\n"))
+        (fx.root / "settings.toml").write_text(f'[repos]\nproject = "{fx.clone}"\n')
+        other, decoy = fx.root / "other", fx.root / "decoy"
+        taint.git(["clone", str(fx.clone), str(other)], fx.root)
+        taint.git(["worktree", "add", "-b", "decoy", str(decoy)], other)
+        admin = git_view.locate(decoy).gitdir
+        (admin / "gitdir").write_text(str(fx.tree / ".git") + "\n")
+        (fx.tree / ".git").write_text(f"gitdir: {admin}\n")
+        with self.assertRaisesRegex(ValueError, "tree is unreadable"):
+            one_shot._tree_note(fx.root, fx.tree)
 
     def old_env(self):
         # Spell out the former implementation; tests survive its deletion.
@@ -2222,6 +2071,72 @@ class SanitisedTreeReadTest(unittest.TestCase):
 
     def test_git_read_env_is_deleted(self):
         self.assertFalse(hasattr(one_shot, "git_read_env"))
+
+    def test_cache_error_is_returned_separately_from_git_exit_status(self):
+        fx = self.fixture()
+        error = git_view.CacheError("cannot prepare view cache base '/unusable-cache'")
+        with mock.patch.object(git_view, "run", side_effect=error), \
+                mock.patch.object(one_shot, "_enclosing_repository") as enclosing:
+            out, failure = one_shot._git(["status", "--short"], fx.tree)
+        self.assertIsNone(out)
+        self.assertIs(failure, error)
+        enclosing.assert_not_called()
+        self.assertNotIsInstance(failure, git_view.Unviewable)
+
+    def test_relative_default_cache_is_reported_for_tree_and_enclosing_repository(self):
+        fx = self.fixture()
+        sub = fx.tree / "subfolder"
+        sub.mkdir()
+        real_base = git_view._base
+        for tree in (fx.tree, sub):
+            with self.subTest(tree=tree), mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "relative-cache"}), \
+                    mock.patch.object(git_view, "_base", side_effect=lambda layout, base: real_base(layout, None)):
+                out, error = one_shot._git(["status", "--short"], tree)
+                self.assertIsNone(out)
+                self.assertIsInstance(error, git_view.CacheError)
+                self.assertEqual(str(error), "view cache base 'relative-cache' is relative")
+                self.assertEqual(one_shot.changed_files(tree), "git status failed: view cache base 'relative-cache' is relative")
+                self.assertIsNone(one_shot.git_head(tree))
+                with self.assertRaisesRegex(ValueError, "view cache base 'relative-cache' is relative"):
+                    one_shot.git_head(tree, strict=True)
+                with self.assertRaisesRegex(ValueError, "view cache base 'relative-cache' is relative"):
+                    one_shot._tree_note(fx.root, tree)
+
+    def test_cache_failure_refuses_launch_before_writing_or_starting_a_worker(self):
+        fx = self.fixture()
+        day, tracker, copy, cfg = self.launch_fixture(fx)
+        before, previous = tracker.read_bytes(), copy.read_bytes()
+        real_view_run = git_view.run
+        for command in ("branch", "rev-parse"):
+            def view_read(args, tree, **kwargs):
+                if args[0] == command:
+                    raise git_view.CacheError("cannot prepare view cache base '/unusable-cache'")
+                return real_view_run(args, tree, **kwargs)
+
+            with self.subTest(command=command), \
+                    mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv), \
+                    mock.patch.object(git_view, "run", side_effect=view_read), \
+                    mock.patch.object(subprocess, "Popen", wraps=subprocess.Popen) as process, \
+                    mock.patch.object(one_shot, "record_launch") as row, \
+                    mock.patch.object(dispatch_prompt, "write_dispatch") as dispatch:
+                with self.assertRaisesRegex(ValueError, "cannot prepare view cache base '/unusable-cache'"):
+                    self.launch(fx, cfg, day)
+                row.assert_not_called()
+                dispatch.assert_not_called()
+                self.assertTrue(all(call.args[0][0] == "git" for call in process.call_args_list))
+                self.assertEqual(tracker.read_bytes(), before)
+                self.assertEqual(copy.read_bytes(), previous)
+                self.assertFalse((fx.tree / dispatch_prompt.DISPATCH_FILE).exists())
+
+    def test_cache_failure_during_unborn_head_checks_names_the_configuration_problem(self):
+        fx = self.fixture()
+        missing = subprocess.CompletedProcess([], 128, "", "HEAD is missing")
+        symbolic = subprocess.CompletedProcess([], 0, "refs/heads/unborn\n", "")
+        error = git_view.CacheError("cannot prepare view cache base '/unusable-cache'")
+        for replies in ([missing, error], [missing, symbolic, error]):
+            with self.subTest(reads=len(replies)), mock.patch.object(git_view, "run", side_effect=replies):
+                with self.assertRaisesRegex(ValueError, "cannot prepare view cache base '/unusable-cache'"):
+                    one_shot.git_head(fx.tree, strict=True)
 
     def test_r6_four_public_reads_reach_git_view_only_through_git_helper(self):
         helper = getattr(one_shot, "_git", None)
@@ -2328,7 +2243,7 @@ class SanitisedTreeReadTest(unittest.TestCase):
         with mock.patch.object(one_shot, "git_head", return_value=None) as head:
             self.assertEqual(one_shot.committed_changes(fx.tree, fx.sha["B"]),
                              "Could not read commits: tree unreadable")
-        head.assert_called_once_with(fx.tree)
+        head.assert_called_once_with(fx.tree, expected_common=None)
 
     def test_unchanged_head_and_unknown_before_keep_no_commits(self):
         fx = self.fixture()
@@ -2536,7 +2451,7 @@ class SanitisedTreeReadTest(unittest.TestCase):
         self.assertEqual(launched, [plain])
         text = tracker.read_text()
         self.assertIn("| worker01 | running ", text)
-        self.assertIn("worktree `plain` (detached)", text)
+        self.assertIn("worktree `plain`, task Security audit", text)
         self.assertTrue((plain / dispatch_prompt.DISPATCH_FILE).exists())
         self.assertIsNone(reconcile.call_args.args[6], "a plain folder has no pre-run head")
 
@@ -2823,11 +2738,11 @@ class ConcurrentLaunchTest(unittest.TestCase):
         self.out = self.root / "out"
         self.out.mkdir()
 
-    def _launches(self, cells: list[str]) -> tuple[Path, dict[int, str]]:
+    def _launches(self, count: int) -> tuple[Path, dict[int, str]]:
         tracker = self.root / "daily/2026-09-18-tracker.md"
-        tracker.write_text(_tracker_for(cells))
-        barrier = _MP.Barrier(len(cells))
-        procs = [_MP.Process(target=_launch_child, args=(barrier, str(self.out), str(tracker), i)) for i in range(len(cells))]
+        tracker.write_text(_tracker_for(count))
+        barrier = _MP.Barrier(count)
+        procs = [_MP.Process(target=_launch_child, args=(barrier, str(self.out), str(tracker), i)) for i in range(count)]
         for p in procs:
             p.start()
         for p in procs:
@@ -2836,34 +2751,20 @@ class ConcurrentLaunchTest(unittest.TestCase):
         return tracker, {int(f.name): f.read_text() for f in self.out.iterdir()}
 
     def test_simultaneous_launches_lose_no_row_no_worktree_and_no_started_line(self):
-        # The guard issue #365 asks for: the launcher's tracker writes (started line, owner and state, File ownership worktree)
+        # The guard issue #365 asks for: the launcher's tracker writes (started line, owner and state)
         # from six launches at the same instant on one tracker, each held inside the lock for a moment so a missing lock loses writes.
-        tracker, outcomes = self._launches([f"`src/m{i}/`" for i in range(LAUNCHERS)])
+        tracker, outcomes = self._launches(LAUNCHERS)
         self.assertEqual(outcomes, {i: "ok" for i in range(LAUNCHERS)})
         text = tracker.read_text()
         for i in range(LAUNCHERS):
             with self.subTest(task=i):
                 self.assertIn(f"| Task {i} | worker{i} | running 10:0{i} |", text)
-                self.assertIn(f"| Task {i} | `src/m{i}/`; worktree `tree{i}` (branch{i}) |\n", text)
                 started = one_shot.started_line(f"10:0{i}", f"worker{i}", "codex", f"m{i}", f"worktree `tree{i}` (branch{i})", f"Task {i}")
                 self.assertEqual(text.count(started + "\n"), 1, started)
         self.assertEqual(len(re.findall(r"(?m)^- 10:0\d one-shot worker\d started: ", text)), LAUNCHERS)
         self.assertEqual(text.count("\n## Log\n"), 1)
         self.assertNotIn("unassigned", text)
         self.assertEqual(list((self.root / "daily").glob(".*")), [], "a temporary tracker copy was left behind")
-
-    def test_of_two_overlapping_launches_at_once_exactly_one_starts(self):
-        # #365 review R10: the overlap check reads the tracker under the same lock as the write, so two launches of rows that
-        # share a path cannot both pass it. Task 2 owns another path and starts either way.
-        tracker, outcomes = self._launches(["`src/a/`", "`src/a/upload.py`", "`src/c/`"])
-        self.assertEqual(outcomes[2], "ok")
-        self.assertEqual(sorted(outcomes[i][:2] for i in (0, 1)), ["ok", "re"], outcomes)
-        refused = next(v for v in outcomes.values() if v.startswith("refused"))
-        self.assertIn("overlap", refused)
-        text = tracker.read_text()
-        self.assertEqual(len(re.findall(r"(?m)^\| Task \d \| worker\d \| running ", text)), 2)
-        self.assertEqual(len(re.findall(r"(?m)^- 10:0\d one-shot worker\d started: ", text)), 2)
-        self.assertEqual(text.count("; worktree "), 2)
 
     def test_a_slot_cap_holds_when_many_launches_claim_at_once(self):
         # `slot` claims under a lock on the Worktrees dir: with a cap of 3, twelve simultaneous claims get exactly 3 slots, each

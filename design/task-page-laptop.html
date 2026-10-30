@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Task page</title>
+<script src="lib/86a3e9940611.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/ee8b56df405b.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/c271ee5c70f2.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/b80617d9b7e8.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fddc117a5ff1.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/1ca85659ab25.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/d8bf25eb11d0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/624ea7e85a53.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/bab9dc1971b0.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/261638ad9761.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/517fcb8cabb3.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/b34c10a1ffe0.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/43dc1b9a0c96.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/5be63e946cc5.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/dedb7e4dce28.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3df86f009f15.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/4bb93aca54b3.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/967b38372db4.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/9a9defceff14.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/f1c49bfd357d.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5c1cb227aa5a.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/1a2f3006ecc7.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/b3cedae80e66.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/071a53d2119e.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/455dfdb0f51a.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/50e2fc3909a0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/9777be10ff78.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5bf655ce1293.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/ea97db9e8f8b.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/156f0047d272.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3b1c199b3a86.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/aab9ff2ff8f0.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+<style>
+body{margin:0;font-family:"Alegreya Sans","Gill Sans",system-ui,sans-serif;background:#f4efe1;color:#2f2630}
+a{color:#8a6c30}a:hover{color:#6b5325}
+p{margin:0}
+.h2{margin:0 0 6px;font-family:'Cormorant SC',Georgia,serif;font-size:16px;font-weight:600;letter-spacing:.1em}
+.card{background:#fbf8ef;border:1px solid #ddd3bd;border-radius:5px;padding:10px 14px}
+.cap{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6e6470}
+.mono{font-family:ui-monospace,monospace}
+.muted{color:#6e6470}
+.ref{font-family:ui-monospace,monospace;font-size:.88em;color:#8a6c30;text-decoration:none;border-bottom:1px dotted #a7843e;background:#efe7d3;padding:0 3px;border-radius:3px;white-space:nowrap}
+.ref::before{content:attr(data-k);font-size:.8em;color:#6e6470;margin-right:3px}
+.chip{font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:0 6px;white-space:nowrap}
+.mk{font-size:10.5px;padding:0 6px;border-radius:3px;white-space:nowrap;justify-self:start}
+.mk.ok{border:1px solid #009E73;color:#1e6b52}
+.mk.go{background:#009E73;color:#fbf8ef}
+.mk.wait{border:1px solid #56B4E9;color:#2c6f95}
+.mk.warn{border:1px dashed #c9533a;color:#a3402b}
+.mk.none{border:1px solid #ddd3bd;color:#6e6470}
+.chk{display:grid;grid-template-columns:96px 74px minmax(0,1fr);gap:0 10px;align-items:baseline;padding:6px 0;font-size:13px}
+.chk+.chk{border-top:1px dotted #ddd3bd}
+.tl{display:grid;grid-template-columns:70px 14px minmax(0,1fr);gap:0 10px;padding:5px 0;font-size:13px}
+.tl+.tl{border-top:1px dotted #ddd3bd}
+.tl .t{font-family:ui-monospace,monospace;font-size:12px;color:#6e6470}
+.tl .dot{width:9px;height:9px;border-radius:50%;margin-top:5px}
+.ac{display:grid;grid-template-columns:18px minmax(0,1fr);gap:1px 8px;padding:6px 0;font-size:13px}
+.ac+.ac{border-top:1px dotted #ddd3bd}
+.box{width:12px;height:12px;border-radius:3px;margin-top:3px;box-sizing:border-box}
+.fr{display:grid;grid-template-columns:minmax(0,1fr) 78px 86px;gap:0 10px;align-items:baseline;padding:4px 0;font-size:12.5px}
+.fr+.fr{border-top:1px dotted #ddd3bd}
+.wk{display:grid;grid-template-columns:minmax(0,1fr) 70px 64px;gap:0 10px;align-items:baseline;padding:5px 0;font-size:13px}
+.wk+.wk{border-top:1px dotted #ddd3bd}
+.st{display:flex;align-items:center;gap:5px;font-size:11px;letter-spacing:.06em}
+.st i{display:inline-block;width:8px;height:8px;border-radius:50%;box-sizing:border-box}
+svg text{font-family:"Alegreya Sans",system-ui,sans-serif}
+svg .t{font-size:14px;font-weight:700;fill:#2f2630}
+svg .tm{font-family:ui-monospace,monospace;font-size:10.5px;fill:#8a6c30}
+svg .tl{font-size:11.5px;fill:#6e6470}
+svg .halo{paint-order:stroke;stroke:#fbf8ef;stroke-width:4px}
+</style>
+</helmet>
+
+<div style="width: 1280px; height: 1764px; box-sizing: border-box; padding: 24px 32px 22px; background: #f4efe1; color: #2f2630; display: flex; flex-direction: column; gap: 16px; overflow: hidden; font-size: 14px; line-height: 1.5;">
+
+  <div style="margin: -12px 0 -4px;"><dc-import name="Tabs" current="Board" parent="true" hint-size="100%,34px"></dc-import></div>
+
+  <div style="display: flex; align-items: flex-end; gap: 20px; border-bottom: 1px solid #a7843e; padding-bottom: 10px;">
+    <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 4px;">
+      <div style="font-size: 12.5px; color: #6e6470;">Task · <a class="ref" data-k="issue" href="#">#109</a> · epic <a href="Goal.dc.html">&amp;14 Demo</a> · lane api · created Fri 14:52</div>
+      <div style="display: flex; align-items: baseline; gap: 12px;">
+        <h1 style="margin: 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 27px; font-weight: 600; letter-spacing: .04em;">Upload size limit</h1>
+        <span class="chip" style="color: #fbf8ef; background: #009E73;">REVIEW</span>
+        <span class="chip" style="color: #fbf8ef; background: #0072B2; border-radius: 9px;">RUNNING 01:58</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 4px; font-size: 11px; letter-spacing: .06em; color: #6e6470;">
+        <sc-for list="{{rail}}" as="s" hint-placeholder-count="7">
+          <span style="{{s.style}}">{{s.label}}</span>
+          <sc-if value="{{s.arrow}}" hint-placeholder-val="{{ true }}"><span style="color: #bdb3a2;">→</span></sc-if>
+        </sc-for>
+      </div>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: flex-end;">
+      <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 6px 12px; text-align: right;">
+        <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">now</div>
+        <div class="mono" style="font-size: 18px; font-variant-numeric: tabular-nums;">02:10:37</div>
+      </div>
+      <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-top: 3px solid #000000; border-radius: 5px; padding: 4px 12px 6px; text-align: right;">
+        <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">merge forecast</div>
+        <div class="mono" style="font-size: 18px; font-variant-numeric: tabular-nums;">~08:10</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px;">
+    <sc-for list="{{tiles}}" as="t" hint-placeholder-count="6">
+      <div style="{{t.style}}">
+        <div style="display: flex; align-items: baseline; gap: 6px;">
+          <span style="font-family: 'Cormorant SC', Georgia, serif; font-size: 13px; letter-spacing: .08em;">{{t.label}}</span>
+          <span style="font-size: 10.5px; color: #6e6470; margin-left: auto;">{{t.what}}</span>
+        </div>
+        <div style="display: flex; align-items: baseline; gap: 8px;">
+          <span style="font-size: 22px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums;">{{t.value}}</span>
+          <span style="{{t.deltaStyle}}">{{t.delta}}</span>
+        </div>
+        <span style="font-size: 11.5px; color: #6e6470;">{{t.sub}}</span>
+      </div>
+    </sc-for>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 18px;">
+
+    <div>
+      <h2 class="h2">MERGE REQUEST · <a class="ref" data-k="MR" href="Source48.dc.html">!48</a></h2>
+      <div class="card" style="border-top: 3px solid #009E73; padding: 8px 14px 6px;">
+        <div style="display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; border-bottom: 1px solid #ddd3bd; padding-bottom: 6px;">
+          <strong style="font-size: 15px;">Upload size limit</strong>
+          <span class="chip" style="color: #1e6b52; border: 1px solid #009E73;">OPEN</span>
+          <span class="mono" style="font-size: 12px; color: #6e6470;">trees/upload-limit → main</span>
+          <span style="font-size: 12px; color: #6e6470; margin-left: auto;">3 commits · last push 01:50 <a class="ref" data-k="commit" href="#">a7f03d1</a></span>
+        </div>
+        <div class="chk">
+          <span class="cap">pipeline</span><span class="mk ok">passed</span>
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <span><a class="ref" data-k="pipeline" href="#">#8851</a> · 11m42s · finished 02:02</span>
+            <div style="display: flex; gap: 2px; height: 16px; font-size: 10px; color: #fbf8ef; line-height: 16px;">
+              <span title="lint 0m48s" style="flex-grow: 48; background: #009E73; border-radius: 2px; padding-left: 4px; overflow: hidden;">lint</span>
+              <span title="unit 2m10s" style="flex-grow: 130; background: #009E73; border-radius: 2px; padding-left: 4px; overflow: hidden;">unit 2m10s</span>
+              <span title="integration 5m31s" style="flex-grow: 331; background: #009E73; border-radius: 2px; padding-left: 4px; overflow: hidden;">integration 5m31s</span>
+              <span title="e2e 3m13s" style="flex-grow: 193; background: #009E73; border-radius: 2px; padding-left: 4px; overflow: hidden;">e2e 3m13s</span>
+            </div>
+          </div>
+        </div>
+        <div class="chk">
+          <span class="cap">approvals</span><span class="mk wait">0 of 1</span>
+          <span>reviewer-codex-02 reviewing since 01:58 · round 2</span>
+        </div>
+        <div class="chk">
+          <span class="cap">threads</span><span class="mk wait">1 open</span>
+          <span>3 resolved · fix pushed for the open one in <a class="ref" data-k="commit" href="#">a7f03d1</a></span>
+        </div>
+        <div class="chk">
+          <span class="cap">conflicts</span><span class="mk ok">none</span>
+          <span>base main @ <span class="mono" style="font-size: 12px;">9c2e410</span> · 2 commits behind</span>
+        </div>
+        <div class="chk">
+          <span class="cap">merge order</span><span class="mk none">3 of 3</span>
+          <span>after <a class="ref" data-k="MR" href="#">!41</a> <a class="ref" data-k="MR" href="#">!42</a></span>
+        </div>
+        <div class="chk">
+          <span class="cap">overlap</span><span class="mk warn">1 file</span>
+          <span><a class="ref" data-k="MR" href="#">!42</a> also changes <span class="mono" style="font-size: 12px;">src/http/middleware.py</span>; merging after it means one rebase</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div>
+        <h2 class="h2">WHAT HAPPENS NEXT</h2>
+        <div class="card" style="display: flex; flex-direction: column; gap: 4px;">
+          <p>Round 2 review ends <b>~02:40</b>.</p>
+          <p><b>Approved</b> → merge queue, third after <a class="ref" data-k="MR" href="#">!41</a> <a class="ref" data-k="MR" href="#">!42</a>; lands <b>~08:10</b>.</p>
+          <p class="muted"><b style="color: #2f2630;">Changes asked</b> → fix ~02:45–04:45, round 3 ~05:10; lands ~10:30.</p>
+        </div>
+      </div>
+      <div>
+        <h2 class="h2">ACCEPTANCE · <span class="muted" style="font-family: 'Alegreya Sans', system-ui, sans-serif; font-size: 13px; letter-spacing: 0;">3 of 4 met</span></h2>
+        <div class="card" style="padding: 2px 14px;">
+          <div class="ac"><span class="box" style="background: #009E73;"></span><span>Bodies over the limit get 413 before the handler reads them</span><span></span><a class="ref" data-k="test" href="#">test_limits.py::test_rejects_over_limit</a></div>
+          <div class="ac"><span class="box" style="background: #009E73;"></span><span>Limit comes from <span class="mono" style="font-size: 12px;">config/upload.toml</span>, default 25 MB</span><span></span><a class="ref" data-k="test" href="#">test_limits.py::test_reads_config</a></div>
+          <div class="ac"><span class="box" style="background: #009E73;"></span><span>Chunked uploads are counted as they stream</span><span></span><a class="ref" data-k="test" href="#">test_limits.py::test_chunked_over_limit</a></div>
+          <div class="ac"><span class="box" style="border: 1.5px solid #56B4E9;"></span><span>413 body follows the API error shape</span><span></span><span style="font-size: 12px; color: #6e6470;">open thread · <a class="ref" data-k="doc" href="#">docs/api/errors.md</a></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 4px;">
+    <div style="display: flex; align-items: baseline; gap: 10px;">
+      <h2 class="h2" style="margin: 0;">FLOW</h2>
+      <div style="font-size: 12px; color: #6e6470;">Fri 14:10 → Sat 10:10</div>
+    </div>
+    <div style="display: flex; align-items: center; height: 15px; font-size: 10.5px; color: #6e6470; font-family: ui-monospace, monospace;">
+      <div style="width: 120px; flex: none;"></div>
+      <div style="position: relative; flex-grow: 1; height: 15px;">
+        <sc-for list="{{ticks}}" as="k" hint-placeholder-count="10">
+          <span style="{{k.style}}">{{k.label}}</span>
+        </sc-for>
+        <span style="{{nowLabel}}">now 02:10</span>
+      </div>
+      <div style="width: 170px; flex: none;"></div>
+    </div>
+    <div style="position: relative; display: flex; flex-direction: column;">
+      <div style="position: absolute; top: 0; bottom: 0; left: 120px; right: 170px; pointer-events: none;">
+        <span style="{{past}}"></span>
+        <sc-for list="{{ticks}}" as="k" hint-placeholder-count="10">
+          <span style="{{k.line}}"></span>
+        </sc-for>
+        <span style="{{nowLine}}"></span>
+      </div>
+      <sc-for list="{{lanes}}" as="r" hint-placeholder-count="6">
+        <div style="display: flex; align-items: center; height: 25px; border-top: 1px solid #e6dcc6;">
+          <div style="width: 120px; flex: none; display: flex; align-items: center; gap: 6px; font-size: 11px; letter-spacing: .08em;">
+            <span style="{{r.key}}"></span>{{r.stage}}
+          </div>
+          <div style="position: relative; flex-grow: 1; height: 14px; border-left: 1px solid #ddd3bd;">
+            <sc-for list="{{r.segs}}" as="g" hint-placeholder-count="2">
+              <span title="{{g.title}}" style="{{g.style}}"></span>
+            </sc-for>
+          </div>
+          <div style="width: 170px; flex: none; padding-left: 10px; box-sizing: border-box; font-size: 11.5px; color: #6e6470; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{r.sum}}</div>
+        </div>
+      </sc-for>
+    </div>
+    <div style="display: flex; gap: 14px; font-size: 11px; color: #6e6470; border-top: 1px solid #ddd3bd; padding-top: 5px;">
+      <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 18px; height: 10px; border-radius: 2px; background: #009E73;"></span>done</span>
+      <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="{{forecastKey}}"></span>forecast</span>
+      <span style="margin-left: auto;">Worked 5h57m of 11h00m elapsed · 5h03m waiting, mostly for a reviewer</span>
+    </div>
+  </div>
+
+  <div>
+    <h2 class="h2">ARCHITECTURE · <span class="muted" style="font-family: 'Alegreya Sans', system-ui, sans-serif; font-size: 13px; letter-spacing: 0;">where !48 lands</span></h2>
+    <div style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 12px;">
+      <figure class="card" style="margin: 0; padding: 8px 10px 10px;">
+        <svg role="img" aria-label="Uploads pass through the API gateway, where the new size guard rejects bodies over 25 megabytes with a 413, before reaching the upload handler and the object store." sc-camel-view-box="0 0 700 270" width="100%" style="display: block;">
+          <defs>
+            <marker id="ta" sc-camel-view-box="0 0 10 10" sc-camel-ref-x="9" sc-camel-ref-y="5" sc-camel-marker-width="7" sc-camel-marker-height="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2b3542"></path></marker>
+            <marker id="ta-if" sc-camel-view-box="0 0 10 10" sc-camel-ref-x="9" sc-camel-ref-y="5" sc-camel-marker-width="7" sc-camel-marker-height="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a8660f"></path></marker>
+            <marker id="ta-ds" sc-camel-view-box="0 0 10 10" sc-camel-ref-x="9" sc-camel-ref-y="5" sc-camel-marker-width="7" sc-camel-marker-height="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2c58a0"></path></marker>
+          </defs>
+
+          <line x1="110" y1="64" x2="148" y2="64" stroke="#2b3542" stroke-width="1.5" marker-end="url(#ta)"></line>
+          <text class="tl halo" x="129" y="54" text-anchor="middle">uploads</text>
+          <line x1="300" y1="64" x2="348" y2="64" stroke="#2b3542" stroke-width="1.5" marker-end="url(#ta)"></line>
+          <text class="tl halo" x="324" y="54" text-anchor="middle">stream</text>
+          <line x1="510" y1="64" x2="548" y2="64" stroke="#2b3542" stroke-width="1.5" marker-end="url(#ta)"></line>
+          <text class="tl halo" x="529" y="54" text-anchor="middle">put</text>
+          <line x1="225" y1="98" x2="225" y2="158" stroke="#a8660f" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#ta-if)"></line>
+          <text class="tl halo" x="233" y="134" style="fill:#a8660f">runs first</text>
+          <path d="M150,194 C 90,194 60,150 60,94" fill="none" stroke="#a8660f" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#ta-if)"></path>
+          <text class="tl halo" x="72" y="190" text-anchor="middle" style="fill:#a8660f">413 over 25 MB</text>
+          <line x1="348" y1="216" x2="302" y2="204" stroke="#2c58a0" stroke-width="1.5" stroke-dasharray="2 3" marker-end="url(#ta-ds)"></line>
+          <text class="tl halo" x="325" y="232" text-anchor="middle" style="fill:#2c58a0">sets max_body</text>
+
+          <rect x="10" y="38" width="100" height="54" rx="14" fill="#f1eee6" stroke="#8a8f98" stroke-width="1.5"></rect>
+          <text class="t" x="60" y="62" text-anchor="middle" style="fill:#5f6b7b">Clients</text>
+          <text class="tl" x="60" y="80" text-anchor="middle">browser, mobile</text>
+
+          <rect x="150" y="30" width="150" height="68" fill="#fbf8ef" stroke="#2b3542" stroke-width="1.5"></rect>
+          <text class="t" x="225" y="57" text-anchor="middle">API gateway</text>
+          <a href="#"><text class="tm" x="225" y="78" text-anchor="middle">src/gateway/</text></a>
+
+          <rect x="350" y="30" width="160" height="68" fill="#fbf8ef" stroke="#2b3542" stroke-width="1.5"></rect>
+          <text class="t" x="430" y="57" text-anchor="middle">Upload handler</text>
+          <a href="#"><text class="tm" x="430" y="78" text-anchor="middle">src/upload/handler.py</text></a>
+
+          <rect x="550" y="38" width="140" height="54" rx="14" fill="#f1eee6" stroke="#8a8f98" stroke-width="1.5"></rect>
+          <text class="t" x="620" y="62" text-anchor="middle" style="fill:#5f6b7b">Object store</text>
+          <text class="tl" x="620" y="80" text-anchor="middle">external</text>
+
+          <rect x="150" y="160" width="150" height="68" fill="#f6ead6" stroke="#a8660f" stroke-width="1.5" stroke-dasharray="6 4"></rect>
+          <text class="t" x="225" y="187" text-anchor="middle">Size guard</text>
+          <a href="#"><text class="tm" x="225" y="208" text-anchor="middle">http/middleware.py · !48</text></a>
+
+          <rect x="350" y="188" width="160" height="56" fill="#dfe8f6" stroke="#2c58a0" stroke-width="1.5" stroke-dasharray="2 3"></rect>
+          <text class="t" x="430" y="212" text-anchor="middle" style="fill:#2c58a0">Upload limits</text>
+          <a href="#"><text class="tm" x="430" y="232" text-anchor="middle" style="fill:#2c58a0">architecture.md §3.1</text></a>
+        </svg>
+        <figcaption style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12px; color: #6e6470; border-top: 1px dotted #ddd3bd; padding-top: 7px; margin-top: 4px;">
+          <span class="chip" style="border: 1.5px solid #2b3542; color: #2b3542;">DEPLOYED</span>
+          <span class="chip" style="border: 1.5px dashed #a8660f; color: #a8660f; background: #f6ead6;">IN FLIGHT</span>
+          <span class="chip" style="border: 1.5px dotted #2c58a0; color: #2c58a0; background: #dfe8f6;">DESIGNED</span>
+          <span class="chip" style="border: 1.5px solid #8a8f98; color: #5f6b7b; border-radius: 9px;">EXTERNAL</span>
+          <span>Not drawn: auth, virus scan, thumbnails.</span>
+        </figcaption>
+      </figure>
+
+      <div class="card" style="display: flex; flex-direction: column; gap: 2px; padding: 8px 14px;">
+        <div style="display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid #ddd3bd; padding-bottom: 4px;">
+          <span class="cap">files changed</span><a href="Source48.dc.html" style="font-size: 12px;">open source &amp; diff</a>
+          <span class="mono" style="font-size: 12px; margin-left: auto;">+184 −22 · 6 files</span>
+        </div>
+        <div class="fr"><a class="mono" href="Source48.dc.html" style="font-size: 12px;">src/http/middleware.py</a><span class="mono" style="font-size: 12px;">+58 −6</span><span class="chip" style="border: 1.5px dashed #c9533a; color: #a3402b; justify-self: start;">ALSO !42</span></div>
+        <div class="fr"><a class="mono" href="Source48.dc.html" style="font-size: 12px;">src/upload/limits.py</a><span class="mono" style="font-size: 12px;">+41</span><span class="chip" style="border: 2px solid #009E73; color: #00785a; background: #e2f3ec; justify-self: start;">NEW</span></div>
+        <div class="fr"><a class="mono" href="Source48.dc.html" style="font-size: 12px;">src/upload/handler.py</a><span class="mono" style="font-size: 12px;">+12 −9</span><span class="chip" style="border: 2px solid #0072B2; color: #0072B2; background: #e3eef7; justify-self: start;">CHANGED</span></div>
+        <div class="fr"><a class="mono" href="Source48.dc.html" style="font-size: 12px;">config/upload.toml</a><span class="mono" style="font-size: 12px;">+3</span><span class="chip" style="border: 2px solid #0072B2; color: #0072B2; background: #e3eef7; justify-self: start;">CHANGED</span></div>
+        <div class="fr"><a class="mono" href="Source48.dc.html" style="font-size: 12px;">tests/upload/test_limits.py</a><span class="mono" style="font-size: 12px;">+62</span><span class="chip" style="border: 2px solid #009E73; color: #00785a; background: #e2f3ec; justify-self: start;">NEW</span></div>
+        <div class="fr"><a class="mono" href="Source48.dc.html" style="font-size: 12px;">tests/http/test_middleware.py</a><span class="mono" style="font-size: 12px;">+8 −7</span><span class="chip" style="border: 2px solid #0072B2; color: #0072B2; background: #e3eef7; justify-self: start;">CHANGED</span></div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: #6e6470; border-top: 1px solid #ddd3bd; padding-top: 5px; margin-top: 3px;">
+          <span class="mono">modules +1 ~2 · edges +2</span>
+          <span style="color: #1e6b52;">drift 0 · imports within rules</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 18px; flex-grow: 1; min-height: 0;">
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div>
+        <h2 class="h2">REVIEW</h2>
+        <div class="card" style="padding: 4px 14px;">
+          <div class="tl"><span class="t">00:18</span><span class="dot" style="background: #56B4E9;"></span><span><b>Open</b> · reviewer-codex-01: the 413 body is plain text; errors.md says JSON with code and message. Fix pushed 01:50, waiting on round 2. <a class="ref" data-k="note" href="#">!48#note_3104</a></span></div>
+          <div class="tl"><span class="t">00:12</span><span class="dot" style="background: #009E73;"></span><span class="muted">Resolved · a body of exactly 25 MB was rejected; now allowed.</span></div>
+          <div class="tl"><span class="t">00:05</span><span class="dot" style="background: #009E73;"></span><span class="muted">Resolved · no test for chunked uploads; added.</span></div>
+          <div class="tl"><span class="t">23:58</span><span class="dot" style="background: #009E73;"></span><span class="muted">Resolved · Content-Length read case-sensitively.</span></div>
+        </div>
+      </div>
+      <div>
+        <h2 class="h2">HOW IT GOT HERE</h2>
+        <div class="card" style="padding: 4px 14px;">
+          <div class="tl"><span class="t">Fri 15:10</span><span class="dot" style="background: #0072B2;"></span><span>Implement started · implementer-claude-06 · <span class="mono" style="font-size: 12px;">trees/upload-limit</span></span></div>
+          <div class="tl"><span class="t">Fri 18:46</span><span class="dot" style="background: #56B4E9;"></span><span>Opened for review; pipeline passed. <a class="ref" data-k="MR" href="#">!48</a> <a class="ref" data-k="pipeline" href="#">#8830</a></span></div>
+          <div class="tl"><span class="t">Fri 23:30</span><span class="dot" style="background: #009E73;"></span><span>Round 1 · reviewer-codex-01 · 4 threads, changes asked at 00:20</span></div>
+          <div class="tl"><span class="t">00:25</span><span class="dot" style="background: #D55E00;"></span><span>Fix · implementer-claude-06; pushed 01:50 <a class="ref" data-k="commit" href="#">a7f03d1</a></span></div>
+          <div class="tl"><span class="t">01:58</span><span class="dot" style="background: #009E73;"></span><span>Round 2 · reviewer-codex-02 · running</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div>
+        <h2 class="h2">WORKERS · <span class="muted" style="font-family: 'Alegreya Sans', system-ui, sans-serif; font-size: 13px; letter-spacing: 0;">5h57m · 3 sessions</span></h2>
+        <div class="card" style="padding: 2px 14px;">
+          <div class="wk"><span><b style="font-weight: 500;">implementer-claude-06</b><br><span class="muted" style="font-size: 12px;">one-shot ×2 · claude opus · implement, fix</span></span><span class="mono" style="font-size: 12px; text-align: right;">4h55m</span><span class="st" style="color: #4f6b3a;"><i style="background: #4f6b3a;"></i>DONE</span></div>
+          <div class="wk"><span><b style="font-weight: 500;">reviewer-codex-01</b><br><span class="muted" style="font-size: 12px;">one-shot · codex · round 1</span></span><span class="mono" style="font-size: 12px; text-align: right;">0h50m</span><span class="st" style="color: #4f6b3a;"><i style="background: #4f6b3a;"></i>DONE</span></div>
+          <div class="wk"><span><b style="font-weight: 500;">reviewer-codex-02</b><br><span class="muted" style="font-size: 12px;">one-shot · codex · round 2 · last output 02:09</span></span><span class="mono" style="font-size: 12px; text-align: right;">0h12m</span><span class="st" style="color: #0072B2;"><i style="background: #0072B2;"></i>RUNNING</span></div>
+        </div>
+      </div>
+      <div>
+        <h2 class="h2">REFERENCES</h2>
+        <div class="card" style="display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 5px 10px; font-size: 13px; align-items: baseline;">
+          <span class="cap">issue</span><a href="#">#109 Upload size limit</a><span style="color: #6e6470; font-size: 12px;">review</span>
+          <span class="cap">MR</span><a href="#">!48 Upload size limit</a><span style="color: #6e6470; font-size: 12px;">open · passed</span>
+          <span class="cap">pipeline</span><a href="#">#8851</a><span style="color: #6e6470; font-size: 12px;">passed · 02:02</span>
+          <span class="cap">branch</span><a href="#" class="mono" style="font-size: 12px;">trees/upload-limit</a><span class="mono" style="color: #6e6470; font-size: 12px;">@ a7f03d1</span>
+          <span class="cap">doc</span><a href="#">architecture.md §3.1 Upload limits</a><span style="color: #6e6470; font-size: 12px;">designed</span>
+          <span class="cap">doc</span><a href="#">docs/api/errors.md</a><span style="color: #6e6470; font-size: 12px;">cited in review</span>
+          <span class="cap">related</span><a href="#">!42 Health check timeout</a><span style="color: #6e6470; font-size: 12px;">shares 1 file</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script="" data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:1764}}">
+class Component extends DCLogic {
+  renderVals() {
+    var from = -12, to = 8;
+    var x = function (h) { return (h - from) / (to - from) * 100; };
+    var clock = function (h) {
+      var m = ((Math.round((h + 2 + 10 / 60) * 60) % 1440) + 1440) % 1440;
+      return ('0' + Math.floor(m / 60)).slice(-2) + ':' + ('0' + (m % 60)).slice(-2);
+    };
+    var color = { implement: '#0072B2', pr: '#56B4E9', review: '#009E73', triage: '#E69F00', fix: '#D55E00', verify: '#CC79A7', merge: '#000000' };
+    var ahead = function (c) { return 'background: repeating-linear-gradient(135deg, ' + c + '66 0 3px, transparent 3px 6px); box-shadow: inset 0 0 0 1px ' + c + ';'; };
+    var lane = function (stage, sum, segs) {
+      return {
+        stage: stage.toUpperCase(), sum: sum,
+        key: 'width: 10px; height: 10px; border-radius: 2px; background: ' + color[stage] + ';',
+        segs: segs.map(function (g) {
+          var fc = g[1] > 0;
+          return {
+            title: stage + ' ' + clock(g[0]) + '–' + clock(g[1]) + ' · ' + g[2] + (fc ? ' · forecast' : ''),
+            style: 'position: absolute; top: 0; height: 14px; border-radius: 2px; box-sizing: border-box; left: ' + x(g[0]) + '%; width: ' + Math.max(x(g[1]) - x(g[0]), 0.5) + '%; ' + (fc ? ahead(color[stage]) : 'background: ' + color[stage] + ';')
+          };
+        })
+      };
+    };
+    var ticks = [];
+    for (var h = -12; h <= 8; h += 2) {
+      var at = h - 10 / 60;
+      if (at < from) continue;
+      ticks.push({ label: clock(at), style: 'position: absolute; transform: translateX(-50%); left: ' + x(at) + '%;', line: 'position: absolute; top: 0; bottom: 0; width: 1px; background: #e2d8c1; left: ' + x(at) + '%;' });
+    }
+    var stages = ['IMPLEMENT', 'REVIEW', 'TRIAGE', 'FIX', 'VERIFY', 'MERGE', 'MAIN'];
+    var state = { IMPLEMENT: 'done', REVIEW: 'now', TRIAGE: 'skip', FIX: 'done', VERIFY: 'ahead', MERGE: 'ahead', MAIN: 'ahead' };
+    var railStyle = {
+      done: 'padding: 0 6px; border-radius: 3px; background: #ebe4d2; color: #2f2630;',
+      now: 'padding: 0 6px; border-radius: 3px; background: #009E73; color: #fbf8ef; font-weight: 700;',
+      skip: 'padding: 0 6px; color: #bdb3a2; text-decoration: line-through;',
+      ahead: 'padding: 0 6px; border-radius: 3px; border: 1px dashed #bdb3a2; color: #6e6470;'
+    };
+    return {
+      rail: stages.map(function (s, i) { return { label: s, style: railStyle[state[s]], arrow: i < stages.length - 1 }; }),
+      tiles: [
+        ['FLOG', 'complexity', '231.8', '+19.4', 'worse', 'worst: guard#call 28.6'],
+        ['FLOG / METHOD', 'average', '7.4', '−0.7', 'better', 'was 8.1 · 4 methods split'],
+        ['FLAY', 'duplication mass', '34', '+34', 'worse', '1 clone: middleware ↔ limits'],
+        ['CHURN', 'touched files, 30 days', '41', 'hot', 'worse', 'middleware.py changed 14×'],
+        ['SMELLS', 'reek', '6', '−1', 'better', '+1 long param list · −2 duplication'],
+        ['COVERAGE', 'touched lines', '92.4%', '+1.6', 'better', '4 uncovered lines, all in guard']
+      ].map(function (t) {
+        var c = { worse: '#c9533a', better: '#009E73', same: '#a7843e' }[t[4]];
+        var ink = { worse: '#a3402b', better: '#1e6b52', same: '#8a6c30' }[t[4]];
+        return { label: t[0], what: t[1], value: t[2], delta: t[3], sub: t[5],
+          deltaStyle: 'font-family: ui-monospace, monospace; font-size: 12px; font-weight: 700; color: ' + ink + ';',
+          style: 'display: flex; flex-direction: column; background: #fbf8ef; border: 1px solid #ddd3bd; border-top: 3px solid ' + c + '; border-radius: 5px; padding: 6px 11px;' };
+      }),
+      ticks: ticks,
+      nowLabel: 'position: absolute; transform: translateX(-50%); left: ' + x(0) + '%; color: #c9533a; font-weight: 600; background: #f4efe1; padding: 0 3px;',
+      nowLine: 'position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #c9533a; left: ' + x(0) + '%;',
+      past: 'position: absolute; top: 0; bottom: 0; left: 0; background: #e9e1cc; opacity: .55; width: ' + x(0) + '%;',
+      forecastKey: 'width: 18px; height: 10px; border-radius: 2px; box-sizing: border-box; ' + ahead('#009E73'),
+      lanes: [
+        lane('implement', '3h30m · claude-06', [[-11, -7.5, 'implementer-claude-06']]),
+        lane('pr', 'opened Fri 18:46', [[-7.4, -7.1, 'implementer-claude-06']]),
+        lane('review', '1h02m · ends ~02:40', [[-2.67, -1.83, 'reviewer-codex-01'], [-0.2, 0, 'reviewer-codex-02'], [0, 0.5, 'reviewer-codex-02']]),
+        lane('fix', '1h25m · claude-06', [[-1.75, -0.33, 'implementer-claude-06']]),
+        lane('verify', 'skipped · no deploy step', []),
+        lane('merge', '~08:10 · 3rd in queue', [[5.8, 6.0, 'Robin']])
+      ]
+    };
+  }
+}
+</script>
+
+
+</body></html>

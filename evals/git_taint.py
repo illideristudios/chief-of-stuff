@@ -471,17 +471,31 @@ def launcher_stdin(fx: Fx, base: Path, env: dict[str, str], payload: str,
 
 @contextlib.contextmanager
 def private_git_views(base: Path):
-    """Give every `git_view.run` a trusted view base, so a test never writes the user's cache.
+    """Give `git_view.run` and `git_view.opened` a trusted base, so a test never writes the user's cache.
 
-    Inert until a caller routes through `git_view.run`; a caller that passes its own `base` wins.
+    A caller that passes its own `base` wins. On macOS, bypass the Git launcher's sandbox diagnostics.
     """
     import git_view  # the scripts directory is on the importing test's path
+    import git_trees
 
     run = git_view.run
+    opened = git_view.opened
 
     def run_at_base(*args, **kwargs):
         kwargs.setdefault("base", base)
         return run(*args, **kwargs)
 
-    with mock.patch.object(git_view, "run", side_effect=run_at_base):
+    def opened_at_base(*args, **kwargs):
+        kwargs.setdefault("base", base)
+        return opened(*args, **kwargs)
+
+    with contextlib.ExitStack() as stack:
+        if sys.platform == "darwin":
+            binary = (Path(git(["--exec-path"], base.parent).stdout.strip()) / "git").resolve()
+            real_env = git_trees.audit_env
+            stack.enter_context(mock.patch.object(git_trees, "audit_env", side_effect=lambda: {
+                **real_env(), "PATH": f"{binary.parent}:/usr/bin:/bin",
+            }))
+        stack.enter_context(mock.patch.object(git_view, "run", side_effect=run_at_base))
+        stack.enter_context(mock.patch.object(git_view, "opened", side_effect=opened_at_base))
         yield

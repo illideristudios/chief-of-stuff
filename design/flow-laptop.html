@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Board — flow</title>
+<script src="lib/86a3e9940611.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/ee8b56df405b.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/c271ee5c70f2.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/b80617d9b7e8.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fddc117a5ff1.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/1ca85659ab25.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/d8bf25eb11d0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/624ea7e85a53.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/bab9dc1971b0.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/261638ad9761.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/517fcb8cabb3.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/b34c10a1ffe0.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/43dc1b9a0c96.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/5be63e946cc5.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/dedb7e4dce28.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3df86f009f15.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/4bb93aca54b3.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/967b38372db4.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/9a9defceff14.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/f1c49bfd357d.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5c1cb227aa5a.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/1a2f3006ecc7.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/b3cedae80e66.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/071a53d2119e.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/455dfdb0f51a.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/50e2fc3909a0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/9777be10ff78.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5bf655ce1293.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/ea97db9e8f8b.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/156f0047d272.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3b1c199b3a86.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/aab9ff2ff8f0.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+<style>
+body{margin:0;font-family:"Alegreya Sans","Gill Sans",system-ui,sans-serif;background:#f4efe1;color:#2f2630}
+a{color:#8a6c30}a:hover{color:#6b5325}
+</style>
+</helmet>
+
+<div style="width: 1280px; height: 1776px; box-sizing: border-box; padding: 24px 32px 22px; background: #f4efe1; color: #2f2630; display: flex; flex-direction: column; gap: 14px; overflow: hidden;">
+
+  <div style="margin: -12px 0 -4px;"><dc-import name="Tabs" current="Board" hint-size="100%,34px"></dc-import></div>
+
+  <div style="display: flex; align-items: flex-end; gap: 20px; border-bottom: 1px solid #a7843e; padding-bottom: 10px;">
+    <div style="flex-grow: 1;">
+      <h1 style="margin: 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 27px; font-weight: 600; letter-spacing: .04em;">Board · Sat 26 Sep</h1>
+      <div style="font-size: 12.5px; color: #6e6470; margin-top: 2px;">tracker 02:05 · kanban 02:08 · merge requests 02:08 · workers 02:10 · {{taskCount}} tasks</div>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: flex-end;">
+      <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 6px 12px; text-align: right;">
+        <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">now</div>
+        <div style="font-family: ui-monospace, monospace; font-size: 18px; font-variant-numeric: tabular-nums;">02:10:37</div>
+      </div>
+      <div style="background: #c9533a; color: #fbf8ef; border-radius: 5px; padding: 6px 12px; text-align: right;">
+        <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; opacity: .9;">demo in</div>
+        <div style="font-family: ui-monospace, monospace; font-size: 18px; font-variant-numeric: tabular-nums;">8h49m23s</div>
+      </div>
+    </div>
+  </div>
+
+  <div role="group" aria-label="Show on the board" style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px;">
+    <sc-for list="{{filters}}" as="t" hint-placeholder-count="6">
+      <button type="button" sc-camel-on-click="{{t.pick}}" aria-pressed="{{t.on}}" style="{{t.style}}">
+        <span style="font-family: 'Cormorant SC', Georgia, serif; font-size: 14px; letter-spacing: .08em;">{{t.label}}</span>
+        <span style="font-size: 22px; font-weight: 700; margin-left: auto; font-variant-numeric: tabular-nums;">{{t.count}}</span>
+      </button>
+    </sc-for>
+  </div>
+
+  <div id="flow" style="display: flex; flex-direction: column; gap: 6px;">
+    <div style="display: flex; align-items: baseline; gap: 10px;">
+      <h2 style="margin: 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 17px; font-weight: 600; letter-spacing: .1em;">BUILD</h2>
+      <div style="font-size: 12px; color: #6e6470;">{{laneCount}} issues · {{mrCount}} merge requests</div>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; height: 486px;">
+      <sc-for list="{{columns}}" as="col" hint-placeholder-count="8">
+        <div style="{{col.style}}">
+          <div style="display: flex; align-items: baseline; gap: 6px; border-bottom: 1px dotted #ddd3bd; padding-bottom: 5px;">
+            <span style="{{col.headStyle}}">{{col.stage}}</span>
+            <span style="font-size: 11px; color: #6e6470;">{{col.gate}}</span>
+            <span style="font-size: 14px; font-weight: 700; margin-left: auto; font-variant-numeric: tabular-nums;">{{col.count}}</span>
+          </div>
+          <sc-for list="{{col.cards}}" as="c" hint-placeholder-count="3">
+            <div style="{{c.style}}">
+              <a href="{{c.href}}" style="font-size: 12.5px; font-weight: 500; line-height: 1.25; color: #2f2630; text-decoration: none;">{{c.name}}</a>
+              <div style="display: flex; gap: 5px; flex-wrap: wrap; font-family: ui-monospace, monospace; font-size: 10.5px;">
+                <sc-for list="{{c.refs}}" as="r" hint-placeholder-count="2">
+                  <a href="{{r.href}}" style="color: #8a6c30; text-decoration: none; border-bottom: 1px dotted #a7843e;">{{r.text}}</a>
+                </sc-for>
+              </div>
+              <div style="display: flex; align-items: center; gap: 5px; flex-wrap: wrap;">
+                <a href="{{c.ownerHref}}" style="font-size: 11px; color: #6e6470; text-decoration: none;">{{c.owner}}</a>
+                <span style="{{c.chipStyle}}">{{c.state}}</span>
+              </div>
+              <sc-if value="{{c.hasMarks}}" hint-placeholder-val="{{ true }}">
+                <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+                  <sc-for list="{{c.marks}}" as="m" hint-placeholder-count="1">
+                    <span style="{{m.style}}">{{m.text}}</span>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{c.held}}" hint-placeholder-val="{{ false }}">
+                <div style="margin: 3px -7px 0; padding: 2px 0; background: #c9533a; color: #fbf8ef; text-align: center; font-size: 10px; font-weight: 700; letter-spacing: .14em;">NEEDS INPUT</div>
+              </sc-if>
+            </div>
+          </sc-for>
+          <sc-if value="{{col.more}}" hint-placeholder-val="{{ false }}">
+            <div style="font-size: 11px; color: #6e6470;">{{col.more}}</div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <sc-for list="{{charts}}" as="c" hint-placeholder-count="2">
+  <div style="display: flex; flex-direction: column; gap: 4px;">
+    <div style="display: flex; align-items: baseline; gap: 10px;">
+      <h2 style="margin: 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 17px; font-weight: 600; letter-spacing: .1em;">{{c.title}}</h2>
+      <div style="font-size: 12px; color: #6e6470;">{{c.meta}}</div>
+    </div>
+    <div style="display: flex; align-items: center; height: 15px; font-size: 10.5px; color: #6e6470; font-family: ui-monospace, monospace;">
+      <div style="width: 236px; flex: none;"></div>
+      <div style="position: relative; flex-grow: 1; height: 15px;">
+        <sc-for list="{{c.ticks}}" as="k" hint-placeholder-count="10">
+          <span style="{{k.style}}">{{k.label}}</span>
+        </sc-for>
+        <span style="{{c.nowLabel}}">now {{c.now}}</span>
+      </div>
+      <div style="width: 124px; flex: none;"></div>
+    </div>
+    <div style="position: relative; display: flex; flex-direction: column; gap: 3px;">
+      <div style="position: absolute; top: 0; bottom: 0; left: 236px; right: 124px; pointer-events: none;">
+        <span style="{{c.past}}"></span>
+        <sc-for list="{{c.ticks}}" as="k" hint-placeholder-count="10">
+          <span style="{{k.line}}"></span>
+        </sc-for>
+        <span style="{{c.nowLine}}"></span>
+      </div>
+      <sc-for list="{{c.rows}}" as="r" hint-placeholder-count="8">
+        <div style="display: flex; align-items: center; height: 22px; border-top: 1px solid #e6dcc6;">
+          <div style="width: 236px; flex: none; padding-right: 10px; box-sizing: border-box; display: flex; gap: 6px; align-items: baseline; overflow: hidden; white-space: nowrap;">
+            <span style="font-family: ui-monospace, monospace; font-size: 11px; color: #6e6470;">{{r.issue}}</span>
+            <a href="{{r.href}}" style="font-size: 12.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; color: #2f2630; text-decoration: none;">{{r.name}}</a>
+          </div>
+          <div style="position: relative; flex-grow: 1; height: 14px; border-left: 1px solid #ddd3bd;">
+            <sc-for list="{{r.segs}}" as="g" hint-placeholder-count="3">
+              <span title="{{g.title}}" style="{{g.style}}"></span>
+            </sc-for>
+          </div>
+          <div style="width: 124px; flex: none; padding-left: 10px; box-sizing: border-box; font-size: 11px; color: #6e6470; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{r.end}}</div>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+  </sc-for>
+  <div style="display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: #6e6470; border-top: 1px solid #ddd3bd; padding-top: 5px;">
+    <sc-for list="{{legend}}" as="l" hint-placeholder-count="9">
+      <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="{{l.style}}"></span>{{l.stage}}</span>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script="" data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:1776}}">
+class Component extends DCLogic {
+  renderVals() {
+    var chip = function (bg, fg, border) {
+      return 'font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; padding: 1px 6px; border-radius: 9px; background: ' + bg + '; color: ' + fg + '; border: 1px ' + (border || 'solid ' + bg) + ';';
+    };
+    var states = {
+      running: chip('#0072B2', '#fbf8ef'),
+      needs: chip('#fbf8ef', '#a3402b', 'solid #c9533a'),
+      open: chip('#f4efe1', '#2f2630', 'solid #ddd3bd'),
+      orphaned: chip('#fbf8ef', '#c9533a', 'dashed #c9533a'),
+      done: chip('#4f6b3a', '#fbf8ef')
+    };
+    var marks = {
+      approved: 'font-size: 10px; padding: 0 5px; border-radius: 3px; background: #009E73; color: #fbf8ef;',
+      passed: 'font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid #009E73; color: #1e6b52;',
+      failed: 'font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid #c9533a; color: #a3402b;',
+      pending: 'font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid #56B4E9; color: #2c6f95;',
+      drift: 'font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px dashed #c9533a; color: #a3402b;',
+      queue: 'font-size: 10px; padding: 0 5px; border-radius: 3px; background: #2f2630; color: #fbf8ef;',
+      shares: 'font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px dashed #c9533a; color: #a3402b;',
+      decision: 'font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid #a7843e; color: #8a6c30; background: #efe7d3;',
+      looping: 'font-size: 10px; padding: 0 5px; border-radius: 3px; background: #c9533a; color: #fbf8ef;'
+    };
+    var self = this, f = (this.state && this.state.f) || 'all';
+    var PAGE = { '#109': 'Task.dc.html', '!48': 'Source48.dc.html', '#111': 'Decision.dc.html', '!58': 'Source58.dc.html', '#105': 'Issue.dc.html', '#124': 'Issue124.dc.html', '#107': 'Issue107.dc.html', '#98': 'Issue98.dc.html', '#118': 'AgentHealthy.dc.html' };
+    var WHO = { 'implementer-claude-04': 'Agent.dc.html', 'implementer-claude-07': 'AgentHealthy.dc.html', 'implementer-codex-03': 'Workers.dc.html', 'reviewer-claude-01': 'Workers.dc.html', 'reviewer-codex-02': 'Workers.dc.html', 'unassigned': 'Dispatch.dc.html' };
+    var counts = {};
+    var card = function (name, refs, owner, state, ms, drift, tags) {
+      tags = tags || [];
+      tags.forEach(function (t) { counts[t] = (counts[t] || 0) + 1; });
+      counts.all = (counts.all || 0) + 1;
+      var shown = f === 'all' || tags.indexOf(f) >= 0;
+      var held = (ms || []).indexOf('hold') >= 0;
+      var list = (ms || []).filter(function (m) { return m !== 'hold'; }).concat(held && drift ? ['drift'] : [])
+        .map(function (m) { return { text: m, style: marks[m.split(' ')[0]] }; });
+      return {
+        name: name, href: PAGE[refs.split(' · ')[0]] || '#', refs: refs.split(' · ').map(function (r) { return { text: r, href: PAGE[r] || '#' }; }), owner: owner, ownerHref: WHO[owner] || '#', state: state, chipStyle: states[state.split(' ')[0]],
+        marks: list, hasMarks: list.length > 0, held: held,
+        style: 'background: #fbf8ef; border: ' + (held ? '2px solid #c9533a' : '1px ' + (drift ? 'dashed #c9533a' : 'solid #ddd3bd')) + '; border-radius: 4px; padding: 6px 7px' + (held ? ' 0' : '') + '; display: flex; flex-direction: column; gap: 3px; overflow: hidden;' + (shown ? '' : ' opacity: .28;')
+      };
+    };
+    var column = function (stage, gate, count, cards, more) {
+      return {
+        stage: stage, gate: gate ? 'gate' : '', count: cards.length, cards: cards, more: '',
+        headStyle: "font-family: 'Cormorant SC', Georgia, serif; font-size: 13px; letter-spacing: .08em; color: " + (gate ? '#8a6c30' : '#2f2630') + ';',
+        style: 'background: ' + (gate ? '#efe6cf' : '#ebe4d2') + '; border-radius: 5px; padding: 7px 6px; display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow: hidden;'
+      };
+    };
+    var stageColor = { implement: '#0072B2', pr: '#56B4E9', review: '#009E73', triage: '#E69F00', fix: '#D55E00', verify: '#CC79A7', merge: '#000000' };
+    var solid = function (st) { return 'background: ' + stageColor[st] + ';'; };
+    var ahead = function (st) { return 'background: repeating-linear-gradient(135deg, ' + stageColor[st] + '66 0 3px, transparent 3px 6px); box-shadow: inset 0 0 0 1px ' + stageColor[st] + ';'; };
+    var held = 'background: repeating-linear-gradient(135deg, #c9533a 0 2px, #f4efe1 2px 5px); box-shadow: inset 0 0 0 1px #c9533a;';
+    var clock = function (h) {
+      var m = ((Math.round((h + 2 + 10 / 60) * 60) % 1440) + 1440) % 1440;
+      return ('0' + Math.floor(m / 60)).slice(-2) + ':' + ('0' + (m % 60)).slice(-2);
+    };
+    var chart = function (title, meta, from, to, ticks, rows) {
+      var x = function (h) { return (h - from) / (to - from) * 100; };
+      var nowAt = x(0);
+      var tally = { merged: 0, approved: 0, running: 0, 'needs input': 0, queued: 0 };
+      rows.forEach(function (r) {
+        var w = r[2].split(' ')[0];
+        tally[w === 'needs' ? 'needs input' : (w === 'fix' || w === 'review' || w === 'implement') ? 'running' : w] += 1;
+      });
+      var said = Object.keys(tally).filter(function (k) { return tally[k]; }).map(function (k) { return tally[k] + ' ' + k; });
+      return {
+        title: title, meta: said.concat([meta]).join(' · '), now: '02:10',
+        nowLabel: 'position: absolute; transform: translateX(-50%); left: ' + nowAt + '%; color: #c9533a; font-weight: 600; background: #f4efe1; padding: 0 3px;',
+        nowLine: 'position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #c9533a; left: ' + nowAt + '%;',
+        past: 'position: absolute; top: 0; bottom: 0; left: 0; background: #e9e1cc; opacity: .55; width: ' + nowAt + '%;',
+        ticks: ticks.map(function (t) {
+          return { label: t[1], style: 'position: absolute; transform: translateX(-50%); left: ' + x(t[0]) + '%;', line: 'position: absolute; top: 0; bottom: 0; width: 1px; background: #e2d8c1; left: ' + x(t[0]) + '%;' };
+        }),
+        rows: rows.map(function (r) {
+          return { issue: r[0], name: r[1], href: PAGE[r[0]] || '#', end: r[2], segs: r[3].filter(function (g) { return g[2] > from && g[1] < to; }).map(function (g) {
+            var a = Math.max(g[1], from), b = Math.min(g[2], to);
+            var kind = g[4] || (g[2] <= 0 ? 'done' : 'ahead');
+            return {
+              title: g[0] + ' ' + clock(g[1]) + '–' + clock(g[2]) + ' · ' + g[3] + (kind === 'ahead' ? ' · forecast' : kind === 'hold' ? ' · needs input' : ''),
+              style: 'position: absolute; top: 0; height: 14px; border-radius: 2px; box-sizing: border-box; left: ' + x(a) + '%; width: ' + Math.max(x(b) - x(a), 0.5) + '%; ' + (kind === 'ahead' ? ahead(g[0]) : kind === 'hold' ? held : solid(g[0]))
+            };
+          }) };
+        })
+      };
+    };
+    var dayTicks = [];
+    ['Fri 25', 'Sat 26', 'Sun 27', 'Mon 28', 'Tue 29', 'Wed 30', 'Thu 1'].forEach(function (d, i) { dayTicks.push([-26 - 10 / 60 + 24 * i, d]); });
+    var hourTicks = [];
+    for (var h = -4; h <= 18; h += 2) hourTicks.push([h - 10 / 60, ('0' + ((h + 26) % 24)).slice(-2)]);
+    var columns = [
+      column('IMPLEMENT', false, 0, [
+        card('Rate limit headers', '#118', 'implementer-claude-07', 'running 01:28', null, false, ['running']),
+        card('CSV import quoting', '#121', 'implementer-codex-03', 'running 01:52', null, false, ['running']),
+        card('Webhook signature check', '#124', 'unassigned', 'orphaned', null, false, ['needs', 'orphaned'])
+      ]),
+      column('REVIEW', false, 0, [
+        card('Search index rebuild', '#117 · !54', 'reviewer-claude-01', 'running 02:01', ['pending pipeline'], false, ['running']),
+        card('Dark mode tokens', '#119 · !55', 'Robin', 'needs input', ['hold'], false, ['needs', 'held']),
+        card('Upload size limit', '#109 · !48', 'reviewer-codex-02', 'running 01:58', ['passed'], false, ['running']),
+        card('Invoice PDF fonts', '#120 · !51', 'reviewer-claude-01', 'done', ['passed'], false, []),
+        card('Login throttle', '#122 · !52', 'Robin', 'needs input', ['hold', 'failed'], true, ['needs', 'held', 'drift'])
+      ]),
+      column('TRIAGE', true, 0, [
+        card('Session timeout', '#107 · !46', 'Robin', 'needs input', ['hold', 'decision pending'], false, ['needs', 'held']),
+        card('Cache warmup', '#111 · !58', 'Robin', 'needs input', ['hold', 'decision pending'], false, ['needs', 'held'])
+      ]),
+      column('FIX', false, 0, [
+        card('Audit log retention', '#105 · !44', 'implementer-claude-04', 'running 00:47', ['failed', 'looping'], false, ['needs', 'running'])
+      ]),
+      column('VERIFY', false, 0, [
+        card('Export retry backoff', '#104 · !43', 'unassigned', 'open', ['passed'], false, [])
+      ]),
+      column('MERGE', true, 0, [
+        card('Password reset copy', '#102 · !41', 'Robin', 'needs input', ['queue 1', 'approved', 'passed'], false, ['needs', 'approved']),
+        card('Health check timeout', '#103 · !42', 'Robin', 'needs input', ['queue 2', 'approved', 'shares file with !48'], false, ['needs', 'approved'])
+      ]),
+      column('MAIN', false, 0, [
+        card('Locale fallback', '#98 · !37', 'merged 00:41', 'done', null, false, []),
+        card('Report CSV header', '#99 · !38', 'merged 01:15', 'done', null, false, [])
+      ])
+    ];
+    var tone = { all: '#2f2630', needs: '#c9533a', running: '#0072B2', approved: '#009E73', held: '#a7843e', orphaned: '#6e6470', drift: '#c9533a' };
+    var filters = [
+      ['all', 'ALL'], ['needs', 'NEEDS INPUT'], ['running', 'RUNNING'], ['approved', 'APPROVED'],
+      ['orphaned', 'ORPHANED'], ['drift', 'DRIFT']
+    ].map(function (t) {
+      var on = f === t[0];
+      return {
+        label: t[1], count: counts[t[0]] || 0, on: on ? 'true' : 'false',
+        pick: function () { self.setState({ f: t[0] }); },
+        style: 'display: flex; align-items: baseline; gap: 6px; min-height: 42px; box-sizing: border-box; font: inherit; text-align: left; cursor: pointer; border-radius: 5px; padding: 7px 11px; border: 1px solid ' + (on ? '#2f2630' : '#ddd3bd') + '; border-top: 3px solid ' + tone[t[0]] + '; background: ' + (on ? '#2f2630' : '#fbf8ef') + '; color: ' + (on ? '#fbf8ef' : '#2f2630') + ';'
+      };
+    });
+    var laneCards = [].concat.apply([], columns.map(function (c) { return c.cards; }));
+    return {
+      laneCount: laneCards.length, taskCount: laneCards.length,
+      mrCount: laneCards.filter(function (c) { return c.refs.some(function (r) { return r.text.charAt(0) === '!'; }); }).length,
+      legend: Object.keys(stageColor).map(function (k) {
+        return { stage: k, style: 'width: 18px; height: 10px; border-radius: 2px; box-sizing: border-box; ' + solid(k) };
+      }).concat([
+        { stage: 'forecast', style: 'width: 18px; height: 10px; border-radius: 2px; box-sizing: border-box; ' + ahead('implement') },
+        { stage: 'needs input', style: 'width: 18px; height: 10px; border-radius: 2px; box-sizing: border-box; ' + held }
+      ]),
+      charts: [
+        chart('FLOW · 24 HOURS', 'Fri 20:10 → Sat 20:10', -6, 18, hourTicks, [
+          ['#98', 'Locale fallback', 'merged 00:41', [['triage', -9, -3.8, 'Robin'], ['merge', -1.58, -1.4833, 'Robin']]],
+          ['#99', 'Report CSV header', 'merged 01:15', [['merge', -1.02, -0.9167, 'Robin']]],
+          ['#102', 'Password reset copy', 'approved · merge ~02:40', [['implement', -9, -3, 'implementer-claude-03'], ['review', -2.6, -1.8, 'reviewer-codex-01'], ['merge', 0.4, 0.55, 'Robin']]],
+          ['#105', 'Audit log retention', 'fix · ~07:30', [['fix', -1.5, 0, 'implementer-claude-04', 'done'], ['fix', 0, 1.5, 'implementer-claude-04'], ['review', 2, 3, 'reviewer-codex-02'], ['merge', 5.2, 5.4, 'Robin']]],
+          ['#109', 'Upload size limit', 'review · ~08:10', [['pr', -3.4, -3, 'implementer-claude-06'], ['review', -0.2, 0, 'reviewer-codex-02', 'done'], ['review', 0, 0.5, 'reviewer-codex-02'], ['fix', 1, 3, 'implementer-claude-06'], ['review', 3.5, 4.2, 'reviewer-codex-01'], ['merge', 6, 6.2, 'Robin']]],
+          ['#111', 'Cache warmup', 'needs input · decision', [['triage', -0.5, 0, 'Robin', 'done'], ['triage', 0, 18, 'decision-cache-warmup', 'hold']]],
+          ['#107', 'Session timeout', 'needs input · decision', [['triage', -1.3, 0, 'Robin', 'done'], ['triage', 0, 18, 'decision-session-timeout', 'hold']]],
+          ['#112', 'Export format', 'queued · ~20:00', [['implement', 8.5, 12.5, 'next free slot'], ['review', 13, 14, 'reviewer'], ['merge', 17.6, 17.8, 'Robin']]],
+          ['#113', 'Password reset email', 'queued · Sun', [['implement', 13, 17, 'next free slot'], ['review', 17.5, 18.5, 'reviewer']]]
+        ]),
+        chart('FLOW · 7 DAYS', 'Thu 24 02:10 → Thu 1 02:10', -48, 120, dayTicks, [
+          ['#95', 'Signup rate limit', 'merged Thu 09:10', [['implement', -60, -52, 'implementer-claude-01'], ['review', -50, -48.5, 'reviewer-codex-01'], ['merge', -41.4, -41, 'Robin']]],
+          ['#97', 'Retry jitter', 'merged Fri 14:20', [['implement', -24, -21.7, 'implementer-claude-02'], ['review', -21, -20.2, 'reviewer-codex-01'], ['fix', -20, -18, 'implementer-claude-02'], ['merge', -12.2, -11.8333, 'Robin']]],
+          ['#100', 'Timezone labels', 'merged Fri 11:20', [['implement', -21, -18, 'implementer-codex-02'], ['review', -17.5, -16.8, 'reviewer-claude-01'], ['merge', -15.2, -14.8333, 'Robin']]],
+          ['#101', 'Bulk delete confirm', 'merged Fri 18:30', [['implement', -14, -11, 'implementer-claude-03'], ['review', -10.5, -9.5, 'reviewer-codex-01'], ['merge', -8, -7.6667, 'Robin']]],
+          ['#98', 'Locale fallback', 'merged 00:41', [['implement', -46, -42.5, 'implementer-claude-05'], ['review', -42, -41, 'reviewer-codex-02'], ['triage', -41, -3.8, 'Robin'], ['merge', -1.8, -1.4833, 'Robin']]],
+          ['#99', 'Report CSV header', 'merged 01:15', [['implement', -18, -15, 'implementer-codex-03'], ['review', -14.5, -13.5, 'reviewer-claude-01'], ['fix', -13, -11.8, 'implementer-codex-03'], ['verify', -10.8, -10, 'implementer-codex-03'], ['merge', -1.2, -0.9167, 'Robin']]],
+          ['#102', 'Password reset copy', 'approved', [['implement', -9, -3, 'implementer-claude-03'], ['review', -2.6, -1.8, 'reviewer-codex-01'], ['merge', 0.3, 0.7, 'Robin']]],
+          ['#105', 'Audit log retention', 'fix', [['implement', -14, -10, 'implementer-claude-04'], ['review', -9.5, -8.5, 'reviewer-codex-02'], ['fix', -1.5, 0, 'implementer-claude-04', 'done'], ['fix', 0, 1.5, 'implementer-claude-04'], ['review', 2, 3, 'reviewer-codex-02'], ['merge', 5, 5.6, 'Robin']]],
+          ['#109', 'Upload size limit', 'review', [['implement', -11, -7.5, 'implementer-claude-06'], ['review', -0.2, 0, 'reviewer-codex-02', 'done'], ['review', 0, 0.5, 'reviewer-codex-02'], ['fix', 1, 3, 'implementer-claude-06'], ['review', 3.5, 4.2, 'reviewer-codex-01'], ['merge', 6, 6.6, 'Robin']]],
+          ['#111', 'Cache warmup', 'needs input · decision', [['triage', -0.5, 0, 'Robin', 'done'], ['triage', 0, 120, 'decision-cache-warmup', 'hold']]],
+          ['#107', 'Session timeout', 'needs input · decision', [['triage', -1.3, 0, 'Robin', 'done'], ['triage', 0, 120, 'decision-session-timeout', 'hold']]],
+          ['#112', 'Export format', 'queued · Sat', [['implement', 8.5, 12.5, 'next free slot'], ['review', 13, 14, 'reviewer'], ['merge', 17.4, 18, 'Robin']]],
+          ['#113', 'Password reset email', 'queued · Sun', [['implement', 13, 17, 'next free slot'], ['review', 17.5, 18.5, 'reviewer'], ['merge', 31, 31.6, 'Robin']]],
+          ['#114', 'Search pagination', 'queued · Mon', [['implement', 30, 36, 'next free slot'], ['review', 36.5, 38, 'reviewer'], ['merge', 55, 55.6, 'Robin']]],
+          ['#115', 'Webhook retries', 'queued · Tue', [['implement', 52, 60, 'next free slot'], ['review', 60.5, 62, 'reviewer'], ['merge', 79, 79.6, 'Robin']]],
+          ['#116', 'Admin audit export', 'queued · Wed', [['implement', 76, 84, 'next free slot'], ['review', 84.5, 86, 'reviewer'], ['merge', 103, 103.6, 'Robin']]]
+        ])
+      ],
+      filters: filters,
+      columns: columns
+    };
+  }
+}
+</script>
+
+
+</body></html>
