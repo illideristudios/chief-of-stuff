@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
 import performance_report  # noqa: E402
+import probe_health  # noqa: E402
 import shell_setup  # noqa: E402
 import supervisor  # noqa: E402
 
@@ -33,7 +34,7 @@ def _help_sections(help_text: str) -> dict[str, str]:
 
 
 # A per-command help issue opts in here after bringing its parser up to the standard.
-ENFORCED = frozenset({"docs", "pages", "performance"})
+ENFORCED = frozenset({"docs", "health", "pages", "performance"})
 
 
 def missing_sections(help_text: str, name: str) -> list[str]:
@@ -719,6 +720,73 @@ class PerformanceHelpTest(unittest.TestCase):
             self.assertIn(f"- {col}:", output_section, col)
         # Thursday 2026-10-08 buckets to Monday 2026-10-05; empty effort, agent_type and workflow print as "-".
         self.assertEqual(row, ["2026-10-05", "claude", "sonnet", "-", "-", "-", "1", "1", "0", "0", "15"])
+
+
+class HealthHelpTest(unittest.TestCase):
+    """#846: `chief-of-stuff health --help` is the reference an agent discovers and trusts."""
+
+    def run_health(self, *args):
+        env = dict(os.environ, COLUMNS="100", NO_COLOR="1", PYTHON_COLORS="0", PYTHONHASHSEED="0")
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "health", *args],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_health_help_meets_shared_standard_and_covers_health_contract(self):
+        self.assertIn("health", ENFORCED)
+        done = self.run_health("--help")
+        short = self.run_health("-h")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual((short.returncode, short.stdout, short.stderr), (0, done.stdout, ""))
+        self.assertEqual(missing_sections(done.stdout, "health"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = probe_health.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = probe_health.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            if action.option_strings:
+                self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        help_text = " ".join(done.stdout.split())
+        for phrase in (
+            "(advice)",
+            "absent, defaults",
+            "invalid",
+            "runtimes claude",
+            "runtimes not checked",
+            "no Health: targets",
+            "processes",
+            "init",
+            "audit",
+            "--config",
+            "--timeout",
+            "does not change the exit code",
+            "codex, cursor, and agy are not probed",
+            "not TOON",
+            "not JSON",
+            "Reads only",
+            "no --commit",
+            "cedar-desk",
+        ):
+            self.assertIn(phrase, help_text, phrase)
+        for other in ("runtimes codex", "runtimes cursor", "runtimes agy"):
+            self.assertNotIn(other, help_text)
+
+        examples = [line.strip() for line in sections["examples"].splitlines()
+                    if line.strip().startswith("chief-of-stuff health")]
+        self.assertEqual(len(examples), 3, examples)
+        for example in examples:
+            tokens = shlex.split(example)
+            self.assertEqual(tokens[:2], ["chief-of-stuff", "health"])
+            parser.parse_args(tokens[2:])
 
 
 if __name__ == "__main__":

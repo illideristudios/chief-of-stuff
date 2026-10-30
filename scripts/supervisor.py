@@ -73,6 +73,18 @@ def state_dir(root: Path) -> Path:
     return root.resolve() / ".chief-of-stuff"
 
 
+def record_engine_start(root: Path, at: str, pid: int) -> None:
+    """Append one engine process start for the bake judge (S4).
+
+    shortcut: append-only with no cap; a one-week file stays small, rotate it if the
+    record outlives the bake.
+    """
+    path = state_dir(root) / "engine-starts.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"at": at, "pid": pid}) + "\n")
+
+
 @contextmanager
 def lock(path: Path, wait: bool = False, timeout: float | None = None):
     path.parent.mkdir(parents=True, exist_ok=True)
