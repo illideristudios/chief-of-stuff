@@ -202,7 +202,10 @@ EARLY_END_COORDINATOR = """# Workspace
 - Daily log dir: `daily/`
 - Tracker: `daily/<date>-tracker.md`
 - Timezone: America/Chicago
+- Backlog: GitLab; host https://forge.example; project grp/app
 """
+
+EARLY_END_HOME = bs.backlog.Backlog("https://forge.example", "grp/app")
 
 
 def early_end_tracker() -> str:
@@ -229,7 +232,7 @@ def early_end_sources() -> bs.Sources:
     """Issue #410 closed at 00:30, before either of its tasks moved, and no merged change."""
     closed_at = at(TODAY, "00:30")
     issue = bs.Issue("#410", "u", "t", "closed", (), closed_at=closed_at)
-    return bs.Sources({}, {"#410": issue}, {}, (), {})
+    return bs.Sources({}, {"#410": issue}, {}, (), {}, home=EARLY_END_HOME)
 
 
 class EndBeforeEveryMoveTest(unittest.TestCase):
