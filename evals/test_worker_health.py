@@ -34,3 +34,34 @@ class SilenceTest(unittest.TestCase):
     def test_the_limit_must_be_positive(self):
         with self.assertRaises(ValueError):
             worker_health.silence(NOW, None, NOW, timedelta(0))
+
+
+class EvidenceTest(unittest.TestCase):
+    def judge(self, **kwargs):
+        return worker_health.stall(NOW - timedelta(minutes=10), NOW, timedelta(minutes=3),
+                                   worker_health.Evidence(**kwargs))
+
+    def test_silence_is_suspected_and_needs_verified_liveness(self):
+        self.assertEqual(self.judge(alive=True), "suspected")
+        self.assertEqual(self.judge(alive=None), "unknown")
+        self.assertEqual(self.judge(alive=False), "gone")
+
+    def test_startup_grace_recent_transcript_and_thread_updates_prevent_stalls(self):
+        recent = NOW - timedelta(minutes=1)
+        evidence = worker_health.Evidence(alive=True, last_activity_at=recent)
+        self.assertEqual(worker_health.stall(NOW - timedelta(minutes=2), NOW,
+                         timedelta(minutes=3), worker_health.Evidence(alive=True)), "ok")
+        self.assertEqual(self.judge(alive=True, last_activity_at=recent), "ok")
+        self.assertEqual(worker_health.stall(NOW - timedelta(minutes=10), NOW,
+                         timedelta(minutes=3), evidence), "ok")
+
+    def test_pending_requests_wait_then_suspect_but_protected_decisions_always_wait(self):
+        self.assertEqual(self.judge(alive=True, pending_requests=1, pending_since=NOW), "waiting")
+        self.assertEqual(self.judge(alive=True, pending_requests=1,
+                                   pending_since=NOW-timedelta(minutes=4)), "suspected")
+        self.assertEqual(self.judge(alive=True, pending_requests=1,
+                                   pending_since=NOW-timedelta(days=1), decision_wait=True), "waiting")
+        self.assertEqual(self.judge(alive=True, decision_wait=True), "waiting")
+
+    def test_failed_t3_read_is_unknown_and_not_a_process_based_stall(self):
+        self.assertEqual(self.judge(alive=True, launcher="t3", error="offline"), "unknown")

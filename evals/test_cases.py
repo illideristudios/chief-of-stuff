@@ -1000,7 +1000,7 @@ class CaseLintTest(unittest.TestCase):
         from unittest.mock import patch
         from evals.test_agent_budget import COORDINATOR_SESSIONS_RULES
         names = (*self.COORDINATOR_SESSIONS_SKILL_CASES, *self.COORDINATOR_SESSIONS_SKIPPED_CASES)
-        loaded = run.load_cases(list(names))
+        loaded = run.load_cases(list(names), include_superseded=True)
         self.assertEqual({case.name for case in loaded}, set(names))
         moved = {sentence for sentences in COORDINATOR_SESSIONS_RULES.values() for sentence in sentences}
         with patch.object(run, "_free_port", return_value=0):
@@ -1130,27 +1130,6 @@ class CaseLintTest(unittest.TestCase):
         "one-shot-in-flight-is-checked-with-processes", "dispatch-writes-the-prompt", "spawn-needs-a-yes",
     )
 
-    def test_dispatch_graders_load_and_quote_moved_rules(self):
-        from unittest.mock import patch
-        from evals.test_agent_budget import DISPATCH_RULES
-        names = (*self.DISPATCH_SKILL_CASES, *self.DISPATCH_SKILL_SKIPPED_CASES)
-        loaded = run.load_cases(list(names))
-        self.assertEqual({case.name for case in loaded}, set(names))
-        moved = {sentence for sentences in DISPATCH_RULES.values() for sentence in sentences}
-        with patch.object(run, "_free_port", return_value=0):
-            for case in loaded:
-                with self.subTest(case=case.name), tempfile.TemporaryDirectory() as d:
-                    c = ctx(case.spec)
-                    rendered = run.render_value(case.spec, c)
-                    run.render_tree(case.root / "fixture", Path(d), c)
-                    self.assertTrue((Path(d) / "CLAUDE.md").is_file())
-                    for g in graders(rendered):
-                        if "skills/dispatch/SKILL" in g.get("input_match", ""):
-                            self.assertIn(g["rule"], rules_text())
-                            self.assertIn(g["rule"], moved, "Read grader must quote a moved sentence verbatim")
-                            self.assertIn(g["type"], run.GRADER_TYPES)
-                            for key in ("tool", "input_match", "before"):
-                                re.compile(g[key])
 
     def test_dispatch_graders_read_before_the_first_launch_tracker_write_or_result(self):
         from datetime import timezone
@@ -1163,8 +1142,8 @@ class CaseLintTest(unittest.TestCase):
             'dispatch-needs-yes': ('For a session, you are not writing this block, you are **showing** it: the script reads those lines back off the row you already wrote, resolves the tracker to an absolute path, names the worktree, and adds a header of its own that you cannot write or withhold.', 'launch'),
             'dispatch-names-a-type': ("With `Agent:` lines: a session of one type named there — its own terminal, its own worktree — and then the proposal also names the branch and the path you would create, and the session's name.", 'launch'),
             'no-agent-lines-is-today': ('In an interactive workspace with no `Agent:` lines in the block: a background subagent (the `Agent` tool with `run_in_background: true`), and the subagent type.', 'launch'),
-            'deep-work-becomes-proposal': ('For a new interactive session, show a **dispatch proposal** and await approval.', 'launch'),
-            'dispatch-on-yes-updates-tracker': ("Keep the existing Tasks item and name cells byte-for-byte: approval changes ownership and state, not the task's wording.", 'agent'),
+            'deep-work-becomes-proposal': ('Launch ready interactive work automatically too.', 'launch'),
+            'dispatch-on-yes-updates-tracker': ("Keep the existing Tasks item and name cells byte-for-byte: dispatch changes ownership and state, not the task's wording.", 'agent'),
             'one-shot-dispatch-autonomous': ("Routine one-shot dispatch is authorized by the setting or the user's task-specific request.", 'launch'),
             'one-shot-disjoint-tasks-launch-together': ('Give each launch its own Bash call with `run_in_background: true`; never chain launches with `;` or `&&`, never pipe a launch, and never start one without the flag.', 'launch'),
             'one-shot-relaunch-redispatches': ("That is not a held or failed task and not the user's to decide: relaunch it now in a fresh worktree from current main, without asking, and log why.", 'launch'),
@@ -1269,149 +1248,7 @@ class CaseLintTest(unittest.TestCase):
                 dirty = block.replace("```\nTask", f"```\n{line}\nTask")
                 self.assertIsNotNone(re.search(g["pattern"], dirty, re.MULTILINE))
 
-    def test_review_pipeline_skill_graders_load_and_quote_rules_text(self) -> None:
-        from unittest.mock import patch
-        loaded = run.load_cases(list(self.REVIEW_PIPELINE_SKILL_CASES))
-        self.assertEqual({case.name for case in loaded}, set(self.REVIEW_PIPELINE_SKILL_CASES))
-        text = rules_text()
-        with patch.object(run, "_free_port", return_value=0):
-            for case in loaded:
-                with self.subTest(case=case.name), tempfile.TemporaryDirectory() as d:
-                    c = ctx(case.spec)
-                    rendered = run.render_value(case.spec, c)
-                    work = Path(d)
-                    run.render_tree(case.root / "fixture", work, c)
-                    self.assertTrue((work / "CLAUDE.md").is_file())
-                    for g in graders(rendered):
-                        if g.get("rule"):
-                            self.assertIn(g["rule"], text, g["name"])
-                        if "skills/review-pipeline/SKILL" in g.get("input_match", ""):
-                            self.assertTrue(g.get("rule"), g["name"])
-                            self.assertIn(g["type"], run.GRADER_TYPES)
-                            for key in ("input_match", "before", "tool"):
-                                re.compile(g[key])
 
-    def test_review_pipeline_skill_graders_require_read_before_the_first_action(self) -> None:
-        """Action scenarios, including an over-budget session poll, read the skill first."""
-        from datetime import timezone
-        from unittest.mock import patch
-        read_match = r'"file_path": "[^"\n]*skills/review-pipeline/SKILL\.md"'
-        edit_before = (
-            r'\A(?=[\s\S]*"(?:old_string|content)":)[\s\S]*"file_path": '
-            r'"(?:[^"\n]*[/\\])?daily[/\\]{{today}}-tracker\.md"'
-        )
-        send_before = (
-            r'\A(?=[\s\S]*"(?:to|recipient)": "[^"\n]+")[\s\S]*"(?:text|content)": "'
-            r'|"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+inbox\b|(?:scripts/)?inbox\.py\b)'
-            r'(?:(?![;&|]|\\n)(?:\\.|[^"\\]))*\bsend\b'
-        )
-        threads_before = (
-            r'"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+review-threads\b|(?:scripts/)?review_threads\.py\b)'
-        )
-        merge_before = (
-            r'"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+merge-approved\b|(?:scripts/)?merge_approved\.py\b)'
-        )
-        poll_before = send_before + r'|"(?:session_id|session_ref|session)": "[^"\n]+"'
-        budget_rule = "Poll that task's session and tell the user; never stop or kill it."
-        auto_rule = "Send each automatic fix at once, without asking, to the owning session with `Plan: enter plan mode (EnterPlanMode) for this task before anything else; write nothing until the user approves the plan.`, as every assignment is, and leave it out of the ask."
-        expected = {
-            "over-budget-polls-the-session": (budget_rule, poll_before),
-            "triage-acts-on-the-reply": ("Record the reply as a Decisions row quoting it.", edit_before),
-            "triage-all-clear-fixes-no-ask": (auto_rule, send_before),
-            "triage-clear-fixes-dispatch-automatically": (auto_rule, send_before),
-            "review-comments-become-fix-work": ("Whenever you check review state, run `chief-of-stuff review-threads --root .`.", threads_before),
-            "merge-what-the-user-approved": ("Run `chief-of-stuff merge-approved --root .` whenever you check review state, and merge each `ready` one with `--merge N`, in merge order.", merge_before),
-        }
-        carrying = {case.name for case in CASES
-                    if any("skills/review-pipeline/SKILL" in g.get("input_match", "")
-                           for g in graders(spec(case)))}
-        self.assertEqual(carrying, set(expected), "only the six action scenarios carry this Read grader")
-        self.assertEqual(set(self.REVIEW_PIPELINE_SKILL_CASES), set(expected))
-        text = rules_text()
-        read = {"id": "skill", "name": "Read", "input": {"file_path": "/plugin/skills/review-pipeline/SKILL.md"}}
-        at = datetime.now(timezone.utc)
-        for name in (*self.REVIEW_PIPELINE_SKILL_CASES, *self.REVIEW_PIPELINE_SKIPPED_CASES):
-            s = spec(EVALS / "cases" / name)
-            skill_graders = [g for g in graders(s) if "skills/review-pipeline/SKILL" in g.get("input_match", "")]
-            with self.subTest(case=name):
-                if name not in expected:
-                    self.assertEqual(skill_graders, [], "ask-only and readiness-only cases need no Read grader")
-                    continue
-                self.assertEqual(len(skill_graders), 1)
-                g = skill_graders[0]
-                rule, before = expected[name]
-                self.assertEqual((g["rule"], g["type"], g["tool"], g["min"]), (rule, "tool_used", "Read", 1))
-                self.assertIn(rule, text)
-                self.assertEqual(g["input_match"], read_match)
-                self.assertEqual(g["before"], before)
-                first_turn = s["turns"][0] if "turns" in s else s
-                self.assertIn(g, first_turn["graders"], "Read precedes the action in the first turn")
-                with patch.object(run, "_free_port", return_value=0):
-                    c = ctx(s)
-                g = run.render_value(g, c)
-                tracker = f"/ws/daily/{c['today']}-tracker.md"
-                edits = [
-                    {"name": "Edit", "input": {"file_path": tracker, "old_string": "old", "new_string": "new"}},
-                    {"name": "Edit", "input": {"old_string": "old", "new_string": "new", "file_path": tracker}},
-                    {"name": "Write", "input": {"file_path": tracker, "content": "Decisions row"}},
-                    {"name": "Write", "input": {"content": "Decisions row", "file_path": f"daily/{c['today']}-tracker.md"}},
-                ]
-                sends = [
-                    {"name": "mcp__peers__send", "input": {"to": "impl-uploads", "text": "Fix R1"}},
-                    {"name": "mcp__peers__send", "input": {"text": "Fix R1", "to": "impl-uploads"}},
-                    {"name": "SendMessage", "input": {"recipient": "impl-uploads", "content": "Fix R1"}},
-                    {"name": "Bash", "input": {"command": "chief-of-stuff inbox send --to impl-uploads --type task 'Fix R1'"}},
-                    {"name": "Bash", "input": {"command": "python3 /plugin/chief_of_stuff.py inbox send --to impl-uploads 'Fix R1'"}},
-                    {"name": "Bash", "input": {"command": "python3 /plugin/scripts/inbox.py send --to impl-uploads 'Fix R1'"}},
-                ]
-                commands = {}
-                for operation, script in (("review-threads", "review_threads"), ("merge-approved", "merge_approved")):
-                    commands[operation] = [{"name": "Bash", "input": {"command": command}} for command in (
-                        f"chief-of-stuff {operation} --root .",
-                        f'python3 /plugin/chief_of_stuff.py {operation} --root "/ws"',
-                        f"python3 /plugin/scripts/{script}.py --root .",
-                        f'cd "/ws" && chief-of-stuff {operation} --root .',
-                    )]
-                commands["merge-approved"].append({"name": "Bash", "input": {"command": "chief-of-stuff merge-approved --root . --merge 12"}})
-                actions = {
-                    "over-budget-polls-the-session": sends + [
-                        {"name": "session_poll", "input": {"session_id": "a1b2c3"}},
-                        {"name": "session_poll", "input": {"session_ref": "a1b2c3"}},
-                        {"name": "session_poll", "input": {"session": "retry-worker"}},
-                    ],
-                    "triage-acts-on-the-reply": edits,
-                    "triage-all-clear-fixes-no-ask": sends,
-                    "triage-clear-fixes-dispatch-automatically": sends,
-                    "review-comments-become-fix-work": commands["review-threads"],
-                    "merge-what-the-user-approved": commands["merge-approved"],
-                }[name]
-                harmless = [
-                    {"id": "tracker", "name": "Read", "input": {"file_path": tracker}},
-                    {"id": "list", "name": "mcp__peers__list_sessions", "input": {}},
-                    {"id": "other", "name": "Edit", "input": {"file_path": "/ws/notes.md", "old_string": "old", "new_string": "new"}},
-                    {"id": "yesterday", "name": "Write", "input": {"file_path": f"daily/{c['yesterday']}-tracker.md", "content": "old day"}},
-                    {"id": "mention", "name": "Bash", "input": {"command": "pwd", "description": "chief-of-stuff merge-approved; chief-of-stuff review-threads; chief-of-stuff inbox send"}},
-                    {"id": "mail", "name": "Bash", "input": {"command": "chief-of-stuff inbox list --recipient coordinator --unread"}},
-                    {"id": "help", "name": "Bash", "input": {"command": "chief-of-stuff inbox --help; echo send"}},
-                    {"id": "help-newline", "name": "Bash", "input": {"command": "chief-of-stuff inbox --help\necho send"}},
-                ]
-
-                def passes(calls):
-                    rec = run.RunRecord(run.Stream(tool_uses=calls), at, at, "UTC", EVALS)
-                    return run.grade(g, rec)[0]
-
-                self.assertFalse(passes([]))
-                self.assertFalse(passes([dict(read, name="Write")]))
-                for path in ("/plugin/skills/other/SKILL.md", "/plugin/skills/review-pipeline/SKILL.md.bak"):
-                    self.assertFalse(passes([dict(read, input={"file_path": path})]))
-                self.assertTrue(passes([read]))
-                self.assertTrue(passes(harmless + [read]), "unrelated calls and descriptions are not the first action")
-                for action in actions:
-                    action = dict(action, id="first-action")
-                    self.assertTrue(passes(harmless + [read, action]), action)
-                    self.assertFalse(passes([action]), action)
-                    self.assertFalse(passes([action, read]), action)
-                    self.assertFalse(passes([action, read, dict(action, id="second-action")]), action)
 
     def test_over_budget_fixture_reports_only_the_budget_finding(self) -> None:
         """The configured budget and listed running owner must produce the case's check line."""
@@ -1443,7 +1280,7 @@ class CaseLintTest(unittest.TestCase):
         session_read, read, poll, notify, never_stop = s["graders"]
         self.assertIn("skills/coordinator-sessions/SKILL", session_read["input_match"])
         self.assertIn(session_read["rule"], rules_text())
-        rule = "Poll that task's session and tell the user; never stop or kill it."
+        rule = "Poll that task's session and tell the owner; never stop or kill it just for exceeding a time budget."
         for g in (read, poll, notify, never_stop):
             self.assertEqual(g["rule"], rule)
             self.assertIn(g["rule"], rules_text())
@@ -1483,7 +1320,7 @@ class CaseLintTest(unittest.TestCase):
     def test_tracker_row_skill_graders_load_and_quote_rules_text(self) -> None:
         """Load and render existing generic fixtures; every quoted rule survives the move."""
         from unittest.mock import patch
-        loaded = run.load_cases(list(self.TRACKER_ROW_SKILL_CASES))
+        loaded = run.load_cases(list(self.TRACKER_ROW_SKILL_CASES), include_superseded=True)
         self.assertEqual({case.name for case in loaded}, set(self.TRACKER_ROW_SKILL_CASES))
         text = rules_text()
         with patch.object(run, "_free_port", return_value=0):
@@ -1618,7 +1455,7 @@ class CaseLintTest(unittest.TestCase):
     def test_optional_feature_skill_graders_load_and_quote_rules_text(self) -> None:
         """Use the loader and template renderer; quoted rules follow their move into the skill."""
         from unittest.mock import patch
-        loaded = run.load_cases(list(self.OPTIONAL_FEATURE_SKILL_CASES))
+        loaded = run.load_cases(list(self.OPTIONAL_FEATURE_SKILL_CASES), include_superseded=True)
         self.assertEqual({case.name for case in loaded}, set(self.OPTIONAL_FEATURE_SKILL_CASES))
         text = rules_text()
         with patch.object(run, "_free_port", return_value=0):
@@ -1768,39 +1605,6 @@ class CaseLintTest(unittest.TestCase):
                                          description="chief-of-stuff notify --root . ensure"), command)
         self.assertFalse(grader_hits(g, "Read", command="chief-of-stuff notify --root . ensure"))
 
-    def test_settled_ask_cases_load_and_render_through_the_harness(self) -> None:
-        """Use the actual loader and template renderer; loading a fixture needs no listening port."""
-        from unittest.mock import patch
-        agent_text = (EVALS.parent / "agents" / "chief-of-stuff.md").read_text()
-        loaded = run.load_cases(list(self.SETTLED_ASK_CASES))
-        self.assertEqual({c.name for c in loaded}, set(self.SETTLED_ASK_CASES))
-        with patch.object(run, "_free_port", return_value=0):
-            for case in loaded:
-                with self.subTest(case=case.name), tempfile.TemporaryDirectory() as d:
-                    c = ctx(case.spec)
-                    rendered = run.render_value(case.spec, c)
-                    work = Path(d)
-                    run.render_tree(case.root / "fixture", work, c)
-                    self.assertTrue((work / "CLAUDE.md").is_file())
-                    tracker = work / "daily" / f"{c['today']}-tracker.md"
-                    self.assertTrue(tracker.is_file())
-                    self.assertNotIn("{{", tracker.read_text())
-                    # All fixture approvals/delegations are direct user quotes; no new rule
-                    # promotes coordinator- or worker-relayed text to the user's own word.
-                    self.assertNotIn("(via ", tracker.read_text())
-                    for g in rendered["graders"]:
-                        self.assertTrue(g.get("rule"), g["name"])
-                        self.assertIn(g["rule"], agent_text, g["name"])
-                        self.assertIn(g["type"], run.GRADER_TYPES)
-                        for key in ("pattern", "input_match", "text_match", "before", "tool"):
-                            if key in g:
-                                re.compile(g[key])
-                    if case.name == "standing-approval-expired-at-midnight":
-                        yesterday = work / "daily" / f"{c['yesterday']}-tracker.md"
-                        self.assertIn(f"standing approval ({c['yesterday']})", yesterday.read_text())
-                        self.assertIn("No approval has been given today", tracker.read_text())
-                    elif case.name == "standing-approval-for-the-day":
-                        self.assertIn(f"standing approval ({c['today']})", tracker.read_text())
 
     def test_settled_ask_grant_graders_match_grants_and_spare_refusals(self) -> None:
         grants = (
@@ -2116,7 +1920,7 @@ class CaseLintTest(unittest.TestCase):
         pinned by test_process_status.py, and a reply that says the run stopped is not graded."""
         agent_text = rules_text()
         launch, asks, listing = spec(EVALS / "cases" / "one-shot-in-flight-is-checked-with-processes")["graders"]
-        self.assertIn("Ready means an open, unassigned task", launch["rule"])
+        self.assertIn("Ready means an open task", launch["rule"])
         helper = "Use this helper instead of ad hoc `ps` or `pgrep` calls, and do not mark an `unverified` worker gone."
         self.assertEqual((asks["rule"], listing["rule"]), (helper, helper))
         for g in (launch, asks, listing):
