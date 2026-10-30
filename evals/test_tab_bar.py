@@ -149,8 +149,8 @@ def served(pending: int, answered: int, lead_counts: bool = False) -> dict[str, 
             try:
                 db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
                 db.upsert_item("github:example/repo#110", title="Await choice", human_review=True)
-                db.add_decision("github:example/repo#110", "scope", "First choice", None, "zach")
-                db.add_decision("github:example/repo#110", "design", "Second choice", None, "zach")
+                db.add_decision("github:example/repo#110", "scope", "First choice", None, "owner")
+                db.add_decision("github:example/repo#110", "design", "Second choice", None, "owner")
             finally:
                 db.engine.dispose()
         server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)
@@ -369,8 +369,8 @@ class LeadCountsTest(unittest.TestCase):
             try:
                 db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
                 db.upsert_item("github:example/repo#110", title="Await choice", human_review=True)
-                db.add_decision("github:example/repo#110", "scope", "First choice")
-                db.add_decision("github:example/repo#110", "design", "Second choice")
+                db.add_decision("github:example/repo#110", "scope", "First choice", decided_by="owner")
+                db.add_decision("github:example/repo#110", "design", "Second choice", decided_by="owner")
                 row_id = next(r.id for r in db.decisions())
             finally:
                 db.engine.dispose()
@@ -415,7 +415,7 @@ class LeadCountsTest(unittest.TestCase):
                 db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
                 db.upsert_item("github:example/repo#110", title="Choice", forge_state="open")
                 db.upsert_item("github:example/repo#111", title="Closed", forge_state="closed")
-                row = db.add_decision("github:example/repo#110", "scope", "Open choice")
+                row = db.add_decision("github:example/repo#110", "scope", "Open choice", decided_by="owner")
                 db.add_decision("github:example/repo#110", "design", "Answered choice", answer="yes", decided_by="user")
                 db.add_decision("github:example/repo#111", "scope", "Closed issue choice")
             finally:

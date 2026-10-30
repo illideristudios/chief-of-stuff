@@ -664,7 +664,7 @@ class StoreIndexTest(unittest.TestCase):
 
     def test_only_a_decision_needs_owner_names_waits_on_the_owner_or_counts_as_pending(self):
         """C30 (#1152): an unanswered newest row whose decided_by is empty (a trio retry, or an old permission row)
-        waits on no one; only a row decided_by zach does."""
+        waits on no one; only a row routed to the owner does."""
         import decision_actions
         key = "github:example/repo#10"
         self.store.upsert_item(key, title="Auth flow", stage="implement", forge_state="open")
@@ -674,7 +674,7 @@ class StoreIndexTest(unittest.TestCase):
         legacy = self.store.add_decision(key, "permission", "Permission requested for Read",
                                          record={"options": ["allow", "deny"], "why": "outside the worktree"},
                                          asked_at="2026-09-26T01:05:00-05:00")
-        owner = self.store.add_decision(key, "scope", "Split auth token refresh?", None, "zach",
+        owner = self.store.add_decision(key, "scope", "Split auth token refresh?", None, "owner",
                                         asked_at="2026-09-26T01:10:00-05:00")
         data = self.page_data()
         nav = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())

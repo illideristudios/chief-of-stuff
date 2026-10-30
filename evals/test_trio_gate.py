@@ -259,6 +259,14 @@ class GateTest(unittest.TestCase):
         self.store.add_decision(KEY, settled.topic, settled.question, settled.answer, settled.decided_by, settled.record)
         self.assertIsNone(decision_escalation.answer_ask(self.store.decisions(KEY), ask))
 
+    def test_owner_role_and_legacy_owner_rows_route_identically(self):
+        legacy = decision_escalation.DecisionUpdate("design", "Split the parser?", None, "zach", {
+            "decision": {"stage": "implement", "attempt": 2, "instance": "parser"}})
+        role = replace(legacy, decided_by="owner")
+        self.assertIsNotNone(decision_escalation.needs_owner([role]))
+        self.assertEqual(decision_escalation.needs_owner([legacy]), decision_escalation.needs_owner([role]))
+        self.assertIsNone(decision_escalation.needs_owner([replace(role, answer="Keep")]))
+
     def test_needs_owner_reads_only_the_latest_row_for_a_decision_attempt(self):
         row = decision_escalation.DecisionUpdate("plan", "Gate?", None, "zach", {
             "error": "gate unavailable", "decision": {

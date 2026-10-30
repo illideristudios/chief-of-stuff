@@ -344,7 +344,7 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, workflow="build", stage="review", forge_state="open", title="Upload size limit")
         self.db.upsert_item(KEY2, workflow="build", stage="implement", forge_state="open", title="Cache warmup")
-        self.d_open = self.db.add_decision(KEY, "design", "Split upload parser?", None, "zach")
+        self.d_open = self.db.add_decision(KEY, "design", "Split upload parser?", None, "owner")
         self.d_blocked = self.db.add_decision(KEY2, "plan", "Use Redis for cache?")
         self.db.add_decision(KEY2, "plan", "Use Redis for cache?", "Yes, use Redis", "user", {"status": "answered"})
         self.db.add_decision(KEY2, "plan", "Use Redis for cache?", "Yes, use Redis", "user",
@@ -602,7 +602,7 @@ class StorePagesAndRoutesTest(unittest.TestCase):
             reason="Edge case needs human input", changes="src/cache.py",
             recorded_at=(NOW - timedelta(minutes=10)).isoformat(),
         )
-        self.db.add_decision(KEY2, "design", "Approve cache eviction policy?", None, "zach")
+        self.db.add_decision(KEY2, "design", "Approve cache eviction policy?", None, "owner")
 
     def test_live_workers_and_pending_decision_are_visible_on_every_surface(self):
         self.db.add_decision(KEY, "design", "Choose a parser")

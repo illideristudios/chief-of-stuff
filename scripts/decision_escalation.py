@@ -116,7 +116,8 @@ def needs_owner(rows: Sequence[Any]) -> NeedsOwner | None:
     decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
     if is_gate(row, decision):  # Legacy coordinator gates and saved owner waits are retired.
         return None
-    if (row.answer or "").strip() or row.decided_by != "zach":
+    # New callers use the role; saved consultations keep their historical owner identity.
+    if (row.answer or "").strip() or row.decided_by not in ("owner", "zach"):
         return None
     stage, attempt = decision.get("stage", ""), decision.get("attempt", 0)
     return NeedsOwner(identity(row), stage, attempt, str(record.get("error") or row.question))
