@@ -202,6 +202,15 @@ GH = GitHubBacklog(repo="o/app")
 GL = Backlog(host="https://gl.example", project="grp/app")
 
 
+def owned(case: unittest.TestCase, files: dict[str, str], origin: str = "https://github.com/o/app.git") -> Path:
+    """A temporary clone with `files` committed and a synthetic `origin`. No network."""
+    workspace = Path(tempfile.mkdtemp())
+    case.addCleanup(shutil.rmtree, workspace, True)
+    clone = make_repo.build(workspace, {"files": files})
+    make_repo.git(["remote", "set-url", "origin", origin], clone)
+    return clone
+
+
 def refs(text: str, forge=None, root=None, at=None) -> str:
     return dp._md(text, dp.Linker(forge, root, at))
 
@@ -210,8 +219,10 @@ class LinkTest(unittest.TestCase):
     """References in the text link to the configured forge; nothing is linked that the forge cannot place."""
 
     def test_github(self):
+        root = owned(self, {"src/cache/pool.py": "x\n", "config/db.toml": "x = 1\n", "src/gateway/keep.txt": "k\n",
+                            "docs/architecture.md": "x\n"})
         out = refs("#12, !58, a41c9e2, src/cache/pool.py:24-58, config/db.toml:14, pipeline #8812, src/gateway/ "
-                   "and docs/architecture.md#connection-budgets", GH)
+                   "and docs/architecture.md#connection-budgets", GH, root)
         for kind, href, label in (
                 ("issue", "https://github.com/o/app/issues/12", "#12"),
                 ("PR", "https://github.com/o/app/pull/58", "!58"),
@@ -226,7 +237,8 @@ class LinkTest(unittest.TestCase):
                 self.assertIn(f'<a class="ref" data-k="{kind}" href="{href}" target="_blank" rel="noopener">{label}</a>', out)
 
     def test_gitlab(self):
-        out = refs("#12, !58, !58#note_2291, a41c9e2, src/cache/pool.py:24-58, pipeline #8812", GL)
+        root = owned(self, {"src/cache/pool.py": "x\n"}, "https://gl.example/grp/app.git")
+        out = refs("#12, !58, !58#note_2291, a41c9e2, src/cache/pool.py:24-58, pipeline #8812", GL, root)
         for kind, href in (("issue", "https://gl.example/grp/app/-/issues/12"),
                            ("MR", "https://gl.example/grp/app/-/merge_requests/58"),
                            ("note", "https://gl.example/grp/app/-/merge_requests/58#note_2291"),
@@ -244,27 +256,276 @@ class LinkTest(unittest.TestCase):
         self.assertEqual(refs(text, GH), text)
 
     def test_a_code_span_that_is_one_reference_links(self):
-        self.assertEqual(refs("`src/app.py:3`", GH),
+        root = owned(self, {"src/app.py": "x\n"})
+        self.assertEqual(refs("`src/app.py:3`", GH, root),
                          '<a class="ref" data-k="code" href="https://github.com/o/app/blob/HEAD/src/app.py#L3" target="_blank" rel="noopener">src/app.py:3</a>')
-        self.assertEqual(refs("`s3://bucket` and `make test`", GH), "<code>s3://bucket</code> and <code>make test</code>")
+        self.assertEqual(refs("`s3://bucket` and `make test`", GH, root), "<code>s3://bucket</code> and <code>make test</code>")
 
     def test_sections_and_symbols_resolve_against_a_local_copy(self):
-        root = Path(tempfile.mkdtemp())
-        (root / "docs").mkdir()
-        (root / "docs" / "architecture.md").write_text("# Arch\n\n## 4.1 Queues\n\n## 4.2 Connection budgets\n")
-        (root / "src").mkdir()
-        (root / "src" / "pool.py").write_text("import os\n\n\ndef warm(n):\n    pass\n")
+        root = owned(self, {
+            "docs/architecture.md": "# Arch\n\n## 4.1 Queues\n\n## 4.2 Connection budgets\n",
+            "src/pool.py": "import os\n\n\ndef warm(n):\n    pass\n",
+        })
         self.assertIn('href="https://github.com/o/app/blob/HEAD/docs/architecture.md#42-connection-budgets" target="_blank" rel="noopener">'
                       'docs/architecture.md §4.2</a>', refs("docs/architecture.md §4.2", GH, root))
         self.assertIn('href="https://github.com/o/app/blob/HEAD/src/pool.py#L4" target="_blank" rel="noopener">src/pool.py:warm</a>',
                       refs("src/pool.py:warm", GH, root))
-        # Without the copy the file is still the right place; the section is not guessed.
-        self.assertIn('href="https://github.com/o/app/blob/HEAD/docs/architecture.md" target="_blank" rel="noopener">docs/architecture.md §4.2</a>',
-                      refs("docs/architecture.md §4.2", GH))
+        # Without a workspace the repository is unknown, so the reference stays text.
+        self.assertEqual(refs("docs/architecture.md §4.2", GH), "docs/architecture.md §4.2")
 
     def test_a_pinned_reference_links_at_its_commit(self):
-        self.assertIn("https://github.com/o/app/blob/a41c9e2/src/cache/pool.py#L24-L58",
-                      refs("src/cache/pool.py:24-58", GH, at="a41c9e2"))
+        root = owned(self, {"src/cache/pool.py": "x\n"})
+        sha = make_repo.git(["rev-parse", "HEAD"], root)
+        self.assertIn(f"https://github.com/o/app/blob/{sha}/src/cache/pool.py#L24-L58",
+                      refs("src/cache/pool.py:24-58", GH, root, at=sha))
+
+
+class OwnershipTest(unittest.TestCase):
+    """A file reference links only when the workspace file is committed in the backlog's own repository."""
+
+    def temp(self) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        return root
+
+    def tree(self, files: dict[str, str], origin: str | None = "https://github.com/o/app.git", **spec) -> tuple[Path, Path]:
+        workspace = self.temp()
+        clone = make_repo.build(workspace, {"files": files, **spec})
+        if origin is not None:
+            make_repo.git(["remote", "set-url", "origin", origin], clone)
+        return workspace, clone
+
+    def repo(self, files: dict[str, str], origin: str | None = "https://github.com/o/app.git", **spec) -> Path:
+        return self.tree(files, origin, **spec)[1]
+
+    def test_a_workspace_file_outside_any_repository_stays_text(self):
+        # The reported decision: a settings file in a non-git workspace, backlog an issues-only tracker.
+        root = self.temp()
+        (root / "chief-of-stuff.toml").write_text("[workers]\nclaude_profile = \"default\"\n")
+        tracker = Backlog(host="https://forge.example", project="team/tracker")
+        label = "the [workers] claude_profile line"
+        page = dp.render(dp.parse(decision(
+            ask="See chief-of-stuff.toml:54 and `chief-of-stuff.toml:54`.",
+            references=[{"kind": "code", "value": "chief-of-stuff.toml:54", "label": label},
+                        {"kind": "issue", "value": "#12", "label": "the tracker"}],
+        )), "2026-09-25", tracker, root)
+        self.assertIn("chief-of-stuff.toml:54", page)
+        self.assertIn(label, page)
+        self.assertIn('<span class="cap">code</span>', page)
+        self.assertIn("<code>chief-of-stuff.toml:54</code>", page)
+        self.assertNotIn("forge.example/team/tracker/-/blob/", page)
+        self.assertNotRegex(page, r"<a\b[^>]*>[^<]*chief-of-stuff\.toml:54")
+        self.assertIn('href="https://forge.example/team/tracker/-/issues/12"', page)
+
+    def test_uncommitted_missing_and_unrooted_paths_stay_text(self):
+        root = self.repo({"src/app.py": "x\n"})
+        (root / "loose.toml").write_text("x\n")
+        (root / "notes").mkdir()
+        (root / "notes" / "a.txt").write_text("a\n")
+        (root / "staged.py").write_text("y\n")
+        make_repo.git(["add", "staged.py"], root)
+        for name, text in (("untracked", "loose.toml:4"), ("untracked directory", "notes/"),
+                           ("missing", "src/missing.py:3"), ("staged", "staged.py:1"),
+                           ("unmatched suffix", "extra/src/app.py:1")):
+            with self.subTest(name=name):
+                out = refs(text, GH, root)
+                self.assertIn(text, out)
+                self.assertNotRegex(out, r"<a\b")
+        self.assertNotRegex(refs("src/app.py:1", GH), r"<a\b")
+        self.assertIn("src/app.py:1", refs("src/app.py:1", GH))
+
+    def test_a_repository_that_is_not_the_backlog_stays_text(self):
+        for name, origin in (("no origin", None), ("local origin", False),
+                             ("other project", "https://github.com/o/other.git"),
+                             ("other host", "https://files.example/o/app.git")):
+            with self.subTest(name=name):
+                root = self.repo({"src/app.py": "x\n"}, origin=None if origin is False else origin)
+                if name == "no origin":
+                    make_repo.git(["remote", "remove", "origin"], root)
+                out = refs("src/app.py:1", GH, root)
+                self.assertIn("src/app.py:1", out)
+                self.assertNotRegex(out, r"<a\b")
+
+    def test_a_bad_revision_or_git_failure_stays_text(self):
+        root = self.repo({"src/app.py": "x\n"})
+        for pin in ("nope..", "notacommit", "HEAD~1"):
+            with self.subTest(pin=pin):
+                out = refs("src/app.py:1", GH, root, at=pin)
+                self.assertIn("src/app.py:1", out)
+                self.assertNotIn("blob/", out)
+        with mock.patch("git_trees.git", return_value=(128, "fatal")):
+            out = refs("src/app.py:1", GH, root)
+        self.assertIn("src/app.py:1", out)
+        self.assertNotIn("blob/", out)
+        with mock.patch("git_trees.git", side_effect=subprocess.TimeoutExpired("git", 1)):
+            page = dp.render(dp.parse(decision(references=[{"kind": "code", "value": "src/app.py:1", "label": "pool"}])),
+                             "2026-09-25", GH, root)
+        self.assertIn("src/app.py:1", page)
+        self.assertIn("pool", page)
+        self.assertNotIn("blob/", page)
+        with mock.patch("git_trees.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 1)):
+            page = dp.render(dp.parse(decision(references=[{"kind": "code", "value": "src/app.py:1", "label": "pool"}])),
+                             "2026-09-25", GH, root)
+        self.assertIn("src/app.py:1", page)
+        self.assertNotIn("blob/", page)
+
+    def test_a_pin_uses_only_the_tree_at_that_revision(self):
+        root = self.repo({"old.py": "v1\n"})
+        old = make_repo.git(["rev-parse", "HEAD"], root)
+        make_repo.git(["rm", "old.py"], root)
+        (root / "new.py").write_text("v2\n")
+        make_repo.git(["add", "-A"], root)
+        make_repo.git(["commit", "-m", "swap"], root)
+        self.assertFalse((root / "old.py").exists())
+        self.assertIn(f"blob/{old}/old.py#L1", refs("old.py:1", GH, root, at=old))
+        self.assertNotRegex(refs("old.py:1", GH, root), r"<a\b")
+        self.assertNotIn("blob/", refs("new.py:1", GH, root, at=old))
+        self.assertIn("blob/HEAD/new.py#L1", refs("new.py:1", GH, root))
+
+    def test_traversal_and_symlink_escapes_stay_text_and_origins_do_not_leak(self):
+        outside = self.temp()
+        (outside / "secret.py").write_text("TOKEN_SECRET\n")
+        root = self.repo({"src/app.py": "x\n"}, origin="https://user:s3cret@github.com/o/app.git")
+        (root / "escape.py").symlink_to(outside / "secret.py")
+        make_repo.git(["add", "escape.py"], root)
+        make_repo.git(["commit", "-m", "symlink"], root)
+        for text in ("../secret.py:1", "escape.py:1", "escape.py:warm", f"{root}/src/app.py:1"):
+            with self.subTest(text=text):
+                out = refs(text, GH, root)
+                self.assertNotIn("blob/", out)
+                self.assertNotIn("TOKEN_SECRET", out)
+                self.assertNotIn("s3cret", out)
+                self.assertNotIn(str(outside), out)
+        linked = refs("src/app.py:1", GH, root)
+        self.assertIn("blob/HEAD/src/app.py#L1", linked)
+        self.assertNotIn("s3cret", linked)
+        hostile = self.repo({"src/app.py": "x\n"}, origin='https://user:s3cret@evil.example/o/app.git"><script>')
+        out = refs("src/app.py:1", GH, hostile)
+        self.assertNotIn("s3cret", out)
+        self.assertNotIn("<script>", out)
+        self.assertNotIn("blob/", out)
+
+    def test_https_ssh_and_scp_origins_match_the_backlog(self):
+        cases = (
+            (GH, "https://github.com/o/app.git", "https://github.com/o/app/blob/HEAD/src/app.py#L1"),
+            (GH, "https://github.com/o/app", "https://github.com/o/app/blob/HEAD/src/app.py#L1"),
+            (GH, "ssh://git@github.com/o/app.git", "https://github.com/o/app/blob/HEAD/src/app.py#L1"),
+            (GH, "git@github.com:o/app.git", "https://github.com/o/app/blob/HEAD/src/app.py#L1"),
+            (GL, "https://gl.example/grp/app.git", "https://gl.example/grp/app/-/blob/HEAD/src/app.py#L24-58"),
+            (GL, "ssh://git@gl.example/grp/app.git", "https://gl.example/grp/app/-/blob/HEAD/src/app.py#L24-58"),
+            (GL, "git@gl.example:grp/app.git", "https://gl.example/grp/app/-/blob/HEAD/src/app.py#L24-58"),
+        )
+        for forge, origin, href in cases:
+            with self.subTest(origin=origin):
+                root = self.repo({"src/app.py": "x\n", "docs/architecture.md": "x\n"}, origin=origin)
+                text = "src/app.py:1" if forge is GH else "src/app.py:24-58"
+                self.assertIn(href, refs(text, forge, root))
+
+    def test_a_committed_file_directory_section_and_symbol_link(self):
+        root = self.repo({
+            "src/app.py": "x\n",
+            "src/gateway/keep.txt": "k\n",
+            "docs/architecture.md": "# Arch\n\n## 4.2 Connection budgets\n",
+            "src/pool.py": "import os\n\n\ndef warm(n):\n    pass\n",
+        })
+        out = refs("src/app.py:1, src/gateway/, docs/architecture.md#connection-budgets", GH, root)
+        self.assertIn("blob/HEAD/src/app.py#L1", out)
+        self.assertIn("tree/HEAD/src/gateway/", out)
+        self.assertIn("blob/HEAD/docs/architecture.md#connection-budgets", out)
+        self.assertIn("#42-connection-budgets", refs("docs/architecture.md §4.2", GH, root))
+        self.assertIn("src/pool.py#L4", refs("src/pool.py:warm", GH, root))
+        self.assertEqual(refs("docs/architecture.md §4.2", GH), "docs/architecture.md §4.2")
+
+    def test_a_submodule_stays_text(self):
+        child = self.repo({"inside.txt": "c\n"}, origin="https://github.com/o/child.git")
+        parent = self.repo({"src/app.py": "x\n"})
+        sha = make_repo.git(["rev-parse", "HEAD"], child)
+        make_repo.git(["update-index", "--add", "--cacheinfo", f"160000,{sha},vendor"], parent)
+        make_repo.git(["commit", "-m", "gitlink"], parent)
+        out = refs("vendor/", GH, parent)
+        self.assertIn("vendor/", out)
+        self.assertNotRegex(out, r"<a\b")
+
+    def test_nesting_clone_prefixes_and_worktrees(self):
+        parent = self.temp()
+        make_repo.git(["init", "--initial-branch=main"], parent)
+        child = parent / "workspace"
+        child.mkdir()
+        (child / "chief-of-stuff.toml").write_text("x\n")
+        make_repo.git(["add", "workspace/chief-of-stuff.toml"], parent)
+        make_repo.git(["commit", "-m", "settings"], parent)
+        make_repo.git(["remote", "add", "origin", "https://forge.example/team/tracker.git"], parent)
+        tracker = Backlog(host="https://forge.example", project="team/tracker")
+        self.assertNotRegex(refs("chief-of-stuff.toml:1", tracker, child), r"<a\b")
+
+        workspace, clone = self.tree({"src/app.py": "print(1)\n"}, origin="https://github.com/other/nope.git")
+        nested = clone / "vendor"
+        nested.mkdir()
+        make_repo.git(["init", "--initial-branch=main"], nested)
+        (nested / "lib.py").write_text("x\n")
+        make_repo.git(["add", "lib.py"], nested)
+        make_repo.git(["commit", "-m", "lib"], nested)
+        make_repo.git(["remote", "add", "origin", "https://github.com/o/app.git"], nested)
+        self.assertNotRegex(refs("lib.py:1", GH, clone), r"<a\b")
+        self.assertNotRegex(refs("src/app.py:1", GH, clone), r"<a\b")
+        nested_link = refs("vendor/lib.py:1", GH, clone)
+        self.assertIn('href="https://github.com/o/app/blob/HEAD/lib.py#L1"', nested_link)
+        self.assertIn(">vendor/lib.py:1</a>", nested_link)
+        self.assertNotIn("blob/HEAD/vendor/", nested_link)
+
+        workspace, clone = self.tree({"src/app.py": "x\n"})
+        prefixed = refs("repo/src/app.py:1", GH, workspace)
+        self.assertIn('href="https://github.com/o/app/blob/HEAD/src/app.py#L1"', prefixed)
+        self.assertIn(">repo/src/app.py:1</a>", prefixed)
+        self.assertNotIn("blob/HEAD/repo/", prefixed)
+
+        workspace, clone = self.tree({"src/app.py": "def warm():\n    pass\n"},
+                                     worktrees=[{"name": "wt", "branch": "feature"}])
+        self.assertIn("blob/HEAD/src/app.py#L1", refs("src/app.py:warm", GH, workspace / "trees" / "wt"))
+
+    def test_a_symlink_loop_leaves_file_references_as_text(self):
+        root = self.repo({"src/app.py": "x = 1\n"})
+        (root / "loop").symlink_to("loop")
+        html = refs("loop/app.py:1", GH, root)
+        self.assertNotIn("<a", html)
+        self.assertIn("loop/app.py:1", html)
+
+    def test_one_render_looks_up_a_path_once_and_the_next_render_sees_a_new_origin(self):
+        import git_trees
+        root = self.repo({"src/app.py": "x = 1\n", "docs/note.md": "note\n"})
+        sha = make_repo.git(["rev-parse", "HEAD"], root)
+        calls = {"ls": 0, "cfg": 0}
+        real_git, real_run = git_trees.git, subprocess.run
+
+        def counting_git(args, cwd, view=None):
+            if args[:1] == ["ls-tree"]:
+                calls["ls"] += 1
+            return real_git(args, cwd, view)
+
+        def counting_run(args, **kwargs):
+            if isinstance(args, (list, tuple)) and "remote.origin.url" in args:
+                calls["cfg"] += 1
+            return real_run(args, **kwargs)
+
+        body = dict(ask="Check src/app.py:1 and src/app.py:1.", references=[
+            {"kind": "code", "value": "src/app.py:1", "label": "the pool"},
+            {"kind": "code", "value": "src/app.py:1", "label": "pinned", "at": sha},
+            {"kind": "doc", "value": "docs/note.md:2", "label": "the note"},
+        ])
+        with mock.patch("git_trees.git", counting_git), \
+                mock.patch("git_trees.subprocess.run", counting_run):
+            page = dp.render(dp.parse(decision(**body)), "2026-09-25", GH, root)
+            self.assertEqual(calls, {"ls": 3, "cfg": 1}, page)
+            self.assertIn("blob/HEAD/src/app.py#L1", page)
+            self.assertIn(f"blob/{sha}/src/app.py#L1", page)
+            self.assertIn("blob/HEAD/docs/note.md#L2", page)
+            calls["ls"] = calls["cfg"] = 0
+            make_repo.git(["remote", "set-url", "origin", "https://github.com/o/other.git"], root)
+            page = dp.render(dp.parse(decision(**body)), "2026-09-25", GH, root)
+        self.assertGreaterEqual(calls["cfg"], 1)
+        self.assertNotIn("blob/", page)
+        self.assertIn("src/app.py:1", page)
+        self.assertIn("the pool", page)
 
 
 ARCH = {
@@ -288,11 +549,13 @@ ARCH = {
 
 
 class DesignTest(unittest.TestCase):
-    def page(self, forge=None, **over) -> str:
-        return dp.render(dp.parse(decision(**over)), "2026-09-25", forge)
+    def page(self, forge=None, root=None, **over) -> str:
+        return dp.render(dp.parse(decision(**over)), "2026-09-25", forge, root)
 
     def test_where_it_sits_draws_the_architecture_in_the_review_encoding(self):
-        page = self.page(GH, architecture=ARCH)
+        root = owned(self, {"src/cache/pool.py": "x\n", "src/cache/client.py": "y\n",
+                            "docs/architecture.md": "# Arch\n\n## 4.2 Connection budgets\n"})
+        page = self.page(GH, root, architecture=ARCH)
         self.assertIn("Where it sits", page)
         self.assertIn(f'aria-label="{ARCH["summary"]}"', page)
         for cls in ('class="ext"', 'class="n"', 'class="n-inflight"', 'class="n-designed"', 'class="ext hot"',
@@ -328,11 +591,13 @@ class DesignTest(unittest.TestCase):
         self.assertIn('href="https://github.com/o/app/issues/111"', page)
 
     def test_references_carry_kind_status_and_pin(self):
-        page = self.page(GH, references=[{"kind": "code", "value": "src/cache/pool.py:24-58", "at": "a41c9e2"},
-                                         {"kind": "MR", "value": "!58", "label": "Warm the cache pool", "status": "open · passed"},
-                                         {"label": "Plan", "value": "https://github.com/o/backlog/issues/7"}])
-        self.assertIn("blob/a41c9e2/src/cache/pool.py#L24-L58", page)
-        self.assertIn("@ a41c9e2", page)
+        root = owned(self, {"src/cache/pool.py": "x\n"})
+        sha = make_repo.git(["rev-parse", "HEAD"], root)
+        page = self.page(GH, root, references=[{"kind": "code", "value": "src/cache/pool.py:24-58", "at": sha},
+                                               {"kind": "MR", "value": "!58", "label": "Warm the cache pool", "status": "open · passed"},
+                                               {"label": "Plan", "value": "https://github.com/o/backlog/issues/7"}])
+        self.assertIn(f"blob/{sha}/src/cache/pool.py#L24-L58", page)
+        self.assertIn(f"@ {sha}", page)
         self.assertIn("Warm the cache pool", page)
         self.assertIn("open · passed", page)
         self.assertRegex(page, r'<span class="cap">Plan</span>')

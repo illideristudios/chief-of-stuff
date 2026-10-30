@@ -26,7 +26,7 @@ import tracker_log
 from decision_actions import addresses, state_of
 from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, store_decision_badge, write_if_changed
 from fragment import external_url, href, tab_bar, issue_href, issue_page_name, latest_thread_link
-from page_common import drop_html_comments, markdown_blocks, markdown_inline
+from page_common import STEP_TIMELINE_CSS, drop_html_comments, markdown_blocks, markdown_inline
 from module_graph import section as _graph
 from clock import done_clock, dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
@@ -58,8 +58,77 @@ header .chip.needs-input,header .chip.retries-exhausted{color:var(--dl);border-c
 .fl.total{border-top:1px solid var(--line);margin-top:4px;padding-top:6px}
 .rv{display:grid;grid-template-columns:74px minmax(0,1fr);gap:2px 10px;padding:6px 0;font-size:13px}
 .rv+.rv{border-top:1px dotted var(--line)} .rv>.prose{grid-column:2;margin:0}
+""" + STEP_TIMELINE_CSS + """
 </style>
 """
+_WORKER_LOG_RE = re.compile(
+    r"^worker (?P<stage>\S+) attempt (?P<attempt>\d+): (?P<outcome>[^:\n]+?)(?:: (?P<reason>.*))?\Z",
+    re.S,
+)
+_WORKER_SAID = "; worker said: "
+_SUITE_IN_REASON = "; Suite: "
+
+
+def _truncate_summary_line(line: str, limit: int = 120) -> str:
+    if len(line) <= limit:
+        return line
+    cut = line[:limit].rsplit(" ", 1)[0]
+    return (cut or line[:limit]).rstrip() + "…"
+
+
+def _short_first_line(reason: str) -> str:
+    line = next((ln.strip() for ln in reason.splitlines() if ln.strip()), reason.strip())
+    line = re.sub(r"^#{1,6}\s+", "", line)
+    line = re.sub(r"^(?:[-*+]|\d+\.)\s+", "", line)
+    line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
+    line = re.sub(r"`([^`]+)`", r"\1", line)
+    return _truncate_summary_line(line)
+
+
+def _reason_needs_report_block(reason: str) -> bool:
+    if _WORKER_SAID in reason:
+        return True
+    if "\n" in reason:
+        return True
+    if len(reason) > 140:
+        return True
+    stripped = reason.lstrip()
+    return bool(stripped.startswith("#") or stripped.startswith("```")
+                or re.match(r"^[-*+]\s", stripped) or re.match(r"^\d+\.\s", stripped))
+
+
+def _worker_step_summary(stage: str, attempt: str, outcome: str, short_reason: str) -> str:
+    return f"worker {stage} attempt {attempt}: {outcome}: {short_reason}"
+
+
+def _collapsed_worker_report(body: str, resolve) -> str:
+    prose = f'<div class="prose">{markdown_blocks(body, resolve)}</div>'
+    return f'<details class="step-report"><summary>Worker report</summary>{prose}</details>'
+
+
+def _format_log_step(message: str, resolve) -> str:
+    match = _WORKER_LOG_RE.match(message)
+    if not match or not match.group("reason"):
+        return f"<span>{escape(message)}</span>"
+    stage, attempt, outcome, reason = (match.group("stage"), match.group("attempt"),
+                                         match.group("outcome"), match.group("reason"))
+    if not _reason_needs_report_block(reason):
+        summary = _worker_step_summary(stage, attempt, outcome, reason)
+        return f"<span>{escape(summary)}</span>"
+    if _WORKER_SAID in reason:
+        gate_part, worker_report = reason.split(_WORKER_SAID, 1)
+        short_reason = gate_part.split(_SUITE_IN_REASON, 1)[0]
+        report_body = worker_report.strip()
+        if _SUITE_IN_REASON in gate_part:
+            suite_tail = gate_part.split(_SUITE_IN_REASON, 1)[1]
+            report_body = f"Suite: {suite_tail}\n\n{report_body}" if report_body else f"Suite: {suite_tail}"
+    else:
+        short_reason = _short_first_line(reason)
+        report_body = reason
+    summary = escape(_worker_step_summary(stage, attempt, outcome, short_reason))
+    details = _collapsed_worker_report(report_body, resolve) if report_body.strip() else ""
+    return f"<span>{summary}</span>{details}"
+
 
 
 def _clock(at: datetime, now: datetime) -> str:
@@ -567,10 +636,10 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             lines.append((took, f'<div class="wk"><b>{escape(who)}</b><span>{escape(seg.runtime)} '
                                f'{escape(seg.model)} · {escape(seg.stage)} · attempt {seg.attempt}</span>'
                                f'<span>{escape(run_status)} · {_dur(took)}</span></div>'))
-        steps_list.extend((parse_stamp(entry.at, now), escape(entry.message))
+        steps_list.extend((parse_stamp(entry.at, now), _format_log_step(entry.message, linker.resolve))
                           for entry in db.log(item.issue_key))
         steps = "\n".join(f'<div class="step"><span class="when">{_step_when(at, now)}</span>'
-                          f'<span class="dot"></span><span>{text}</span></div>'
+                          f'<span class="dot"></span><div class="step-body">{text}</div></div>'
                           for at, text in sorted(steps_list, key=lambda step: step[0]))
         # A worker ending does not finish its issue; open store tasks keep accruing waiting time.
         end = max((e for _, e in spans), default=now) if item.forge_state == "closed" else now

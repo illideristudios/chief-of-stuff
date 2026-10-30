@@ -523,7 +523,8 @@ class AcceptanceTest(unittest.TestCase):
                 for section_name in ("Issue", "Acceptance"):
                     part = page_section(html, section_name)
                     self.assertIn(f'href="{base}/issues/10"', part)
-                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+                    self.assertNotIn("/blob/", part)
+                    self.assertIn("src/lib.py:4", text(part))
 
     def test_multiline_comments_in_complete_items_do_not_leak_or_count(self):
         body = """## Acceptance
@@ -605,7 +606,8 @@ Real `<!-- inline example -->` stays.
                 for name in ("Issue", "Acceptance"):
                     part = page_section(html, name)
                     self.assertIn(f'href="{base}/issues/10"', part)
-                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+                    self.assertNotIn("/blob/", part)
+                    self.assertIn("src/lib.py:4", text(part))
 
     def test_issue_body_hides_comments_but_preserves_fenced_examples_even_when_stale(self):
         body = """Before <!-- hidden inline
@@ -1749,7 +1751,8 @@ class UnavailableAndStaleIssueTest(unittest.TestCase):
                 linker = ip._issue_linker(issue, key, home, cfg, self.root)
                 for part in (ip._issue_section(issue, linker), ip._acceptance(issue, linker)):
                     self.assertIn(f'href="{base}/issues/10"', part)
-                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+                    self.assertNotIn("/blob/", part)
+                    self.assertIn("src/lib.py:4", text(part))
                     self.assertNotIn('href="https://github.com/new/repo/', part)
 
     def test_conflicting_cached_key_and_url_never_link_to_either_namespace(self) -> None:
@@ -1770,7 +1773,8 @@ class UnavailableAndStaleIssueTest(unittest.TestCase):
         issue = bs.Issue("#12", "https://github.com/old/repo/issues/12", "Old", "open", (), body="See src/lib.py:target.")
         linker = ip._issue_linker(issue, "#12", bs.backlog.GitHubBacklog("old/repo"), self.cfg, self.root)
         part = ip._issue_section(issue, linker)
-        self.assertIn('href="https://github.com/old/repo/blob/HEAD/src/lib.py"', part)
+        self.assertNotIn("/blob/", part)
+        self.assertIn("src/lib.py:target", text(part))
         self.assertNotIn("#L1", part)
 
     def test_unknown_cached_identity_does_not_guess_current_backlog(self) -> None:
