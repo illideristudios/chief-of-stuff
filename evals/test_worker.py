@@ -52,6 +52,68 @@ class WorkerTest(unittest.TestCase):
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
         self.addCleanup(git.stop)
+        self.clock_patch = mock.patch.object(claude_adapter, "require_worker_clock")
+        self.clock = self.clock_patch.start()
+        self.addCleanup(self.clock_patch.stop)
+
+    def test_a_refused_clock_starts_no_worker_and_records_no_run(self):
+        # Like any refused start, it follows the tree cut (#551); the run record is what a refusal never writes.
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start") as start:
+            with self.assertRaisesRegex(claude_adapter.ClockError, "no clock"):
+                self.launch()
+        start.assert_not_called()
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def rotation_launch(self, rotation, **launch_kwargs):
+        """A real rotation (never a mocked selection) with every host launchable, claude and codex starts mocked."""
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(f'[models.implement]\nrotation = {json.dumps(rotation)}\n')
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "available", return_value=True), \
+             mock.patch.object(worker.t3_adapter, "available", return_value=True), \
+             mock.patch.object(worker, "below_limit", return_value=True), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
+             mock.patch.object(worker.host_adapter, "start",
+                               side_effect=lambda runtime, request, run_dir, env: (self.start(request, run_dir), "")) as host, \
+             mock.patch.object(worker.t3_adapter, "start", side_effect=lambda request, run_dir, **kw: self.start(request, run_dir)) as t3, \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as claude, \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            used = worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                                 policies=self.p, forge=self.forge, clock=lambda: NOW, **launch_kwargs)
+        return used, claude, host, t3
+
+    def test_a_refused_clock_makes_only_the_local_claude_entry_unlaunchable(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        used, claude, host, _ = self.rotation_launch(["claude:sonnet@high", "codex:gpt-6.1-sol@high"])
+        claude.assert_not_called()
+        host.assert_called_once()
+        self.assertEqual(used, ("gpt-6.1-sol", "high", "codex"))
+        self.clock.assert_called_once()
+
+    def test_a_refused_clock_with_no_other_entry_refuses_with_the_clock_error(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        with self.assertRaisesRegex(claude_adapter.ClockError, "no clock"):
+            self.rotation_launch(["claude:sonnet@high"])
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_a_t3_or_non_claude_launch_never_checks_the_local_clock(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        used, claude, _, t3 = self.rotation_launch(["claude:sonnet@high"], launcher="t3")
+        t3.assert_called_once()
+        claude.assert_not_called()
+        self.assertEqual(used, ("sonnet", "high"))
+        self.clock.assert_not_called()
+
+    def test_a_usable_clock_keeps_the_first_local_claude_entry(self):
+        used, claude, host, _ = self.rotation_launch(["claude:sonnet@high", "codex:gpt-6.1-sol@high"])
+        claude.assert_called_once()
+        host.assert_not_called()
+        self.assertEqual(used, ("sonnet", "high"))
+        self.clock.assert_called_once()
 
     def launch(self, stage="implement", attempt=1):
         return worker.launch(KEY, stage, attempt, None, store=self.db, root=self.root,
@@ -82,6 +144,43 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(worker.process_status, "identity", return_value=None):
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         return self.db.segments(KEY)[0]
+
+    def test_collect_captures_live_and_ended_attempts_without_the_source_after_restart(self):
+        run = self.launched()
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        (run / "command.json").write_text(json.dumps({"session_id": record["session_id"], "cwd": record["tree"],
+            "env": {"CLAUDE_CONFIG_DIR": str(self.root / "profile")}}))
+        path = claude_adapter.transcript_path(record)
+        path.parent.mkdir(parents=True)
+        line = json.dumps({"type": "assistant", "sessionId": record["session_id"],
+                           "message": {"content": "A generic reply"}}) + "\n"
+        path.write_text(line)
+        with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            worker.collect(self.db, self.root, transcript_max_bytes=2048)
+        got = self.db.transcript(KEY, "implement", 1)
+        self.assertEqual(got["events"][0]["kind"], "worker")
+        self.assertEqual(got["max_bytes"], 2048)
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+        with path.open("a") as f:
+            f.write(line)
+        worker.collect(self.db, self.root)
+        self.assertEqual(len(self.db.transcript(KEY, "implement", 1)["events"]), 2)
+        path.unlink()
+        worker.collect(self.db, self.root)
+        self.assertIn("unavailable", self.db.transcript(KEY, "implement", 1)["last_gap"])
+
+    def test_t3_and_other_runtimes_never_read_provider_local_transcripts(self):
+        segment = SimpleNamespace(issue_key=KEY, stage="implement", attempt=1, ended_at=None)
+        with mock.patch.object(claude_adapter, "transcript_path") as read:
+            for record in ({"launcher": "t3", "runtime": "claude"}, {"runtime": "codex"}):
+                worker._capture_transcript(self.db, segment, record, 1024)
+        read.assert_not_called()
+
+    def test_invalid_run_directory_marks_a_gap_without_interrupting_collection(self):
+        segment = SimpleNamespace(issue_key=KEY, stage="implement", attempt=1, ended_at=None)
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        worker._capture_transcript(self.db, segment, {"session_id": "generic-session", "run_dir": None}, 1024)
+        self.assertIn("unverified", self.db.transcript(KEY, "implement", 1)["last_gap"])
 
     def test_assignment_has_fixed_header_row_issue_job_and_persona_rules(self):
         persona = SimpleNamespace(role="builder", rules=("Tests first.",))
@@ -128,8 +227,52 @@ class WorkerTest(unittest.TestCase):
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
-                          trees=self.trees, policies=self.p, forge=self.forge, rules=("Keep tests.",), clock=lambda: NOW)
+                          trees=self.trees, policies=self.p, forge=self.forge,
+                          config=engine.settings.Settings(workers=engine.settings.Workers(rules=("Keep tests.",))),
+                          clock=lambda: NOW)
         self.assertIn("- Keep tests.\n", start.call_args.args[0].prompt)
+
+    def test_launch_uses_pass_snapshot_after_settings_change_on_disk(self):
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- Settings: `settings.toml`\n- Agent: builder task\n")
+        path = self.root / "settings.toml"
+        path.write_text('[lanes.code]\nstages = ["implement"]\n[workers]\nclaude_as_profile = "secondary"\nrules = ["Keep tests."]\n'
+                        '[stages.implement]\nagent = "builder"\nskills = ["original-skill"]\n')
+        config = engine.settings.load(self.root, "settings.toml")
+        path.write_text('[lanes.code]\nstages = ["implement"]\n[workers]\nclaude_as_profile = "other"\nrules = ["Changed rule."]\n'
+                        '[stages.implement]\nagent = "other"\nskills = ["changed-skill"]\n')
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
+                          trees=self.trees, policies=self.p, forge=self.forge, config=config, clock=lambda: NOW)
+        request = start.call_args.args[0]
+        self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
+        self.assertEqual(request.agent, "builder")
+        self.assertEqual(build.call_args.args[5], "builder")
+        self.assertIn("Skills: load and follow original-skill", request.prompt)
+        self.assertIn("- Keep tests.\n", request.prompt)
+        self.assertNotIn("Changed rule.", request.prompt)
+        self.assertNotIn("changed-skill", request.prompt)
+
+    def test_launch_without_a_snapshot_uses_the_configured_profile(self):
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `settings.toml`\n")
+        (self.root / "settings.toml").write_text('[workers]\nclaude_as_profile = "secondary"\n')
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            self.launch()
+        self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
+
+    def test_launch_explicit_empty_profile_uses_default_login(self):
+        config = engine.settings.Settings(workers=engine.settings.Workers(claude_as_profile="secondary"))
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
+                          trees=self.trees, policies=self.p, forge=self.forge, config=config,
+                          claude_as_profile="", clock=lambda: NOW)
+        self.assertEqual(start.call_args.kwargs["claude_as_profile"], "")
 
     def test_implement_assignment_requires_delivery_before_reporting_done(self):
         prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "implement", self.persona)
@@ -1392,6 +1535,8 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments()[0].outcome, "failed")
 
     def test_real_detached_adapter_is_adopted_and_collected_after_engine_restart(self):
+        self.clock_patch.stop()
+        self.addCleanup(self.clock_patch.start)
         fake = Path(__file__).parent / "fixtures" / "fake_claude.py"
         cli = self.root / "fake-cli"
         cli.write_text(f"#!{sys.executable}\nimport time, runpy\ntime.sleep(0.5)\n"

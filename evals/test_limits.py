@@ -7,10 +7,12 @@ import os
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -230,6 +232,85 @@ class Sources(unittest.TestCase):
 
 
 class History(unittest.TestCase):
+    def test_missing_history_read_creates_no_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state/limits.sqlite"
+            db = limits_history.LimitsHistory(path)
+            self.addCleanup(db.engine.dispose)
+            self.assertEqual(db.readings("codex", "", NOW), [])
+            self.assertFalse(path.parent.exists())
+
+    def test_current_history_is_readable_without_a_writable_state_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "limits.sqlite"
+            db = limits_history.LimitsHistory(path)
+            self.addCleanup(db.engine.dispose)
+            db.record([reading(20)])
+            # Keep SQLite's WAL sidecars present; this refusal is about creating the migration lock.
+            reader = limits_history.LimitsHistory(path)
+            self.addCleanup(reader.engine.dispose)
+            path.with_suffix(".migrate.lock").unlink()
+            path.parent.chmod(0o555)
+            try:
+                self.assertEqual(reader.readings("codex", "", NOW), [reading(20)])
+                self.assertFalse(path.with_suffix(".migrate.lock").exists())
+            finally:
+                reader.engine.dispose()
+                path.parent.chmod(0o755)
+
+    def test_unknown_history_revision_is_refused_without_attempting_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = limits_history.LimitsHistory(Path(tmp) / "limits.sqlite")
+            self.addCleanup(db.engine.dispose)
+            db.record([reading(20)])
+            with db.engine.begin() as conn:
+                conn.exec_driver_sql("UPDATE alembic_version SET version_num = 'future_revision'")
+            with patch.object(limits_history.command, "upgrade") as upgrade:
+                with self.assertRaisesRegex(ValueError, "future_revision"):
+                    db.readings("codex", "", NOW)
+            upgrade.assert_not_called()
+
+    def test_read_migrates_an_existing_empty_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "limits.sqlite"
+            path.touch()  # An interrupted first open can leave a file without its tables.
+            db = limits_history.LimitsHistory(path)
+            self.addCleanup(db.engine.dispose)
+            self.assertEqual(db.readings("codex", "", NOW), [])
+            db.record([reading(20)])
+            self.assertEqual(db.readings("codex", "", NOW), [reading(20)])
+
+    def test_read_waits_for_another_workspace_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "limits.sqlite"
+            writer, reader = limits_history.LimitsHistory(path), limits_history.LimitsHistory(path)
+            self.addCleanup(writer.engine.dispose)
+            self.addCleanup(reader.engine.dispose)
+            migrating, proceed = Event(), Event()
+            upgrade = limits_history.command.upgrade
+
+            def paused_upgrade(*args, **kwargs):
+                if migrating.is_set():
+                    raise AssertionError("reader entered upgrade while writer held the migration lock")
+                migrating.set()  # The database exists and the migration lock is held.
+                if not proceed.wait(5):
+                    raise RuntimeError("test did not release migration")
+                return upgrade(*args, **kwargs)
+
+            with patch.object(limits_history.command, "upgrade", side_effect=paused_upgrade) as upgraded, \
+                    ThreadPoolExecutor(max_workers=2) as pool:
+                migration = pool.submit(writer._migrate)
+                try:
+                    self.assertTrue(migrating.wait(5))
+                    rows = pool.submit(reader.readings, "codex", "", NOW)
+                    with self.assertRaises(TimeoutError):
+                        rows.result(timeout=.1)
+                finally:
+                    proceed.set()
+                migration.result(timeout=5)
+                self.assertEqual(rows.result(timeout=5), [])
+                self.assertEqual(upgraded.call_count, 1)
+
     def test_repeated_unknown_reason_is_one_observation_until_status_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = limits_history.LimitsHistory(Path(tmp) / "limits.sqlite")

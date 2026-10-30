@@ -158,7 +158,8 @@ def _tail_hash(stream, offset: int) -> str:
     return hashlib.sha256(stream.read(min(offset, _TAIL_BYTES))).hexdigest()
 
 
-def _events(raw: Any) -> list[dict[str, Any]]:
+def claude_events(raw: Any) -> list[dict[str, Any]]:
+    """Normalize native Claude text and tool blocks for both live reads and durable capture."""
     if not isinstance(raw, dict) or raw.get("type") not in ("user", "assistant") or raw.get("isMeta") is True:
         return []
     role = raw["type"]
@@ -242,7 +243,7 @@ def read_claude(tree: Path, session_id: str, *, account: str = "", config_dir: P
                 offset += len(line)
                 consumed += len(line)
                 try:
-                    events.extend(_events(json.loads(line)))
+                    events.extend(claude_events(json.loads(line)))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
             else:
