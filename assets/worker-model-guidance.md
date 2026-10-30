@@ -1,6 +1,6 @@
 # Worker model and provider guidance
 
-This is the workspace's editable routing policy for dispatched workers. Replace the suggested models with exact IDs available to your accounts. The coordinator reads this file before choosing a worker. One-shot configuration authorizes routine dispatch; new interactive sessions need approval.
+This is the workspace's editable routing policy for dispatched workers. Replace the suggested models with exact IDs available to your accounts. The coordinator reads this file before choosing a worker. The coordinator dispatches ready work in either mode without an owner approval stage.
 
 ## Choice order
 

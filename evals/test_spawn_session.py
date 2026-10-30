@@ -19,7 +19,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -45,12 +45,6 @@ TRACKER = """# Tracker 2026-09-18
 |---|---|---|---|---|---|
 | Security audit | unassigned | open | 09:00 |  | Checklist: Security audit of the upload handler |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Security audit | `src/a/` |
-
 ## Log
 
 - 09:00 opened the day
@@ -67,11 +61,10 @@ class ArgvTest(unittest.TestCase):
         self.assertIn("--agent", argv)
         self.assertIn("implementer", argv)
 
-    def test_a_dispatched_session_starts_in_plan_mode(self):
+    def test_a_dispatched_session_starts_without_a_plan_gate(self):
         """The plan gate is enforced at launch, not asked for in the assignment text."""
         argv = ss.argv(ss.DEFAULT_LAUNCHER, agent_type="implementer", cwd="/tmp/wt", title="t")
-        self.assertIn("--permission-mode", argv)
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertNotIn("--permission-mode", argv)
 
     def test_substitution_is_per_token_so_a_space_cannot_add_an_argument(self):
         argv = ss.argv(["run", "--title={title}", "--", "claude"], agent_type="x", cwd="/tmp/a b", title="two words")
@@ -287,7 +280,7 @@ class BootstrapTest(unittest.TestCase):
         self.assertNotIn("--agent", argv)
         self.assertNotIn("", argv)
         self.assertIn("claude", argv)
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertNotIn("--permission-mode", argv)
 
     def test_an_agent_type_is_passed_when_the_block_names_one(self):
         argv = ss.argv(ss.DEFAULT_LAUNCHER, agent_type="fixer", cwd="/tmp/wt", title="t")
@@ -479,19 +472,12 @@ class DispatchFileTest(unittest.TestCase):
         self.assertFalse((self.tree / ss.PROMPT_FILE).exists())
         self.assertEqual(calls, [])
 
-    def test_the_assignment_carries_the_paths_the_task_owns(self):
-        """Finding 56: a task name is not something a session can act on."""
+    def test_the_assignment_carries_the_task_with_no_file_ownership_row(self):
+        """Finding 56: a task name is not something a session can act on. #1039 (C29): the Tasks row is the whole of it."""
         self.spawn()
-        self.assertIn("Owns: `src/a/`", (self.tree / ss.PROMPT_FILE).read_text())
-
-    def test_a_task_with_no_ownership_row_writes_nothing_and_starts_nothing(self):
-        (self.root / "daily" / "2026-09-18-tracker.md").write_text(
-            TRACKER.replace("| Security audit | `src/a/` |", ""))
-        out, calls = self.spawn()
-        self.assertEqual(out.returncode, 1)
-        self.assertIn("File ownership", out.stderr)
-        self.assertFalse((self.tree / ss.PROMPT_FILE).exists())
-        self.assertEqual(calls, [])
+        prompt = (self.tree / ss.PROMPT_FILE).read_text()
+        self.assertIn("Task: Security audit", prompt)
+        self.assertNotIn("Owns:", prompt)
 
     def test_the_started_line_names_the_file_it_wrote(self):
         out, _ = self.spawn()
@@ -689,9 +675,9 @@ class AgyTest(unittest.TestCase):
         return ss.ghostty_script(cwd="/tmp/wt", agent_type="implementer", claude=self.AGY, title="implementer-GFlash38H-01",
                                  runtime="agy", model="gemini-3.8-flash-high", workspace="/tmp/ws", **kw)
 
-    def test_the_tab_runs_agy_in_plan_mode_on_the_named_model(self):
+    def test_the_tab_runs_agy_with_write_access_on_the_named_model(self):
         self.assertRegex(self.script(), r"session_exec.py --registry .* --runtime agy .* -- /opt/homebrew/bin/agy "
-                                        r"--model gemini-3.8-flash-high --mode plan -i ")
+                                        r"--model gemini-3.8-flash-high --mode accept-edits -i ")
 
     def test_it_carries_no_claude_flags(self):
         s = self.script()
@@ -735,7 +721,7 @@ class AgyTest(unittest.TestCase):
     def test_the_dry_run_shows_the_agy_tab(self):
         out = run_main("--runtime", "agy", "--model", "gemini-3.8-flash-high")
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("--mode plan", out.stdout)
+        self.assertIn("--mode accept-edits", out.stdout)
 
 
 class ClaudeModelTest(unittest.TestCase):
@@ -750,7 +736,7 @@ class ClaudeModelTest(unittest.TestCase):
     def test_model_and_effort_reach_the_claude_command(self):
         self.assertRegex(self.script(model="opus", effort="medium"),
                          r"/opt/homebrew/bin/claude --plugin-dir \S+ --agent implementer --name implementer-COpusM-01 "
-                         r"--model opus --effort medium --permission-mode plan ")
+                         r"--model opus --effort medium ")
 
     def test_without_them_the_command_is_unchanged(self):
         s = self.script()
@@ -1149,10 +1135,10 @@ print(found)
         self.assertEqual(self.calls(), [])
         self.assertFalse(self.dispatch.exists())
 
-    def test_claude_profile_launches_claude_workers_through_claude_as(self):
+    def test_claude_as_profile_launches_claude_workers_through_claude_as(self):
         # Zach, 2026-10-08 20:50: Claude workers launch through `claude-as run <profile>`, not a bare `claude`.
         claude_as = self.executable("claude-as", "")
-        (self.root / "chief-of-stuff.toml").write_text('[workers]\nlauncher = "herdr"\nclaude_profile = "secondary"\n')
+        (self.root / "chief-of-stuff.toml").write_text('[workers]\nlauncher = "herdr"\nclaude_as_profile = "secondary"\n')
         out = self.invoke(launcher=None, extra=["--dry-run"])
         self.assertEqual(out.returncode, 0, out.stderr)
         pane = shlex.split(out.stdout.splitlines()[1].removeprefix("would run: "))
@@ -1799,6 +1785,117 @@ with open({str(self.log)!r}, 'a') as log:
 
 
 class WorkerModeTest(unittest.TestCase):
+    def review_workspace(self):
+        tree, args = self.one_shot_workspace()
+        root = tree.parent.parent
+        (root / "CLAUDE.md").write_text((root / "CLAUDE.md").read_text() + "- Agent: reviewer task\n")
+        (root / "chief-of-stuff.toml").write_text(
+            '[workers]\nmode = "one-shot"\n[lanes.code]\nstages = ["review"]\n'
+            '[stages.review]\nagent = "reviewer"\nskills = ["security-review"]\n')
+        (root / "daily" / "2026-09-18-tracker.md").write_text(
+            TRACKER.replace("| item | owner | state | since | due | checklist |",
+                "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |", 1)
+            .replace("|---|---|---|---|---|---|", "|---|---|---|---|---|---|---|---|---|---|---|", 1)
+            .replace("| Security audit | unassigned | open | 09:00 |  |",
+                     "| audit | Security audit | unassigned | open | 09:00 |  | M | code | review |  |", 1))
+        return tree, args
+
+    def test_check_keeps_rules_and_stage_skills_from_preloaded_settings(self):
+        tree, args = self.review_workspace()
+        settings = tree.parent.parent / "chief-of-stuff.toml"
+        settings.write_text(settings.read_text().replace('[workers]\n', '[workers]\nrules = ["Keep tests."]\n'))
+        snapshot = ss.load_settings(tree.parent.parent, "chief-of-stuff.toml")
+        with unittest.mock.patch.object(ss, "load_settings", return_value=snapshot) as load, \
+             unittest.mock.patch.object(ss.dispatch_prompt, "compose", wraps=ss.dispatch_prompt.compose) as compose, \
+             unittest.mock.patch.object(ss.dispatch_prompt, "load_settings",
+                                        side_effect=AssertionError("duplicate read")), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ss.main(args + ["--check"]), 0)
+        self.assertIn("- Keep tests.\n", out.getvalue())
+        self.assertIn("Skills: load and follow security-review.", out.getvalue())
+        load.assert_called_once()
+        self.assertIs(compose.call_args.kwargs["settings"], snapshot)
+
+    def test_interactive_launch_uses_already_loaded_workspace_policy(self):
+        tree, args = self.review_workspace()
+        snapshot = ss.load_settings(tree.parent.parent, "chief-of-stuff.toml")
+        for agent_flags in (["--type", "reviewer"], []):
+            with self.subTest(agent_flags=agent_flags), \
+                 unittest.mock.patch.object(ss, "load_settings", return_value=snapshot) as load, \
+                 unittest.mock.patch.object(ss.dispatch_prompt, "compose", wraps=ss.dispatch_prompt.compose) as compose, \
+                 unittest.mock.patch.object(ss.dispatch_prompt, "load_settings",
+                                            side_effect=AssertionError("duplicate read")), \
+                 unittest.mock.patch.object(ss, "resolve", return_value="/bin/fake"), \
+                 unittest.mock.patch.dict(os.environ, {ss.ENV: ""}), \
+                 contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ss.main(args + ["--interactive", "--launcher", "tmux"] + agent_flags), 0)
+                load.assert_called_once()
+                self.assertIs(compose.call_args.kwargs["settings"], snapshot)
+                self.assertIn("--agent reviewer", out.getvalue())
+
+    def test_review_stage_launches_configured_agent_and_names_skills_in_brief(self):
+        tree, args = self.review_workspace()
+        argv = self.dry_run_argv(args)
+        self.assertIn(("--agent", "reviewer"), list(zip(argv, argv[1:])))
+        brief = ss.dispatch_prompt.compose(tree.parent.parent, "2026-09-18", "Security audit",
+                                            worktree=tree, name="worker01", one_shot=True)
+        self.assertIn("Skills: load and follow security-review", brief)
+
+    def test_undeclared_stage_agent_is_omitted_on_both_launch_paths(self):
+        for interactive in (False, True):
+            with self.subTest(interactive=interactive):
+                tree, args = self.review_workspace()
+                claude = tree.parent.parent / "CLAUDE.md"
+                claude.write_text(claude.read_text().replace("- Agent: reviewer task\n", ""))
+                if interactive:
+                    with unittest.mock.patch.object(ss, "resolve", return_value="/bin/fake"), \
+                         unittest.mock.patch.dict(os.environ, {ss.ENV: ""}), \
+                         contextlib.redirect_stdout(io.StringIO()) as out:
+                        self.assertEqual(ss.main(args + ["--interactive", "--launcher", "tmux"]), 0)
+                    self.assertNotIn("--agent", out.getvalue())
+                else:
+                    self.assertNotIn("--agent", self.dry_run_argv(args))
+
+    def test_default_date_is_pinned_before_task_and_stage_lookup(self):
+        tree, args = self.review_workspace()
+        at = args.index("--date")
+        del args[at:at + 2]
+        with unittest.mock.patch.object(ss, "datetime") as clock, \
+             unittest.mock.patch.object(one_shot, "run", return_value=0) as run:
+            clock.now.return_value = datetime(2026, 9, 18)
+            self.assertEqual(ss.main(args), 0)
+        clock.now.assert_called_once()
+        self.assertEqual(run.call_args.kwargs["day"], "2026-09-18")
+        self.assertEqual(run.call_args.kwargs["agent_type"], "reviewer")
+
+    def test_explicit_type_overrides_stage_agent(self):
+        _, args = self.review_workspace()
+        argv = self.dry_run_argv(args + ["--type", "chosen"])
+        self.assertIn(("--agent", "chosen"), list(zip(argv, argv[1:])))
+        self.assertNotIn("reviewer", argv)
+
+    def test_other_runtimes_receive_stage_skills_without_agent_flags(self):
+        tree, args = self.review_workspace()
+        for runtime in ("codex", "cursor", "agy"):
+            with self.subTest(runtime=runtime):
+                argv = self.dry_run_argv(args + ["--runtime", runtime, "--model", "test-model"])
+                self.assertNotIn("--agent", argv)
+                self.assertNotIn("reviewer", argv)
+                brief = ss.dispatch_prompt.compose(tree.parent.parent, "2026-09-18", "Security audit",
+                    worktree=tree, name="worker01", runtime=runtime, one_shot=True)
+                self.assertIn("Skills: load and follow security-review", brief)
+
+    def test_interactive_launch_uses_stage_agent(self):
+        tree, args = self.review_workspace()
+        with unittest.mock.patch.object(ss, "resolve", return_value="/bin/fake"), \
+             unittest.mock.patch.dict(os.environ, {ss.ENV: ""}), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ss.main(args + ["--interactive", "--launcher", "tmux"]), 0)
+        self.assertIn("--agent reviewer", out.getvalue())
+        brief = ss.dispatch_prompt.compose(tree.parent.parent, "2026-09-18", "Security audit",
+                                            worktree=tree, name="worker01")
+        self.assertIn("Skills: load and follow security-review", brief)
+
     def test_toml_requires_one_shot_for_every_dispatch(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -1963,7 +2060,7 @@ class WorkerModeTest(unittest.TestCase):
 class CheckTest(unittest.TestCase):
     """#61: `worker --check --task T` validates a row with no tree, writes nothing, starts nothing.
 
-    The coordinator checks a new Tasks and File ownership row before proposing it. Without --check,
+    The coordinator checks a new Tasks row before proposing it. Without --check,
     `worker` needs --cwd and --name, so the row was checked against an unrelated tree.
     """
 
@@ -2008,12 +2105,19 @@ class CheckTest(unittest.TestCase):
             self.composed(root, task, **kw)
         return f"refused: {expected.exception}"
 
+    def test_check_uses_already_loaded_workspace_policy(self):
+        root = self.workspace(toml='[workers]\nrules = ["Keep tests."]\n')
+        with unittest.mock.patch.object(ss.dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")):
+            code, out, err = self.check(root, "--one-shot")
+        self.assertEqual(code, 0, err)
+        self.assertIn("- Keep tests.\n", out)
+
     def test_a_complete_row_prints_the_assignment_with_no_cwd_and_no_name(self):
         root = self.workspace()
         code, out, err = self.check(root)
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out.strip(), self.composed(root).strip())
-        self.assertIn("src/a/", out)
+        self.assertIn("Task: Security audit", out)
 
     def test_a_task_name_resolves_to_its_row(self):
         named = TRACKER.replace("| item | owner | state | since | due | checklist |\n|---|---|---|---|---|---|",
@@ -2025,15 +2129,14 @@ class CheckTest(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out.strip(), self.composed(root, "Security audit").strip())
 
-    def test_a_missing_file_ownership_row_is_refused_with_composes_text(self):
-        root = self.workspace(TRACKER.replace("| Security audit | `src/a/` |\n", ""))
-        with self.assertRaises(ss.dispatch_prompt.RefusedError) as expected:
-            self.composed(root)
-        code, out, err = self.check(root)
-        self.assertEqual(code, 1)
-        self.assertEqual(out, "")
-        self.assertEqual(err.strip(), f"refused: {expected.exception}")
-        self.assertIn("File ownership", err)
+    def test_a_row_with_no_file_ownership_row_passes(self):
+        # #1039 (C29): no file is anybody's; the check reads the Tasks row only.
+        root = self.workspace()
+        for flags in ((), ("--one-shot",)):
+            with self.subTest(flags=flags):
+                code, out, err = self.check(root, *flags)
+                self.assertEqual((code, err), (0, ""))
+                self.assertNotIn("Owns:", out)
 
     def test_an_unknown_task_is_refused(self):
         root = self.workspace()
@@ -2049,7 +2152,7 @@ class CheckTest(unittest.TestCase):
         code, out, err = self.check(root)
         self.assertEqual((code, err), (0, ""))
         self.assertTrue(out.startswith("# One-shot assignment"), out[:80])
-        self.assertIn("src/a/", out)
+        self.assertIn("Task: Security audit", out)
 
     def test_check_ignores_interactive_and_dry_run_in_an_interactive_workspace(self):
         """Pinned: --check prints the assignment; it does not preview ("would run") or launch. Replaces
@@ -2097,53 +2200,20 @@ class CheckTest(unittest.TestCase):
 
     def standing_workspace(self) -> Path:
         tracker = TRACKER.replace("Security audit | unassigned", f"{self.STANDING} | unassigned"
-                                  ).replace("| Security audit | `src/a/` |", f"| {self.STANDING} | `src/d/` |")
+                                  )
         return self.workspace(tracker, claude=self.BACKLOG)
 
-    def overlapping(self, other_state: str = "running 08:30", other_paths: str = "`src/a/upload.py`; worktree `trees/export` (feat/export)") -> str:
-        return TRACKER.replace("| Security audit | unassigned | open | 09:00 |  | Checklist: Security audit of the upload handler |\n",
-                               "| Security audit | unassigned | open | 09:00 |  | Checklist: Security audit of the upload handler |\n"
-                               f"| Export header | worker07 | {other_state} | 08:00 |  | Export |\n"
-                               ).replace("| Security audit | `src/a/` |\n", f"| Security audit | `src/a/` |\n| Export header | {other_paths} |\n")
-
-    def test_one_shot_check_reports_the_launchers_overlap_refusal_and_starts_nothing(self):
-        # #365 review R10: `--check --one-shot` refuses a row whose paths overlap a running row, with the text the launcher's
-        # own refusal carries (one rule, read once), so the coordinator learns before it launches. Nothing is written.
-        root = self.workspace(self.overlapping())
-        copy = root / "copy-tracker.md"
-        copy.write_text((root / "daily/2026-09-18-tracker.md").read_text())
-        with self.assertRaises(ValueError) as launcher:
-            one_shot.record_launch(copy, "Security audit", "worker01", "worktree `t` (b)", "claude", "", "10:00")
-        self.assertIn("Export header", str(launcher.exception))
-        self.assertIn("overlap", str(launcher.exception))
-        code, out, err = self.check(root, "--one-shot")
-        self.assertEqual((code, out), (1, ""))
-        self.assertEqual(err.strip(), f"refused: {launcher.exception}")
-
-    def test_one_shot_check_names_the_running_task_by_its_name_not_its_whole_item(self):
-        # #365 review: the same refusal as the launcher's, naming the running row by its `name` cell.
-        prompt = "Cap uploads at 25 MB across the form and the API. " * 8
-        tracker = TRACKER.replace(
-            "| item | owner | state | since | due | checklist |\n|---|---|---|---|---|---|\n"
+    def test_one_shot_check_passes_beside_a_running_row_on_the_same_files(self):
+        # #1039 (C29): the launcher refuses no overlap, so neither does the check; an old File ownership section changes nothing.
+        root = self.workspace(TRACKER.replace(
             "| Security audit | unassigned | open | 09:00 |  | Checklist: Security audit of the upload handler |\n",
-            "| name | item | owner | state | since | due | size | checklist |\n|---|---|---|---|---|---|---|---|\n"
-            f"| upload | {prompt} | worker07 | running 08:30 | 08:00 |  | M | Cap |\n"
-            "| audit | Security audit | unassigned | open | 09:00 |  | S | Inspect |\n"
-        ).replace("| Security audit | `src/a/` |\n", "| audit | `src/a/` |\n| upload | `src/a/upload.py`; worktree `trees/up` (feat/up) |\n")
-        root = self.workspace(tracker)
+            "| Security audit | unassigned | open | 09:00 |  | Checklist: Security audit of the upload handler |\n"
+            "| Export header | worker07 | running 08:30 | 08:00 |  | Export |\n").replace(
+            "## Log", "## File ownership\n\n| context | paths |\n|---|---|\n| Security audit | `src/a/` |\n"
+                      "| Export header | `src/a/`; worktree `trees/export` (feat/export) |\n\n## Log"))
         code, out, err = self.check(root, "--one-shot")
-        self.assertEqual((code, out), (1, ""))
-        self.assertIn("'upload'", err)
-        self.assertNotIn("Cap uploads", err)
-
-    def test_one_shot_check_passes_when_nothing_running_overlaps(self):
-        for label, state, paths in (("another path", "running 08:30", "`src/b/`"), ("read-only", "running 08:30", "none; read-only review of `src/a/`"),
-                                    ("ready only", "open", "`src/a/`"), ("not running", "waiting", "`src/a/`")):
-            with self.subTest(label):
-                root = self.workspace(self.overlapping(state, paths))
-                code, out, err = self.check(root, "--one-shot")
-                self.assertEqual((code, err), (0, ""))
-                self.assertTrue(out.startswith("# One-shot assignment"), out[:80])
+        self.assertEqual((code, err), (0, ""))
+        self.assertTrue(out.startswith("# One-shot assignment"), out[:80])
 
     def test_a_standing_row_is_valid_only_when_check_is_given_its_name(self):
         """#61 review: `name` never reached compose, so a standing placeholder in a workspace with a backlog was refused
@@ -2200,7 +2270,7 @@ class CheckTest(unittest.TestCase):
 
     def test_launch_only_flags_neither_refuse_nor_change_a_check(self):
         """#61 review: --model/--effort/--class validation ran before the check branch, so `--check --runtime agy` said
-        "--model needs a model id". --check composes the Tasks and File ownership rows; these flags are no part of that."""
+        "--model needs a model id". --check composes the Tasks row; these flags are no part of that."""
         root = self.workspace()
         want = self.composed(root).strip()
         for flags in (["--runtime", "agy"], ["--runtime", "codex", "--model", "not a model!"], ["--model", "bad model!"],
@@ -2215,7 +2285,7 @@ class CheckTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
             ss.main(["--help"])
         text = " ".join(out.getvalue().split())
-        self.assertIn("checks the Tasks and File ownership rows only", text)
+        self.assertIn("checks the Tasks row only", text)
         self.assertNotIn("wins over every launch flag", text)
 
     def test_without_check_cwd_and_name_are_still_required(self):
@@ -2229,12 +2299,18 @@ class CheckTest(unittest.TestCase):
 
     def test_the_command_runs_from_an_unrelated_directory(self):
         """The real CLI: `chief-of-stuff worker --check` from a directory that is not the workspace."""
-        root = self.workspace(TRACKER.replace("| Security audit | `src/a/` |\n", ""))
+        root = self.workspace()
         entry = Path(ss.__file__).resolve().parent.parent / "chief_of_stuff.py"
+        # The suite already runs with the pinned dependencies. Reuse that interpreter for the
+        # CLI's bootstrap; provisioning a venv is covered by test_cli and needs network access.
+        bootstrap = ("import runpy, sys; from pathlib import Path; "
+                     "entry = sys.argv.pop(1); sys.path[:0] = [str(Path(entry).parent), str(Path(entry).parent / 'scripts')]; "
+                     "import supervisor; supervisor.ensure_venv = lambda data: Path(sys.executable); "
+                     "sys.argv[0] = entry; runpy.run_path(entry, run_name='__main__')")
         with tempfile.TemporaryDirectory() as elsewhere:
-            run = subprocess.run([sys.executable, str(entry), "worker", "--check", "--root", str(root),
-                                  "--date", "2026-09-18", "--task", "Security audit"],
+            run = subprocess.run([sys.executable, "-c", bootstrap, str(entry), "worker", "--check", "--root", str(root),
+                                  "--date", "2026-09-18", "--task", "No such task"],
                                  capture_output=True, text=True, timeout=30, cwd=elsewhere)
             self.assertEqual(os.listdir(elsewhere), [])
         self.assertEqual(run.returncode, 1, run.stderr)
-        self.assertTrue(run.stderr.startswith("refused: no File ownership row"), run.stderr)
+        self.assertTrue(run.stderr.startswith("refused: "), run.stderr)

@@ -24,6 +24,19 @@ class ShellSetupTest(unittest.TestCase):
             source = {"SHELL": "/bin/zsh", "HOME": str(home), "PATH": "/usr/bin:/bin"}
             self.assertEqual(shell.resolve("fakecli", source=source), str(binary))
 
+    def test_login_path_is_the_login_shells_path_and_ignores_rc_chatter(self):
+        # #871: launchd's PATH is short; the engine takes this one instead.
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            home.mkdir()
+            (home / ".zshrc").write_text('echo "welcome back"\nexport PATH="/opt/extra/bin:$PATH"\n')
+            got = shell.login_path({"SHELL": "/bin/zsh", "HOME": str(home), "PATH": "/usr/bin:/bin"})
+            self.assertTrue(got.startswith("/opt/extra/bin:"), got)
+            self.assertNotIn("welcome", got)
+
+    def test_an_unreadable_login_path_is_empty(self):
+        self.assertEqual(shell.login_path({"SHELL": "/missing/shell"}), "")
+
     def test_shell_input_cannot_be_command_text(self):
         with self.assertRaises(shell.ShellError):
             shell.resolve("codex; echo leaked")
@@ -35,6 +48,11 @@ class ShellSetupTest(unittest.TestCase):
         with mock.patch.object(shell, "login_shell", return_value="/bin/fish"):
             self.assertEqual(shell.login_argv(["/bin/echo", "two words"]),
                              ["/bin/fish", "-lic", "exec $argv", "/bin/echo", "two words"])
+
+    def test_clean_env_keeps_every_chief_key(self):
+        """#658: the worker guard binds from CHIEF_* variables; stripping any one leaves it unbound."""
+        source = {"CHIEF_ROOT": "/r", "CHIEF_ISSUE_KEY": "k", "CHIEF_PROTECTED_BRANCHES": "[]", "OTHER": "x"}
+        self.assertEqual(shell.clean_env(source), {k: v for k, v in source.items() if k != "OTHER"})
 
     def test_bad_configured_shell_is_reported(self):
         with self.assertRaises(shell.ShellError):

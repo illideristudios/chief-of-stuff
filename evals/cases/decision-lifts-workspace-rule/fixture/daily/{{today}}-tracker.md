@@ -15,10 +15,6 @@ Coordinator: coordinator. Board: none.
 |---|---|---|
 | 09:20 | Gate order | "skip the gate order today, start the notes in parallel with the audit" |
 
-## File ownership
-
-- Security audit: src/a/
-
 ## Log
 
 - 09:00 opened the day
