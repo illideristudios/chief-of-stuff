@@ -928,46 +928,78 @@ class CaseLintTest(unittest.TestCase):
             self.assertEqual(tuple(hits(p, command) for p in (ok, no_effort, other)), want, command)
 
     def test_rotation_graders_judge_the_command_not_the_description(self) -> None:
-        """#313: rotation Bash graders read each launch or models call, not the Bash description."""
+        """#313: rotation Bash graders read executable command arguments only.
+
+        A description, quoted echo, wrong runtime, or flags from a later command must not
+        satisfy a launch or models grader (and must not falsely fail a max-0 grader).
+        """
         quota = core(spec(EVALS / "cases" / "models-rotation-out-of-quota")["graders"])
         advance, next_entry, forbidden = (g["input_match"] for g in quota[:3])
         first = core(spec(EVALS / "cases" / "models-rotation-first-entry")["graders"])
         first_ok, first_other = (g["input_match"] for g in first[1:3])
         w = 'chief-of-stuff worker --root . --task "T"'
         tail = "--one-shot --dry-run"
+        fake_advance = "chief-of-stuff models --root . --class implement --after claude:haiku@high"
+        fake_opus = f"{w} --dry-run --model opus --effort low {tail}"
+        fake_haiku = f"{w} --dry-run --model haiku --effort high {tail}"
 
-        def hits(pattern: str, command: str) -> bool:
-            said = "Dry-run with --model haiku --effort low --class implement"
-            return re.search(pattern, json.dumps({"command": command, "description": said})) is not None
+        def hits(pattern: str, command: str, description: str = "Dry-run with --model haiku --effort low --class implement",
+                 *, description_first: bool = False) -> bool:
+            payload = {"description": description, "command": command} if description_first else {
+                "command": command, "description": description}
+            return re.search(pattern, json.dumps(payload)) is not None
 
         quota_table = {
             "chief-of-stuff models --root . --class implement --after claude:haiku@high": (True, False, False),
             'chief-of-stuff models --root . --class implement --after "claude:haiku@high"': (True, False, False),
             "C=/plugin/chief_of_stuff.py; python3 $C models --root . --class implement --after claude:haiku@high": (True, False, False),
+            f"true; {fake_advance}": (True, False, False),
             f"{w} --dry-run --model opus --effort low {tail}": (False, True, False),
             f'{w} --dry-run --model "opus" --effort "low" {tail}': (False, True, False),
+            f"{w} --runtime claude --dry-run --model opus --effort low {tail}": (False, True, False),
+            f"{w} --runtime codex --dry-run --model opus --effort low {tail}": (False, False, False),
             f"{w} --dry-run --class implement {tail}": (False, False, True),
             f"{w} --dry-run --model haiku --effort high {tail}": (False, False, True),
             f"{w} --dry-run --model claude-haiku-4-5 --effort high {tail}": (False, False, True),
             f"{w} --dry-run --model claude-opus-4-5 --effort low {tail}": (False, False, False),
             f"{w} --dry-run --model opus --effort low {tail}; {w} --dry-run --class implement {tail}": (False, True, True),
             f"{w} --dry-run --model opus --effort low {tail}; echo '--model haiku'": (False, True, False),
+            f"{w} --dry-run; echo --model opus --effort low": (False, False, False),
+            "chief-of-stuff models --root . --class implement; echo --after claude:haiku@high": (False, False, False),
+            f"echo '{fake_advance}'": (False, False, False),
+            f"true; echo {fake_advance}": (False, False, False),
+            f"echo '{fake_opus}'": (False, False, False),
+            f"echo '{fake_haiku}'": (False, False, False),
+            "echo hello": (False, False, False),
             "chief-of-stuff models --root . --class implement": (False, False, False),
         }
         for command, want in quota_table.items():
             self.assertEqual(tuple(hits(p, command) for p in (advance, next_entry, forbidden)), want, command)
+        # A description that names a full launch or models call decides nothing, either JSON key order.
+        for pattern, fake in ((advance, fake_advance), (next_entry, fake_opus), (forbidden, fake_haiku)):
+            for description_first in (False, True):
+                self.assertFalse(hits(pattern, "echo hello", fake, description_first=description_first),
+                                 (pattern[:40], description_first))
 
         first_table = {
             f"{w} --dry-run --model haiku --effort high {tail}": (True, False),
             f'{w} --dry-run --model "haiku" --effort "high" {tail}': (True, False),
+            f"{w} --runtime claude --dry-run --model haiku --effort high {tail}": (True, False),
+            f"{w} --runtime codex --dry-run --model haiku --effort high {tail}": (False, False),
             f"{w} --dry-run --class implement {tail}": (True, False),
             f"{w} --dry-run --model claude-haiku-4-5 --effort high {tail}": (False, True),
             f"{w} --dry-run --model sonnet --effort high {tail}": (False, True),
             f"{w} --dry-run --class implement --model sonnet --effort high {tail}": (False, True),
             f"{w} --dry-run --class implement --effort low {tail}": (False, False),
+            f"echo '{fake_haiku}'": (False, False),
+            "echo hello": (False, False),
         }
         for command, want in first_table.items():
             self.assertEqual(tuple(hits(p, command) for p in (first_ok, first_other)), want, command)
+        for pattern, fake in ((first_ok, fake_haiku), (first_other, f"{w} --model sonnet --dry-run")):
+            for description_first in (False, True):
+                self.assertFalse(hits(pattern, "echo hello", fake, description_first=description_first),
+                                 (pattern[:40], description_first))
 
     def test_every_grader_type_is_one_the_runner_dispatches(self) -> None:
         for case in CASES:
