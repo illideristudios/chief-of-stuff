@@ -5,18 +5,18 @@
     "scope": "user",
     "enabled": true,
     "installPath": "captured-install-path",
-    "installedAt": "2026-03-14T22:45:43.800Z",
-    "lastUpdated": "2026-03-14T22:45:43.800Z",
-    "projectEnabled": false
-  },
-  {
-    "id": "chief-of-stuff@chief-of-stuff",
-    "version": "0.129.115",
-    "scope": "user",
-    "enabled": true,
-    "installPath": "captured-install-path",
-    "installedAt": "2026-03-29T00:54:04.242Z",
-    "lastUpdated": "2026-04-20T05:13:16.925Z",
+    "installedAt": "2026-10-10T02:40:18.221Z",
+    "lastUpdated": "2026-10-10T02:40:18.221Z",
+    "errors": [
+      "Plugin datetime-inject not found in marketplace ai-additions"
+    ],
+    "errorDetails": [
+      {
+        "type": "plugin-not-found",
+        "plugin": "datetime-inject",
+        "marketplace": "ai-additions"
+      }
+    ],
     "projectEnabled": false
   }
 ]

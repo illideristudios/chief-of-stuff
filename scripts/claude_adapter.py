@@ -34,9 +34,33 @@ from shell_setup import ShellError, clean_env, login_argv, resolve
 RUNTIME = runtimes.get("claude")
 
 
+class ClockError(ShellError):
+    """The host is present and the worker clock is not usable, including when inventory cannot be spawned."""
+
+
 def available() -> str | None:
     """Claude's executable on the user's interactive login PATH; no model call."""
     return resolve(RUNTIME.binary)
+
+
+def command(request: Request, claude_as_profile: str = "", *, extra_args: tuple[str, ...] = (),
+            path_prefix: str = "", check_clock: bool = True) -> list[str]:
+    """Resolve the registry's host through shell setup, refuse an unusable worker clock, and build exact login argv."""
+    if request.session_id and not request.resume and not _is_uuid(request.session_id):
+        raise ShellError(f"session_id {request.session_id!r} must be a UUID to start a session")
+    binary, lead = _host(claude_as_profile)
+    if request.worker and check_clock:
+        _check_clock(binary, lead, request.cwd)
+    built = argv(request, binary, lead)
+    # The delimiter, rather than the tail length, owns the boundary between options and prompt.
+    boundary = built.index("--")
+    return login_argv([*built[:boundary], *extra_args, *built[boundary:]], path_prefix=path_prefix)
+
+
+def require_worker_clock(claude_as_profile: str = "", cwd: str | None = None) -> None:
+    """Refuse before a worker launch creates a run directory or claims a slot."""
+    binary, lead = _host(claude_as_profile)
+    _check_clock(binary, lead, cwd)
 
 
 def _host(claude_as_profile: str) -> tuple[str, list[str]]:
@@ -48,54 +72,70 @@ def _host(claude_as_profile: str) -> tuple[str, list[str]]:
     return binary, lead
 
 
-def command(request: Request, claude_as_profile: str = "", *, extra_args: tuple[str, ...] = (),
-            path_prefix: str = "") -> list[str]:
-    """Resolve the registry's host through shell setup and build exact login argv."""
-    if request.session_id and not request.resume and not _is_uuid(request.session_id):
-        raise ShellError(f"session_id {request.session_id!r} must be a UUID to start a session")
-    binary, lead = _host(claude_as_profile)
-    built = argv(request, binary, lead)
-    # The delimiter, rather than the tail length, owns the boundary between options and prompt.
-    boundary = built.index("--")
-    return login_argv([*built[:boundary], *extra_args, *built[boundary:]], path_prefix=path_prefix)
+def _check_clock(binary: str, lead: list[str], cwd: str | None) -> None:
+    """Unbilled preflight in the worker's account. Workers load user settings only, never project plugins."""
+    chosen = clock.user_clock(_plugins(binary, lead, cwd))
+    if chosen is None:
+        raise ClockError("worker requires datetime-inject@ai-additions installed and enabled at user scope "
+                         "in its Claude account; install/enable it there before retrying")
+    if not _payload(chosen.get("installPath")):
+        raise ClockError("worker requires datetime-inject@ai-additions installed at user scope with its hook "
+                         "payload on disk; reinstall it in its Claude account")
+    spec = _manifest_spec()
+    if not clock.version_ok(str(chosen.get("version", "")), spec):
+        raise ClockError(f"worker requires datetime-inject@ai-additions version {spec}; update it in its Claude account")
 
 
-def require_worker_clock(claude_as_profile: str = "", cwd: str | None = None) -> None:
-    """Refuse a worker launch unless `datetime-inject@ai-additions` is enabled at user scope (1.0 plan, M3 item 8)."""
-    binary, lead = _host(claude_as_profile)
-    prepared = login_argv([binary, *lead, "--setting-sources", "user", "plugin", "list", "--json"])
-    with tempfile.TemporaryFile() as out_file, tempfile.TemporaryFile() as err_file:
-        try:
-            process = subprocess.Popen(prepared, env=clean_env(), cwd=cwd, stdin=subprocess.DEVNULL,
-                                       stdout=out_file, stderr=err_file, start_new_session=True)
-        except OSError as exc:
-            raise RuntimeError(f"cannot verify worker clock plugin {clock.WORKER_CLOCK_PLUGIN}: {exc}") from exc
-        try:
-            code = process.wait(timeout=15)
-        except subprocess.TimeoutExpired as exc:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            process.wait(timeout=5)
-            raise RuntimeError(f"worker clock check for {clock.WORKER_CLOCK_PLUGIN} timed out after 15s") from exc
-        out_file.seek(0)
-        err_file.seek(0)
-        stdout = out_file.read().decode(errors="replace")
-        stderr = err_file.read().decode(errors="replace").strip()
-    if code != 0:
-        detail = stderr or f"exit {code}"
-        raise RuntimeError(f"cannot verify worker clock plugin {clock.WORKER_CLOCK_PLUGIN}: {detail}")
+def _plugins(binary: str, lead: list[str], cwd: str | None) -> list:
     try:
-        plugins = json.loads(stdout)
-    except ValueError as exc:
-        raise RuntimeError(
-            f"cannot parse `claude --setting-sources user plugin list --json` while checking {clock.WORKER_CLOCK_PLUGIN}"
-        ) from exc
-    if clock.user_clock(plugins) is None:
-        raise RuntimeError(
-            f"worker launch requires plugin {clock.WORKER_CLOCK_PLUGIN} installed and enabled at user scope"
-        )
+        code, out, err = _inventory(login_argv([binary, *lead, "--setting-sources", "user", "plugin", "list", "--json"]), cwd)
+        if code:
+            detail = err.strip()
+            raise ValueError(f"plugin list exited {code}" + (f": {detail}" if detail else ""))
+        plugins = json.loads(out)
+        if not isinstance(plugins, list) or any(not isinstance(p, dict) for p in plugins):
+            raise ValueError("plugin list must be an array of objects")
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise ClockError(f"worker clock preflight failed: {exc}") from None
+    return plugins
+
+
+def _inventory(argv: list[str], cwd: str | None) -> tuple[int, str, str]:
+    """Read plugin list from a file. A pipe truncates past 64KiB on affected Claude Code versions."""
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        proc = subprocess.Popen(argv, env=clean_env(), cwd=cwd, stdin=subprocess.DEVNULL,
+                                stdout=stdout, stderr=stderr, start_new_session=True)
+        try:
+            code = proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            # The login shell execs the host, which can fork; kill the group, not only the child.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
+        stdout.seek(0)
+        stderr.seek(0)
+        return code, stdout.read().decode(), stderr.read().decode(errors="replace")
+
+
+def _payload(path: object) -> bool:
+    # shortcut: payload is hooks/hooks.json; a renamed hook file needs this path updated.
+    return isinstance(path, str) and path != "" and (Path(path) / "hooks" / "hooks.json").is_file()
+
+
+def _manifest_spec() -> str:
+    try:
+        manifest = json.loads((Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json").read_text())
+        return clock.declared_clock(manifest)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise ClockError(f"worker clock manifest unreadable: {exc}") from None
+
+
 
 
 def _pin_config_dir(environment: dict[str, str], claude_as_profile: str) -> None:
@@ -113,10 +153,11 @@ def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
     Claude workers take stream input (#1160): the runner owns the only stdin pipe, sends the assignment as the first
     message, and later delivers operator messages from its mailbox. --replay-user-messages echoes each caller uuid.
     """
+    # worker.launch checks the clock for a local Claude entry before it gets here; start does not.
     overlay = dict(env or {})
     _pin_config_dir(overlay, claude_as_profile)
     prepared = command(replace(request, keep_events=True), claude_as_profile,
-                       extra_args=("--input-format", "stream-json", "--replay-user-messages"))
+                       extra_args=("--input-format", "stream-json", "--replay-user-messages"), check_clock=False)
     prepared.pop()  # stream input has no positional prompt, as in drive_turns
     config_dir = overlay.get("CLAUDE_CONFIG_DIR") or str(session_logs.claude_home())
     return spawn(prepared, request, run_dir, overlay, stdin_prompt=request.prompt, config_dir=config_dir)
@@ -647,6 +688,8 @@ def call(request: Request, *, claude_as_profile: str = "", extra_args: tuple[str
     try:
         prepared = command(request, claude_as_profile, extra_args=extra_args,
                            path_prefix=source.get("CHIEF_OF_STUFF_PATH_PREFIX", ""))
+    except ClockError as exc:
+        return Failure("clock", str(exc))
     except ShellError as exc:
         return Failure("missing_program", str(exc))
     if artifacts is not None:

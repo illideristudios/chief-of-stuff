@@ -10,6 +10,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from evals import git_taint, test_one_shot as fixtures, test_worker as engine_fixtures
@@ -199,7 +200,7 @@ class WorkerTeardownTest(unittest.TestCase):
         run = fx.launched()
         calls = []
         def collect():
-            with mock.patch.object(worker.process_status, "identity", return_value=None), \
+            with mock.patch.object(worker.process_status, "identity", return_value="process-start"), \
                  mock.patch.object(worker, "teardown", side_effect=lambda *args: calls.append(args) or []):
                 worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW, teardown_command="down")
         collect()
@@ -222,6 +223,125 @@ class WorkerTeardownTest(unittest.TestCase):
         collect()
         self.assertEqual(len(calls), 1)
         self.assertIsNotNone(fx.db.segments(engine_fixtures.KEY)[0].ended_at)
+
+    def test_retryable_exit_keeps_teardown_marker_when_completion_cannot_close(self):
+        for output in ("429 quota exceeded; resets in 2 hours", "connection reset"):
+            with self.subTest(output=output):
+                fx = engine_fixtures.WorkerTest("runTest")
+                fx.setUp()
+                self.addCleanup(fx.doCleanups)
+                run = fx.launched()
+                (run / "stdout").write_text(json.dumps({"is_error": True, "result": output})
+                                             if output.startswith("429") else output)
+                (run / "stderr").write_text("")
+                (run / "exit.json").write_text('{"exit_code": 1}')
+                finish = mock.Mock(side_effect=RuntimeError("hold unavailable"))
+                with mock.patch.object(worker, "teardown", return_value=["cleanup failed"]) as teardown:
+                    for _ in range(2):
+                        worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW,
+                                       teardown_command="down", finish=finish)
+                        data = fx.db.resume(engine_fixtures.KEY)
+                        self.assertTrue(data["runs"]["implement-1"].get("torn_down"))
+                        self.assertIn("retry_at", data["quota"])
+                teardown.assert_called_once_with(fx.root, fx.tree, fx.tree.name, "down")
+                self.assertEqual(sum("worker teardown failed" in row.message
+                                     for row in fx.db.log(engine_fixtures.KEY)), 1)
+                self.assertEqual(finish.call_count, 2)
+                self.assertIsNone(fx.db.segments(engine_fixtures.KEY)[0].ended_at)
+
+    def test_callback_free_suite_hold_preserves_teardown_marker(self):
+        fx = engine_fixtures.WorkerTest("runTest")
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        fx.suite_run()
+        with mock.patch.object(worker, "teardown", return_value=[]) as teardown:
+            worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW,
+                           teardown_command="down", require_green=True)
+            data = fx.db.resume(engine_fixtures.KEY)
+            self.assertTrue(data["runs"]["implement-1"].get("torn_down"))
+            self.assertIn("suite_hold", data)
+            self.assertEqual(fx.db.segments(engine_fixtures.KEY)[0].outcome, "human_review")
+            worker.teardown_once(fx.db, fx.root, engine_fixtures.KEY, "implement", 1,
+                                 "down", engine_fixtures.NOW.isoformat())
+        teardown.assert_called_once()
+
+    def test_dead_exitless_worker_tears_down_while_merged_item_waits_for_main_ci(self):
+        fx = engine_fixtures.WorkerTest("runTest")
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        fx.launched()
+        forge = engine_fixtures.FakeForge()
+        forge.rows[0].update(forge_state="closed", merge_state="merged")
+        forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status=status)
+        forge.landings = lambda pipeline, keys, **kwargs: {
+            engine_fixtures.KEY: (True, pipeline.status == "passed")}
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker, "teardown", return_value=["cleanup failed"]) as teardown, \
+             mock.patch.object(engine, "_record_limits"), \
+             mock.patch.object(engine.cleanup, "execute", return_value=0) as cleanup, \
+             mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(
+                 engine_fixtures.reconcile.TreeState("head", 0, 0, 0), True, engine_fixtures.NOW)):
+            for status in ("running", "failed", "none"):
+                actions = engine.run_pass(forge=forge, store=fx.db, policies=fx.p, root=fx.root,
+                                          trees=fx.trees, launch=fx.launch, workers=settings.Workers(),
+                                          teardown_command="down", clock=lambda: engine_fixtures.NOW)
+                self.assertIsInstance(actions[0], engine_fixtures.reconcile.Wait)
+                self.assertIn("merged, awaiting main CI", actions[0].reason)
+                self.assertIsNone(fx.db.segments(engine_fixtures.KEY)[0].ended_at)
+                self.assertTrue(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"].get("torn_down"))
+                self.assertNotIn(engine_fixtures.KEY, cleanup.call_args.kwargs["completed"])
+        teardown.assert_called_once_with(fx.root, fx.tree, fx.tree.name, "down")
+        self.assertEqual(sum("worker teardown failed" in row.message
+                             for row in fx.db.log(engine_fixtures.KEY)), 1)
+
+    def test_exitless_worker_keeps_stack_when_host_or_runner_may_be_alive(self):
+        fx = engine_fixtures.WorkerTest("runTest")
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        fx.launched()
+        probes = (("process-start",), (None, "process-start"),
+                  (RuntimeError("host unverified"),), (None, OSError("runner unverified")))
+        for identities in probes:
+            with self.subTest(identities=identities), \
+                 mock.patch.object(worker.process_status, "identity", side_effect=identities), \
+                 mock.patch.object(worker, "teardown") as teardown:
+                worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW, teardown_command="down")
+                teardown.assert_not_called()
+                self.assertFalse(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"].get("torn_down"))
+                self.assertIsNone(fx.db.segments(engine_fixtures.KEY)[0].ended_at)
+
+    def test_t3_worker_keeps_stack_until_remote_thread_ends(self):
+        fx = engine_fixtures.WorkerTest("runTest")
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        run = fx.launched()
+        fx.db.update_resume(engine_fixtures.KEY, lambda d: d["runs"]["implement-1"].update(
+            launcher="t3", runtime="claude", identity="t3", runner_identity="t3", branch_heads={}))
+        live = worker.t3_adapter.Evidence(alive=True, launcher="t3", status="running")
+        unknown = worker.t3_adapter.Evidence(launcher="t3", error="T3 evidence unavailable")
+        for observed in (live, unknown):
+            with self.subTest(observed=observed), \
+                 mock.patch.object(worker.t3_adapter, "observe", return_value=observed), \
+                 mock.patch.object(worker.process_status, "identity", side_effect=AssertionError("PID check forbidden for T3")), \
+                 mock.patch.object(worker, "teardown") as teardown:
+                worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW, teardown_command="down")
+                teardown.assert_not_called()
+                self.assertFalse(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"].get("torn_down"))
+        ended = worker.t3_adapter.Evidence(alive=False, launcher="t3", status="completed")
+        def refresh(run_dir):
+            (run_dir / "exit.json").write_text("{\"exit_code\": 0}")
+            (run_dir / "stdout").write_text("done")
+            (run_dir / "stderr").write_text("")
+            return {"status": "completed", "activeRunId": None, "pendingRequestCount": 0}
+        fx.report(run)
+        with mock.patch.object(worker.t3_adapter, "observe", return_value=ended), \
+             mock.patch.object(worker.t3_adapter, "refresh", side_effect=refresh), \
+             mock.patch.object(worker.host_adapter, "moved_outside_engine", return_value=""), \
+             mock.patch.object(worker.process_status, "identity", side_effect=AssertionError("PID check forbidden for T3")), \
+             mock.patch.object(worker, "teardown", return_value=[]) as teardown:
+            worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW, teardown_command="down")
+        teardown.assert_called_once_with(fx.root, fx.tree, fx.tree.name, "down")
+        self.assertTrue(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"].get("torn_down"))
 
     def test_a_stuck_teardown_warns_after_sigkill_without_waiting(self):
         class Child:
@@ -249,12 +369,15 @@ class WorkerTeardownTest(unittest.TestCase):
                 return None
 
         child = Child()
+        pending = []
         with mock.patch.object(shell_setup.subprocess, "Popen", return_value=child), \
+             mock.patch.object(shell_setup, "_unreaped_children", pending, create=True), \
              mock.patch.object(shell_setup.os, "killpg") as kill:
             warnings = shell_setup.teardown(self.root, self.tree, "worker01", "exit 0")
         kill.assert_called_once()
-        self.assertEqual(child.waits, [120, 5])
-        self.assertIsNotNone(child.returncode)
+        self.assertEqual(child.waits, [120, 1])
+        self.assertIsNone(child.returncode)
+        self.assertEqual(pending, [child])
         self.assertTrue(warnings)
         self.assertIn("timed out", warnings[0])
 
