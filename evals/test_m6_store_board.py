@@ -264,7 +264,7 @@ class FailedAttemptBoardParityTest(unittest.TestCase):
 
     def _row(self, db: store.Store, key: str) -> tuple[str, gantt.Row]:
         quoted = urllib.parse.quote(key, safe="")
-        return next((status, row) for status, row in fc.build_from_store(db, NOW, include_hold_bars=True)
+        return next((status, row) for _key, status, row in fc.build_from_store(db, NOW, include_hold_bars=True)
                     if row.href.endswith(quoted))
 
     def _parity(self, root: Path, db: store.Store) -> None:
@@ -274,9 +274,9 @@ class FailedAttemptBoardParityTest(unittest.TestCase):
         cfg = st.load(root, "cos.toml")
         tasks, *_ = rb._tasks_from_store(data, cfg, cfg.lanes, cfg.kanban, NOW.date())
         running_tasks = [t for t in tasks if t.kind == "running"]
-        open_flow = sum(1 for status, _ in flow if status == "open")
+        open_flow = sum(1 for _, status, _ in flow if status == "open")
         self.assertEqual(counts["dispatch"], open_flow)
-        self.assertEqual(len(running_tasks), sum(1 for status, _ in flow if status == "running"))
+        self.assertEqual(len(running_tasks), sum(1 for _, status, _ in flow if status == "running"))
 
     def test_build_from_store_status_and_segment_kinds(self) -> None:
         root, db = make_store_workspace()
@@ -306,15 +306,15 @@ class FailedAttemptBoardParityTest(unittest.TestCase):
         data = task_forge.page_data(db)
         counts = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
         flow = fc.build_from_store(db, NOW)
-        self.assertEqual(sum(1 for status, _ in flow if status == "running"), 1)
-        self.assertEqual(counts["dispatch"], sum(1 for status, _ in flow if status == "open"))
+        self.assertEqual(sum(1 for _, status, _ in flow if status == "running"), 1)
+        self.assertEqual(counts["dispatch"], sum(1 for _, status, _ in flow if status == "open"))
 
     def test_flow_section_and_issue_page_show_open_not_running(self) -> None:
         root, db = make_store_workspace()
         self.addCleanup(db.engine.dispose)
         _seed_failed_attempt_fixtures(db, live_worker=False)
         rows = fc.build_from_store(db, NOW, include_hold_bars=True)
-        html = fc.section(rows, NOW)
+        html = fc.section([(s, r) for _, s, r in rows], NOW)
         self.assertIn("queued", html)
         self.assertNotRegex(html, r"\brunning\b")
         self.assertIn("gantt-failed", html)
@@ -786,7 +786,7 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         trio_gate.record(self.db, KEY, transition.update)
         transition = decision_actions.refuse(self.db.decisions(KEY)[-1], "conflict")
         trio_gate.record(self.db, KEY, transition.update)
-        row = next((status, row) for status, row in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+        row = next((status, row) for _k, status, row in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                    if row.href.endswith(urllib.parse.quote(KEY, safe="")))
         self.assertEqual(row[0], "needs input")
         self.assertIn("hold", [s.kind for s in row[1].segments])
@@ -939,7 +939,7 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
         evidence = data.exhaustion(KEY_A)
         self.assertIsNotNone(evidence)
         self.assertEqual(evidence.failure, failure)
-        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+        status, row = next((s, r) for _k, s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                            if r.href.endswith(urllib.parse.quote(KEY_A, safe="")))
         self.assertEqual(status, "needs input")
         self.assertIn(task_forge.EXHAUSTED_CHIP, row.note)
@@ -966,7 +966,7 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
                         failure="dispatch failed: worktree missing", live=True)
         data = task_forge.page_data(self.db)
         self.assertIsNone(data.exhaustion(KEY_B))
-        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+        status, row = next((s, r) for _k, s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                            if r.href.endswith(urllib.parse.quote(KEY_B, safe="")))
         self.assertEqual(status, "running")
         self.assertNotIn(task_forge.EXHAUSTED_CHIP, row.note)
@@ -1013,7 +1013,7 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
         data = task_forge.page_data(self.db)
         self.assertIsNone(data.exhaustion(KEY_C))
         self.assertTrue(any(e.message.startswith("exhausted:") for e in data.log(KEY_C)))
-        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+        status, row = next((s, r) for _k, s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                            if r.href.endswith(urllib.parse.quote(KEY_C, safe="")))
         self.assertEqual(status, "open")
         self.assertNotIn(task_forge.EXHAUSTED_CHIP, row.note)

@@ -597,6 +597,30 @@ class HomeProjectUrlTest(unittest.TestCase):
         self.assertEqual(card.refs, (("#8", fragment.issue_href("gitlab:example.com/o/app#8")),))
 
 
+class ForeignProjectUrlTest(unittest.TestCase):
+    """#416: a card naming another project on the home host uses that identity's task page, not `/issues/<n>`."""
+
+    HOME = backlog.Backlog(host="https://example.com", project="o/app")
+    CELL = "https://example.com/acme/web/-/issues/8"
+    IDENTITY = "gitlab:example.com/acme/web#8"
+
+    def card(self, issues: dict) -> columns.Card:
+        sources = bs.Sources({}, issues, {}, (), {}, self.HOME)
+        tracker = TRACKER.replace("## Decisions", f"| Ship it | Ship | Robin | waiting | 09:00 |  | S | build | review | {self.CELL} | c |\n\n## Decisions")
+        return card_named(rb.build_columns(rb.parse_tracker(tracker).tasks, LANES, KANBAN, sources, NOW), "Ship it")
+
+    def test_the_name_and_the_ref_open_the_other_projects_issue(self) -> None:
+        # Main routes verified foreign identities through issue_href, not the forge URL (#1173).
+        known = {self.IDENTITY: bs.Issue(self.IDENTITY, self.CELL, "Locale", "open", ())}
+        expected = ((self.IDENTITY, fragment.issue_href(self.IDENTITY)),)
+        for issues in ({}, known):
+            with self.subTest(cached=bool(issues)):
+                card = self.card(issues)
+                self.assertEqual(card.refs, expected)
+                self.assertEqual(card.href, fragment.issue_href(self.IDENTITY))
+                self.assertNotEqual(card.href, "/issues/8")
+
+
 class CardLinkTest(unittest.TestCase):
     """A board card's name opens its task page (#194); its issue and change refs open their pages too, through
     the change's own first issue when it differs from the card's (#209)."""

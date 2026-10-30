@@ -54,7 +54,7 @@ import trio_gate
 import worker
 from forge_port import ForgeError
 from reconcile import OP_DECISION_COMMENT, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN
-from workspace import read_engine_status, worktrees_dir, write_engine_status
+from workspace import read_engine_status, settings_path, worktrees_dir, write_engine_status
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 TRIO_PASS_BUDGET_S = 480  # #927: trio calls stop here in one pass; above TIMEOUT_S so a slow vote leaves room for two more
@@ -1351,6 +1351,11 @@ def main(argv: list[str] | None = None) -> int:
                 _handoff(installed, python, root, args.interval, args.once)
                 return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
+            try:
+                supervisor.record_engine_start(
+                    root, datetime.now(timezone.utc).astimezone().isoformat(), os.getpid())
+            except OSError as exc:
+                print(f"engine: could not record start for bake: {exc}", file=sys.stderr, flush=True)
             prior = read_engine_status(root)
             mode = "once" if args.once else "service"
             release = str(supervisor.RELEASE)
@@ -1391,11 +1396,7 @@ def main(argv: list[str] | None = None) -> int:
                     selected = next(iter(config.repos.values()))
                 if not selected and config.repos:
                     raise ValueError("no [repos] clone matches the workspace backlog")
-                launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
-                                 clone=root / selected if selected else root,
-                                 claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
-                                 require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown,
-                                 launcher=config.workers.worker_launcher, t3_providers=config.workers.t3_providers)
+                launch_config = config
                 model = model_port.Port(partial(_judge, claude_as_profile=config.workers.claude_as_profile),
                                         rotation=config.models.get("trio", ()), pick=config.model_picks.get("trio", "first"),
                                         launchable=_judges)
@@ -1446,9 +1447,26 @@ def main(argv: list[str] | None = None) -> int:
                                             mode=mode, last_error=last_error, error_kind=error_kind, release=release)
                     failed = False
                     try:
+                        # Every launch in this pass shares rules and stage defaults, even if the file changes.
+                        reloaded_config = settings.load(root, settings_path(text))
+                        if reloaded_config.kanban is None:
+                            raise settings.SettingsError(f"{settings_path(text)}: no [kanban] stage labels configured")
+                        dispatch_prompt.validate_worker_rules(root, reloaded_config, policies)
+                        launch_config = reloaded_config
+                    # Validation can also raise ValueError or OverflowError, which settings.load does not wrap.
+                    except Exception as exc:
+                        print(f"engine: settings reload failed; keeping last good snapshot: {exc}",
+                              file=sys.stderr, flush=True)
+                    try:
+                        launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
+                                         clone=root / selected if selected else root, config=launch_config,
+                                         launcher=launch_config.workers.worker_launcher,
+                                         t3_providers=launch_config.workers.t3_providers)
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency, model=model,
-                                 require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
+                                 launch=launch, workers=launch_config.workers,
+                                 max_concurrency=launch_config.workers.max_concurrency, model=model,
+                                 require_green=launch_config.workers.require_green_tests,
+                                 teardown_command=launch_config.workers.teardown)
                     except Exception as exc:
                         failed = True
                         last_attempt_at = datetime.now(timezone.utc)

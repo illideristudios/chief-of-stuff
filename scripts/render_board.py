@@ -437,7 +437,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
         navigation = tab_counts(tracker_text, cfg, now, lanes or {}, kanban, sources, pending_refs, looked,
                                 [*(look_log or []), *(stage_log or [])], slots, held=held, ends=ends, tracker_day=tracker_day)
     if db is not None:
-        flow_rows = flow_chart.build_from_store(db, now, include_hold_bars=True)
+        # build_from_store yields (issue_key, status, row); the board section only needs status+row.
+        flow_rows = [(s, r) for _key, s, r in flow_chart.build_from_store(db, now, include_hold_bars=True)]
     else:
         flow_rows = flow_chart.build(flow_moves, known, lanes or {}, held_names(held), ends, now,
                                      queue_durations(active, hist), slots,
