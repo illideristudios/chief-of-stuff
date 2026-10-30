@@ -413,14 +413,14 @@ class BoardTest(unittest.TestCase):
     CLAUDE = "# W\n\n## Coordinator\n\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n- Settings: `cos.toml`\n"
 
     def cfg(self):
-        return parse_coordinator(self.CLAUDE, today=TODAY)
+        return replace(parse_coordinator(self.CLAUDE, today=TODAY),
+                       backlog=Backlog("https://forge.example", "grp/app"))
 
-    def test_flow_sits_after_build_and_the_panels(self):
+    def test_flow_sits_after_build(self):
         html = rb.render(TODAY_TRACKER, self.cfg(), NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
                          stage_log=[(YESTERDAY, YESTERDAY_TRACKER)])
-        build, panels, flow = html.index("<h2>Build</h2>"), html.index('class="panels"'), html.index("<h2>Flow · 24 hours</h2>")
-        self.assertLess(build, panels)
-        self.assertLess(panels, flow)
+        self.assertLess(html.index("<h2>Build</h2>"), html.index("<h2>Flow · 24 hours</h2>"))
+        self.assertNotIn('class="panels"', html)
         self.assertIn('title="implement Fri 22:00–Sat 01:00', html)
         self.assertIn("gantt-hold", html)
 
@@ -433,10 +433,10 @@ class BoardTest(unittest.TestCase):
     def test_an_open_approved_change_labels_its_task_approved(self):
         change = bs.Change("!48", "u", "Cap uploads", "open", False, "passed", True, 1, None, "main", (), ("#109",))
         html = rb.render(TODAY_TRACKER, self.cfg(), NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
-                         sources=bs.Sources({}, {}, {"!48": change}, (), {}))
+                         sources=bs.Sources({}, {}, {"!48": change}, (), {}, bs.backlog.Backlog('https://forge.example', 'grp/app')))
         self.assertIn(">approved · merge Sun<", html[html.index("Flow · 24 hours"):])
         html = rb.render(TODAY_TRACKER, self.cfg(), NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
-                         sources=bs.Sources({}, {}, {"!48": replace(change, approved=False)}, (), {}))
+                         sources=bs.Sources({}, {}, {"!48": replace(change, approved=False)}, (), {}, bs.backlog.Backlog('https://forge.example', 'grp/app')))
         self.assertNotIn(">approved", html[html.index("Flow · 24 hours"):])
 
     def test_no_stage_line_no_flow_and_no_chart_css(self):
@@ -1097,8 +1097,8 @@ class FullIssueMergeKeyTest(unittest.TestCase):
         built = fc.build(fc.moves(text, TODAY, CT), rb.parse_tracker(text).tasks, LANES, {}, {}, NOW)
         self.assertEqual(len(built), 2)
         self.assertEqual([(r.ref, r.name) for _, r in built], [
-            ("forge.example/group/project#7", "Build parser"),
-            ("forge.example/group/other#7", "Build formatter"),
+            ("gitlab:forge.example/group/project#7", "Build parser"),
+            ("gitlab:forge.example/group/other#7", "Build formatter"),
         ])
         self.assertEqual([[(g.start, g.end, g.title) for g in r.segments] for _, r in built], [
             [(at(TODAY, "00:10"), NOW, "worker-1"), (at(TODAY, "00:40"), NOW, "worker-2")],
@@ -1210,7 +1210,7 @@ class ChangeBridgeReviewTest(unittest.TestCase):
                 self.assertEqual(len(got), 1, "a change URL alone must use the unique issue bridge")
                 status, row = got[0]
                 self.assertEqual((status, row.name), ("running", "Build parser"))
-                self.assertEqual(row.ref, "forge.example/group/project#7")
+                self.assertEqual(row.ref, "gitlab:forge.example/group/project#7")
                 self.assertEqual([(g.start, g.end, g.title) for g in row.segments], [
                     (at(TODAY, "00:10"), NOW, "w1"), (at(TODAY, "00:40"), NOW, "w2"),
                     (at(TODAY, "01:10"), NOW, "w3")])
@@ -1274,20 +1274,19 @@ class HomeFlowReviewTest(unittest.TestCase):
         self.assertEqual([(g.start, g.end, g.title) for g in row.segments], [
             (at(TODAY, "00:10"), NOW, "w1"), (at(TODAY, "00:40"), NOW, "w2")])
 
-    def test_render_board_passes_sources_home_to_build_by_keyword(self):
+    def test_render_board_passes_configured_home_to_build_by_keyword(self):
         sources = bs.Sources({}, {}, {}, (), {}, home=self.HOME)
-        # Deliberately different: config.backlog must not replace the source cache's home.
         cfg = replace(BoardTest().cfg(), backlog=Backlog("https://forge.example", "other/project"))
         with mock.patch.object(rb.flow_chart, "build", wraps=fc.build) as build:
             rb.render(self.tracker(), cfg, NOW, lanes=LANES, tracker_day=TODAY, sources=sources)
         self.assertEqual(build.call_count, 1)
-        self.assertIs(build.call_args.kwargs.get("home"), sources.home)
+        self.assertIs(build.call_args.kwargs.get("home"), cfg.backlog)
 
     def test_build_without_home_preserves_the_existing_bare_issue_key(self):
         text = self.tracker()
         got = fc.build(fc.moves(text, TODAY, CT), rb.parse_tracker(text).tasks, LANES, {}, {}, NOW)
         self.assertEqual([(r.name, r.ref) for _, r in got], [
-            ("Build parser", "#7"), ("Review parser", "forge.example/group/project#7")])
+            ("Build parser", "#7"), ("Review parser", "gitlab:forge.example/group/project#7")])
 
 
 class WorkflowKeyReviewTest(unittest.TestCase):
@@ -1313,7 +1312,7 @@ class WorkflowKeyReviewTest(unittest.TestCase):
         got = self.build(self.context_tracker(ISSUE_URL))
         self.assertEqual(len(got), 2, "a context issue is not this change's closing issue")
         self.assertEqual([(r.name, r.ref) for _, r in got], [
-            ("Build parser", "forge.example/group/project#7"),
+            ("Build parser", "gitlab:forge.example/group/project#7"),
             ("Review formatter", self.OTHER_CHANGE)])
         self.assertEqual([[(g.start, g.end, g.title) for g in r.segments] for _, r in got], [
             [(at(TODAY, "00:10"), NOW, "w1")], [(at(TODAY, "00:40"), NOW, "w2")]])
@@ -1342,8 +1341,8 @@ class WorkflowKeyReviewTest(unittest.TestCase):
         got = self.build(text)
         self.assertEqual(len(got), 2)
         self.assertEqual({r.ref: [(g.start, g.end, g.title) for g in r.segments] for _, r in got}, {
-            "forge.example/group/project#7": [(at(TODAY, "00:10"), NOW, "w1")],
-            "forge.example/group/project#8": [(at(TODAY, "00:20"), NOW, "w2"),
+            "gitlab:forge.example/group/project#7": [(at(TODAY, "00:10"), NOW, "w1")],
+            "gitlab:forge.example/group/project#8": [(at(TODAY, "00:20"), NOW, "w2"),
                                                (at(TODAY, "00:40"), NOW, "w3")]})
 
     def test_a_later_context_change_url_leaves_the_workflow_row_unkeyed(self):
@@ -1384,8 +1383,8 @@ class WorkflowKeyReviewTest(unittest.TestCase):
             [(prompts[0], "w1", "00:10"), (prompts[1], "w2", "00:40")])
         got = self.build(text)
         self.assertEqual([(r.name, r.ref) for _, r in got], [
-            ("Review parser", "forge.example/group/project#7"),
-            ("Review formatter", "forge.example/other/project#7")])
+            ("Review parser", "gitlab:forge.example/group/project#7"),
+            ("Review formatter", "gitlab:forge.example/other/project#7")])
 
 
 # #204: a launch names its task by the text before ":"; that name outranks a later row that merely shares,
@@ -1601,7 +1600,7 @@ class UnassignedOwnerTest(unittest.TestCase):
 
 def merged(issue: str, hhmm: str, n: int = 1) -> bs.Change:
     """A change the forge reports merged at `hhmm` today, closing `issue`, stamped in UTC as the forge cache holds it."""
-    return bs.Change(f"!{n}", "u", "t", "merged", False, "passed", True, 1, at(TODAY, hhmm).astimezone(timezone.utc),
+    return bs.Change(f"!{n}", f"https://forge.example/grp/app/-/merge_requests/{n}", "t", "merged", False, "passed", True, 1, at(TODAY, hhmm).astimezone(timezone.utc),
                      "main", (), (issue,))
 
 
@@ -1610,7 +1609,8 @@ def board(tracker: str, changes: list[bs.Change], stage_log: tuple = ((YESTERDAY
     seen, real = [], fc.section
     with mock.patch.object(rb.flow_chart, "section", lambda rows, now: seen.append(rows) or real(rows, now)):
         html = rb.render(tracker, BoardTest().cfg(), NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
-                         stage_log=list(stage_log), sources=bs.Sources({}, {}, {c.ref: c for c in changes}, (), {}))
+                         stage_log=list(stage_log), sources=bs.Sources({}, {}, {c.ref: c for c in changes}, (), {},
+                                                                      bs.backlog.Backlog('https://forge.example', 'grp/app')))
     return html, {row.name: (status, row) for status, row in seen[0]}
 
 
