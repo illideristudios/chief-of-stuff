@@ -1,9 +1,35 @@
-#!/bin/sh
-set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-docker build -t chief-of-stuff-ci -f "$ROOT/.github/ci/Dockerfile" "$ROOT"
-if [ "$#" -eq 0 ]; then
-    set -- -m unittest discover -s evals -p "test_*.py"
-fi
-exec docker run --rm --network none -v "$ROOT":/repo:ro chief-of-stuff-ci \
-    sh -c 'cp -R /repo/. . && exec python3 -B "$@"' sh "$@"
+#!/usr/bin/env python3
+"""Build the CI image and run the eval suite inside it (no network)."""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+IMAGE = "chief-of-stuff-ci"
+DEFAULT_ARGS = ["-m", "unittest", "discover", "-s", "evals", "-p", "test_*.py"]
+
+
+def main(argv: list[str]) -> int:
+    args = argv or DEFAULT_ARGS
+    subprocess.run(
+        ["docker", "build", "-t", IMAGE, "-f", str(ROOT / ".github/ci/Dockerfile"), str(ROOT)],
+        check=True,
+    )
+    # One-line container entry: copy the read-only mount, then run python with the caller's args.
+    inner = 'cp -R /repo/. . && exec python3 -B "$@"'
+    cmd = [
+        "docker", "run", "--rm", "--network", "none",
+        "-v", f"{ROOT}:/repo:ro", IMAGE,
+        "sh", "-c", inner, "sh", *args,
+    ]
+    return subprocess.call(cmd)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(exc.returncode) from None
