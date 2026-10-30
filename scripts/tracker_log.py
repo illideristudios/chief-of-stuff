@@ -47,8 +47,8 @@ def stage_line(at: str, name: str, stage: str) -> str:
 
 def started_line(at: str, name: str, runtime: str, model: str, tree: str, task: str, effort: str = "") -> str:
     """The launcher's line before worker `name` runs: `started: <runtime> <model> effort=<level>, worktree ...`, the model and
-    effort words only when set; the effort names itself, so no model is ever read from it. `tree` is how File
-    ownership names the tree, worktree `<tree>` (<branch>); the line leaves the branch out."""
+    effort words only when set; the effort names itself, so no model is ever read from it. `tree` is
+    `one_shot._tree_note`'s worktree `<tree>` (<branch>); the line leaves the branch out."""
     return f"- {at} one-shot {name} started: {' '.join(filter(None, (runtime, model, effort and f'effort={effort}')))}, {tree.split(' (')[0]}, task {task}"
 
 
@@ -111,6 +111,12 @@ def hold_failures(text: str) -> dict[str, str]:
         if m:
             out[m[5]] = m[4]
     return out
+
+
+def started_trees(text: str) -> dict[str, str]:
+    """Task -> the worktree of the last started line the Log records for it: the tracker's record of where a
+    one-shot ran (#1039: no File ownership row carries it)."""
+    return {m[5]: m[4] for line in _log_lines(text) if (m := STARTED_DETAIL.match(line))}
 
 
 def approved_closes(text: str) -> set[str]:

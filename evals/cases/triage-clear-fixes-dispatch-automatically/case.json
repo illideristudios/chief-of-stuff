@@ -2,7 +2,7 @@
   "tz": "America/Chicago",
   "peers": "sessions.json",
   "description": "Triage (#391): of four findings, R1 (Important, a total computed before the loop ends) and R2 (Minor, a missing empty-file test) are a suggested fix naming one concrete change each, off the security axis and not about security in substance, about nothing the user specified: they go to the implementer at once with the Plan line, no ask, a Log line (never a Decisions row) and one status line. R3 (a suggested fix whose evidence leaves two designs open) and R4 (a suggested keep) are asked together; the stage stays triage while that ask is open.",
-  "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: full @ 3f9c2a1\nPR: https://github.com/o/app/pull/12\nTests: pass — 41/41 — `pytest -q`\nAxes not examined: none\nR1 | Correctness | Important | Confirmed | src/a/upload.py:20 | the byte total is computed before the loop adds the last chunk | move the sum after the loop | suggested: fix\nR2 | Test run | Minor | Confirmed | tests/test_upload.py:1 | no case for an empty file | add one test case for an empty file | suggested: fix\nR3 | Architecture compliance | Important | Probable | src/a/upload.py:9 | the handler reads config directly | ARCHITECTURE.md allows both a settings module and a per-request loader | suggested: fix\nR4 | Maintainability | Minor | Probable | src/a/upload.py:12 | the 10 MB limit is a literal | one constant would name it; the limit is stable | suggested: keep\nAssessment: four findings.\n</cross-session-message>",
+  "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: full @ 3f9c2a1\nPR: https://github.com/o/app/pull/12\nTests: pass \u2014 41/41 \u2014 `pytest -q`\nAxes not examined: none\nR1 | Correctness | Important | Confirmed | src/a/upload.py:20 | the byte total is computed before the loop adds the last chunk | move the sum after the loop | suggested: fix\nR2 | Test run | Minor | Confirmed | tests/test_upload.py:1 | no case for an empty file | add one test case for an empty file | suggested: fix\nR3 | Architecture compliance | Important | Probable | src/a/upload.py:9 | the handler reads config directly | ARCHITECTURE.md allows both a settings module and a per-request loader | suggested: fix\nR4 | Maintainability | Minor | Probable | src/a/upload.py:12 | the 10 MB limit is a literal | one constant would name it; the limit is stable | suggested: keep\nAssessment: four findings.\n</cross-session-message>",
   "graders": [
     {
       "name": "reads the review-pipeline skill before the first fix send",
@@ -121,5 +121,6 @@
     }
   ],
   "max_turns": 16,
-  "timeout_seconds": 450
+  "timeout_seconds": 450,
+  "superseded_by": "autonomy-review-fixes"
 }

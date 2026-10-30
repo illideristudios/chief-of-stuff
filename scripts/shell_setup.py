@@ -5,7 +5,10 @@ from __future__ import annotations
 import os
 import pwd
 import re
+import shlex
+import signal
 import subprocess
+import tempfile
 from pathlib import Path
 
 PROGRAM = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
@@ -20,7 +23,8 @@ class ShellError(ValueError):
 
 def clean_env(source: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ if source is None else source
-    return {key: value for key, value in env.items() if key in KEEP}
+    # CHIEF_* is the engine's own channel (worker guard binding, #658); nothing else of the caller's passes.
+    return {key: value for key, value in env.items() if key in KEEP or key.startswith("CHIEF_")}
 
 
 def login_shell(source: dict[str, str] | None = None) -> str:
@@ -53,17 +57,101 @@ def resolve(program: str, *, source: dict[str, str] | None = None) -> str | None
     return None
 
 
+def login_path(source: dict[str, str] | None = None) -> str:
+    """The login and interactive shell's PATH, or "" when it cannot be read (#871: launchd's PATH is short, E14).
+    Only the final output line counts, so rc chatter before it is never taken for the PATH."""
+    try:
+        out = subprocess.run([login_shell(source), "-lic", 'printf "\\n%s" "$PATH"'], env=clean_env(source),
+                             capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired, ShellError):
+        return ""
+    lines = out.stdout.splitlines()
+    path = lines[-1].strip() if out.returncode == 0 and lines else ""
+    return path if path and all(Path(part).is_absolute() for part in path.split(os.pathsep) if part) else ""
+
+
 def exec_login(command: list[str]) -> None:
     """Load login and interactive config, then replace the shell with exact argv."""
     os.execve(login_shell(), login_argv(command), clean_env())
 
 
-def login_argv(command: list[str]) -> list[str]:
+def login_argv(command: list[str], *, path_prefix: str = "") -> list[str]:
     """Pass worker arguments as shell positional values, never as shell source text."""
     shell = login_shell()
     kind = Path(shell).name
     if kind not in {"zsh", "bash", "sh", "dash", "ksh", "fish"}:
         raise ShellError(f"login shell {shell!r} is not supported for exact argv execution")
     if kind == "fish":
-        return [shell, "-lic", "exec $argv", *command]
-    return [shell, "-lic", 'exec "$@"', "chief-of-stuff", *command]
+        source = 'set -gx PATH $argv[1] $PATH; set -e argv[1]; exec $argv' if path_prefix else 'exec $argv'
+        return [shell, "-lic", source, *([path_prefix] if path_prefix else []), *command]
+    source = 'export PATH="$1:$PATH"; shift; exec "$@"' if path_prefix else 'exec "$@"'
+    return [shell, "-lic", source, "chief-of-stuff", *([path_prefix] if path_prefix else []), *command]
+
+
+def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
+                timeout: int = 120, worktree: str = "") -> subprocess.CompletedProcess:
+    """Run a trusted workspace command with shell setup, bounded separately from a worker's runtime.
+
+    Teardown and stack discovery share this driver. Command text is workspace-authored shell source.
+    The process cwd is that trusted tree; worker and worktree identity travel in the environment.
+    """
+    env = {**clean_env(), "CHIEF_OF_STUFF_WORKSPACE": str(workspace.resolve()),
+           "CHIEF_OF_STUFF_WORKER": worker}
+    if worktree:
+        env["CHIEF_OF_STUFF_WORKTREE"] = worktree
+    shell = login_shell()
+    kind = Path(shell).name
+    if kind not in {"zsh", "bash", "sh", "dash", "ksh", "fish"}:
+        raise ShellError(f"login shell {shell!r} is not supported for command execution")
+    # Keep command stdout separate from shell startup, including banners from login config.
+    # A file also works when shell startup closes inherited descriptors above stderr.
+    with tempfile.TemporaryDirectory(prefix="chief-command-") as directory:
+        output = Path(directory) / "stdout"
+        quoted = shlex.quote(str(output))
+        if kind == "fish":
+            source = f"status job-control none; begin\n{command}\nend > {quoted}"
+        else:
+            source = f"exec 1>{quoted}; set +m\n{command}"
+        argv = [shell, "-lic", source]
+        errors = Path(directory) / "stderr"
+        with errors.open("w") as stderr_file, subprocess.Popen(
+                argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=stderr_file, start_new_session=True) as child:
+            try:
+                child.wait(timeout=timeout)
+            except BaseException as exc:
+                # Bound command execution even when descendants outlive the shell.
+                if isinstance(exc, subprocess.TimeoutExpired) or child.poll() is None:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # shortcut: a child stuck after SIGKILL is left after 5s; reap it if teardown must not leave one
+                        child.returncode = -signal.SIGKILL
+                raise
+            stderr = errors.read_text(errors="replace")
+            stdout = output.read_text(errors="replace") if output.exists() else ""
+            return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
+
+
+def teardown(root: Path, cwd: Path, name: str, command: str) -> list[str]:
+    """Run cleanup independently of the worker outcome, returning nonblocking warnings."""
+    if not command:
+        return []
+
+    def brief(text: str) -> str:
+        return " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", text).split())[:1000]
+
+    try:
+        # Always the trusted workspace. A review worktree is contributor code; a relative
+        # teardown script must not run from there. The worktree path is only an environment value.
+        result = run_command(command, root, workspace=root, worker=name, worktree=str(cwd.resolve()))
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        return [f"teardown: {brief(str(exc))}"]
+    if result.returncode:
+        detail = brief(result.stderr.strip() or result.stdout.strip())
+        return [f"teardown: exit {result.returncode}" + (f": {detail}" if detail else "")]
+    return []

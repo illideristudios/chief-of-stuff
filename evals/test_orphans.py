@@ -41,7 +41,7 @@ class JudgeTest(unittest.TestCase):
         found = judge("wt-x", AT_RISK, [])
         self.assertIsInstance(found, Unclaimed)
         self.assertEqual(str(found), "unclaimed work: wt-x (feat/x) — 1 not on origin/main, no upstream; "
-                                     "no File ownership row, worker registration or one-shot names this tree")
+                                     "no started line, worker registration or one-shot names this tree")
 
 
 if __name__ == "__main__":
