@@ -1,7 +1,7 @@
 """Eval runner for the chief-of-stuff agent.
 
 `claude plugin eval` cannot run a case under `--agent`, so the default backend drives
-`claude -p` directly. `--runtime` selects a headless Codex, Cursor, or Antigravity CLI instead.
+Claude through the model adapter. `--runtime` selects a headless Codex, Cursor, or Antigravity CLI instead.
 Grader vocabulary follows `plugin eval` where it overlaps (`tool_used`, `regex`) so cases can
 be ported later. A case's `"runtimes_present": ["claude"]` makes those the only runtimes the login shell finds.
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -23,12 +24,11 @@ import signal
 import socket
 import subprocess
 import sys
-import queue
 import tempfile
 import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta
 from datetime import time as dtime
@@ -41,6 +41,9 @@ import make_repo  # noqa: E402
 # Package-style, as start_coordinator imports it, so `host_prompt` and this module share one copy.
 sys.path.insert(1, str(Path(__file__).resolve().parent.parent))
 from scripts import runtimes  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import claude_adapter  # noqa: E402
+from model_port import Failure, Reply, Request  # noqa: E402
 
 EVALS = Path(__file__).resolve().parent
 PLUGIN_ROOT = EVALS.parent
@@ -65,7 +68,7 @@ SPAWN_SESSION = PLUGIN_ROOT / "scripts" / "spawn_session.py"
 # The plugin's own scripts are the only ones the agent may run: html, health and merge state come
 # from code, never from the agent. git and curl stay off the allowlist — the scripts call them.
 SCRIPTS = ("render_board.py", "pages.py", "probe_health.py", "audit_tasks.py", "make_worktree.py",
-           "spawn_session.py", "notify.py", "inbox.py", "backlog.py", "kanban.py", "process_status.py",
+           "spawn_session.py", "notify.py", "inbox.py", "backlog.py", "kanban_cli.py", "process_status.py",
            "decision_page.py", "tracker_write.py", "merge_approved.py", "merge_ready.py", "review_threads.py", "install_model_guidance.py",
            "board_sources.py", "tracker_read.py", "one_shot_result.py", "flow.py")
 OPERATIONS = ("board", "pages", "health", "audit", "worktree", "worker", "notify", "inbox",
@@ -85,7 +88,7 @@ def allowed_tools(root: Path) -> list[str]:
 
 
 ALLOWED = allowed_tools(PLUGIN_ROOT)
-DISALLOWED = ["Bash(railway:*)", "Bash(git commit:*)", "Bash(git add:*)", "Bash(git push:*)"]
+DISALLOWED = []  # No coordinator human-only command list. Workspace and host rules still apply.
 # These reach real Claude sessions on this machine. No eval run may expose them.
 PEER_TOOLS = ("ListAgents", "SendMessage")
 MOCK_CALENDAR = EVALS / "mock_calendar.py"
@@ -174,13 +177,18 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def stop_pages(work: Path) -> None:
+def stop_pages(work: Path, port: int | None = None) -> None:
     """End the pages server a case started with `pages.py --ensure`: it is detached and would outlive the run."""
     pid = work / "pages" / ".pid"
     try:
         server_pid = int(pid.read_text())
         if server_pid > 1 and server_pid != os.getpid():  # an unprepared {{live_pid}} fixture names the harness itself
-            os.kill(server_pid, signal.SIGTERM)
+            scripts = str(PLUGIN_ROOT / "scripts")
+            if scripts not in sys.path:
+                sys.path.insert(0, scripts)
+            import pages as pg  # noqa: E402
+            if pg.is_pages_serve(server_pid, port):  # same cmdline and port check as pages._stop (#482)
+                os.kill(server_pid, signal.SIGTERM)
     except (OSError, ValueError, OverflowError):
         pass
 
@@ -279,6 +287,8 @@ def grade(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
         return _tool_used(g, rec)
     if kind == "no_shell_edits":
         return _no_shell_edits(g, rec)
+    if kind == "path_git_write":
+        return _path_git_write(g, rec)
     if kind == "regex":
         return _regex(g, rec)
     if kind == "clock_line":
@@ -317,6 +327,59 @@ def _tool_used(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
     return ok, f"{len(hits)} call(s) ({denied} denied); want {bound}"
 
 
+def _command_text(call: dict[str, Any]) -> Any:
+    """The shell text of a Bash call; agy names the key CommandLine."""
+    payload = call.get("input")
+    if not isinstance(payload, dict):
+        return None
+    return payload.get("command") or payload.get("cmd") or payload.get("CommandLine")
+
+
+def _git_read_only(argv: list[str]) -> bool:
+    """Allow known read commands and narrow branch/remote/config forms of recorded argv."""
+    args = list(argv)
+    while args and args[0].startswith("-"):
+        flag = args.pop(0)
+        if flag in {"-C", "--git-dir", "--work-tree"}:
+            if not args:
+                return False
+            args.pop(0)
+        elif flag in {"--no-pager", "--no-optional-locks", "--literal-pathspecs"}:
+            continue
+        elif flag.startswith(("--git-dir=", "--work-tree=")) or (flag.startswith("-C") and len(flag) > 2):
+            continue
+        else:
+            # Config overrides can install aliases, pagers, and other executables.
+            return False
+    if not args:
+        return False
+    verb, tail = args[0], args[1:]
+    if verb == "branch":
+        return bool(tail) and tail[0] == "--list" and all(not a.startswith("-") for a in tail[1:])
+    if verb == "remote":
+        return tail == ["-v"]
+    if verb == "config":
+        return len(tail) in {2, 3} and tail[0] == "--get" and all(not a.startswith("-") for a in tail[1:])
+    if verb not in {"status", "log", "diff", "show", "rev-parse", "ls-files", "cat-file"}:
+        return False
+    # Even a read verb can write its output to a file.
+    return not any(a == "--output" or a.startswith("--output=") for a in tail)
+
+
+def _path_git_write(_g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
+    """Require shim-recorded PATH git argv to match the read allowlist, without parsing shell text.
+
+    An absolute-path git (`/usr/bin/git push`) skips the shim and a call the host denies never reaches
+    a shell; neither is graded. Env/config-driven helpers are not graded.
+    The fixture lint checks named-remote URLs in an isolated probe, not runtime destinations:
+    conditional includes, other destination keys, inherited config and explicit URLs can escape it.
+    Runtime isolation and closing the absolute-path coverage gap remain #770 (1.1).
+    """
+    hits = ["git " + " ".join(call["argv"]) for call in rec.mock_calls
+            if call.get("tool") == "git" and not _git_read_only(call["argv"])]
+    return (not hits), ("only allowlisted PATH git reads" if not hits else f"non-allowlisted PATH git call(s): {hits[:3]}")
+
+
 SAFE_SCRIPTS = set(SCRIPTS)
 SHELL_MUTATORS = {"cp", "rm", "rmdir", "sed", "perl", "awk", "tee", "dd", "truncate"}
 
@@ -327,7 +390,7 @@ def _no_shell_edits(_g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
     for call in rec.stream.tool_uses:
         if call["name"] != "Bash":
             continue
-        command = call["input"].get("command") or call["input"].get("cmd")
+        command = _command_text(call)
         if not isinstance(command, str):
             violations.append("unreadable shell call")
             continue
@@ -418,7 +481,7 @@ def _mock_calls(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
 
     missing = []
     for cal in g["calendar_ids"]:
-        calls = [c["arguments"] for c in rec.mock_calls if c["arguments"].get("calendarId") == cal]
+        calls = [c["arguments"] for c in rec.mock_calls if c.get("arguments", {}).get("calendarId") == cal]
         if not any(covers(a) for a in calls):
             missing.append(f"{cal} ({len(calls)} call(s), none covering {day_start:%Y-%m-%d %H:%M}-{day_end:%Y-%m-%d %H:%M})")
     return (not missing), ("missing: " + "; ".join(missing) if missing else f"{len(rec.mock_calls)} call(s) cover {day_start:%Y-%m-%d %H:%M}-{day_end:%Y-%m-%d %H:%M}")
@@ -812,7 +875,7 @@ class Case:
     spec: dict[str, Any]
 
 
-def load_cases(patterns: list[str], golden_only: bool = False) -> list[Case]:
+def load_cases(patterns: list[str], golden_only: bool = False, *, include_superseded: bool = False) -> list[Case]:
     """The cases to run. `golden_only` keeps just the ones their spec marks `"golden": true`.
 
     Zach, 2026-09-19: sonnet to iterate, opus on the golden cases only for full green. The mark
@@ -825,6 +888,8 @@ def load_cases(patterns: list[str], golden_only: bool = False) -> list[Case]:
         if patterns and not any(fnmatch.fnmatch(name, p) for p in patterns):
             continue
         spec = json.loads(spec_path.read_text())
+        if spec.get("superseded_by") and not include_superseded:
+            continue
         if golden_only and spec.get("golden") is not True:
             continue
         cases.append(Case(name, spec_path.parent, spec))
@@ -1004,7 +1069,7 @@ COORDINATION_GRADERS = {
 
 # Every `type` a case may name. `grade()` is the dispatcher; this is what `test_cases.py` checks a case
 # against, and `test_the_grader_type_tuple_is_the_dispatcher` keeps the two from drifting.
-GRADER_TYPES = ("tool_used", "no_shell_edits", "regex", "clock_line", "mock_calls", "duration_stated", *FILE_GRADERS, *BOARD_GRADERS, *COORDINATION_GRADERS)
+GRADER_TYPES = ("tool_used", "no_shell_edits", "path_git_write", "regex", "clock_line", "mock_calls", "duration_stated", *FILE_GRADERS, *BOARD_GRADERS, *COORDINATION_GRADERS)
 
 
 def peers_mcp_config(sessions: Path, log: Path, tz: str) -> dict[str, Any]:
@@ -1025,27 +1090,6 @@ def calendar_mcp_config(events: Path, log: Path, tz: str) -> dict[str, Any]:
     return {"mcpServers": {"calendar": {"type": "stdio", "command": sys.executable, "args": args}}}
 
 
-CLAUDE_ENV = "CHIEF_OF_STUFF_CLAUDE"
-# A GUI-launched terminal inherits launchd's PATH, not the shell's, so a bare `claude` is not on it
-# and every case a session writes from such a tab goes ungraded. Resolve it once, absolutely, and
-# leave an override for a machine that keeps it somewhere else.
-CLAUDE_FALLBACKS = ("/opt/homebrew/bin/claude", "/usr/local/bin/claude")
-
-
-def claude_binary() -> str:
-    """The `claude` to run: the override, then PATH, then the two places a Mac install puts it."""
-    override = os.environ.get(CLAUDE_ENV, "").strip()
-    if override:
-        return override
-    found = shutil.which("claude")
-    if found:
-        return str(Path(found).resolve())
-    for candidate in CLAUDE_FALLBACKS:
-        if Path(candidate).exists():
-            return candidate
-    return "claude"
-
-
 SNAPSHOT_SKIP = shutil.ignore_patterns(".git", "results", "__pycache__", "*.pyc", ".DS_Store")
 
 
@@ -1061,8 +1105,19 @@ def snapshot_plugin(dest: Path) -> Path:
     return dest
 
 
+def snapshot_fixture(work: Path, target: Path, out: Path) -> bool:
+    """A diagnostic snapshot must never replace the outcome or abort the remaining sweep."""
+    try:
+        shutil.copytree(work, target, dirs_exist_ok=True)
+    except OSError as exc:
+        with (out / "snapshot-errors.jsonl").open("a") as log:
+            log.write(json.dumps({"target": target.name, "error": str(exc)}) + "\n")
+        return False
+    return True
+
+
 def write_verdict(out: Path, case: str, arm: str, model: str, run_no: int,
-                  results: list[tuple[str, bool, str]], error: str | None, meta: str,
+                  results: list[tuple[str, bool | None, str]], error: str | None, meta: str,
                   runtime: str = "claude") -> Path:
     """What the run decided, beside the inputs it decided from. Finding 114b.
 
@@ -1071,51 +1126,65 @@ def write_verdict(out: Path, case: str, arm: str, model: str, run_no: int,
     Grading is a pure function of this directory and the verdicts could be rebuilt from it, which is
     a recovery route and not a reason to leave them unwritten.
 
-    `passed` is None when a harness error stopped the run, never False: a case that never ran is not
-    a case that failed, which is the 0.9.0 lesson that cost fourteen false regressions.
+    A failed grader wins over unreached turns. Otherwise `passed` is None when execution was
+    incomplete: a case that never ran is not a case that failed.
     """
     out.mkdir(parents=True, exist_ok=True)
     path = out / "verdict.json"
+    passed = False if any(p is False for _, p, _ in results) else (
+        None if error or any(p is None for _, p, _ in results) else True)
     path.write_text(json.dumps({
         "case": case, "arm": arm, "model": model, "runtime": runtime, "run": run_no, "meta": meta,
         "error": error,
-        "passed": None if error else all(p for _, p, _ in results),
+        "passed": passed,
         "graders": [{"name": n, "passed": p, "why": w} for n, p, w in results],
     }, indent=2) + "\n")
     return path
 
 
-def command(case: Case, arm: str, model: str, prompt: str | None, mcp_config: dict[str, Any] | None = None,
-            root: Path | None = None, effort: str | None = None) -> list[str]:
-    """A `prompt` of None means a multi-turn case: user turns arrive as stream-json on stdin.
+def claude_request(case: Case, arm: str, model: str, prompt: str, work: Path,
+                   root: Path | None = None, effort: str | None = None) -> Request:
+    """The completed call retains the raw tool events the graders consume."""
+    return Request(prompt=prompt, model=model, effort=effort or "", cwd=str(work),
+                   plugin_dirs=(str(root or PLUGIN_ROOT),), agent=AGENT if arm == "agent" else "",
+                   timeout_s=case.spec.get("timeout_seconds", 300), keep_events=True)
 
-    `root` is the plugin tree this run reads — a snapshot when one was taken, the live checkout
-    otherwise. Both the allowlisted script paths and `--plugin-dir` follow it, because the agent
-    definition is read live too and is as much a mid-run moving part as the scripts are.
-    """
-    root = root or PLUGIN_ROOT
+
+def claude_options(spec: dict[str, Any], mcp_config: dict[str, Any] | None = None,
+                   root: Path | None = None) -> tuple[str, ...]:
+    """Driver-only eval isolation policy; host launch and parsing belong to the adapter."""
     mcp_config = mcp_config or {"mcpServers": {}}
-    allowed = allowed_tools(root) + ([CALENDAR_TOOL] if "calendar" in mcp_config["mcpServers"] else []) + (PEER_MOCK_TOOLS if "peers" in mcp_config["mcpServers"] else [])
-    cmd = [
-        claude_binary(), "-p", *([prompt] if prompt is not None else []),
-        "--model", model,
-        "--output-format", "stream-json", "--verbose",
-        "--no-session-persistence",
-        "--setting-sources", "project",
-        "--plugin-dir", str(root),
-        "--strict-mcp-config", "--mcp-config", json.dumps(mcp_config),
-        "--max-turns", str(case.spec.get("max_turns", 10)),
-        "--tools", *TOOLS,
-        "--allowedTools", *allowed,
-        "--disallowedTools", *DISALLOWED,
-    ]
-    if prompt is None:
-        cmd += ["--input-format", "stream-json"]
-    if arm == "agent":
-        cmd += ["--agent", AGENT]
-    if effort:
-        cmd += runtimes.get("claude").effort_tokens(effort)
-    return cmd
+    allowed = allowed_tools(root or PLUGIN_ROOT) + ([CALENDAR_TOOL] if "calendar" in mcp_config["mcpServers"] else []) + (PEER_MOCK_TOOLS if "peers" in mcp_config["mcpServers"] else [])
+    return ("--setting-sources", "project", "--strict-mcp-config", "--mcp-config", json.dumps(mcp_config),
+            "--max-turns", str(spec.get("max_turns", 10)), "--tools", *TOOLS,
+            "--allowedTools", *allowed, *(("--disallowedTools", *DISALLOWED) if DISALLOWED else ()))
+
+
+def call_claude(request: Request, options: tuple[str, ...], env: dict[str, str], out: Path,
+                suffix: str = "") -> Reply | Failure:
+    """Save the adapter's exact launch and raw output, including failed and timed-out calls."""
+    artifacts = out / f"claude{suffix}"
+    got = claude_adapter.call(request, extra_args=options, env=env, artifacts=artifacts)
+    command = artifacts / "command.json"
+    if command.exists():
+        shutil.copyfile(command, out / f"command{suffix}.json")
+    raw = artifacts / "stdout"
+    errors = artifacts / "stderr"
+    stream = ("".join(json.dumps(e) + "\n" for e in got.events or []) if isinstance(got, Reply)
+              else raw.read_text() if raw.exists() else "")
+    (out / f"stream{suffix}.jsonl").write_text(stream)
+    (out / f"stderr{suffix}.txt").write_text(errors.read_text() if errors.exists() else
+                                            got.message if isinstance(got, Failure) else "")
+    return got
+
+
+def claude_agent_flag(out: Path, suffix: str = "") -> bool:
+    """Check the final executed argv, before the prompt delimiter, rather than the request intent."""
+    path = out / f"command{suffix}.json"
+    if not path.exists():
+        return False
+    argv = json.loads(path.read_text())["argv"]
+    return "--agent" in argv[:argv.index("--")] if "--" in argv else "--agent" in argv
 
 
 def host_command(runtime: str, model: str, prompt: str, work: Path, root: Path,
@@ -1270,98 +1339,7 @@ def has_notification(events: list[dict[str, Any]]) -> bool:
     return any(e.get("type") == "system" and e.get("subtype") == "task_notification" for e in events)
 
 
-def split_turns(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    turns, current = [], []
-    for ev in events:
-        current.append(ev)
-        if ev.get("type") == "result":
-            turns.append(current)
-            current = []
-    if current:
-        turns.append(current)
-    return turns
-
-
-def drive_turns(
-    cmd: list[str],
-    prompts: list[str | None],
-    cwd: Path,
-    env: dict[str, str] | None,
-    timeout: float,
-    snapshot: Callable[[int], None],
-    wait_seconds: float = 180,
-    before_turn: Callable[[int], None] | None = None,
-    close_grace: float = 60,
-) -> list[Turn]:
-    """Feed each prompt as a stream-json user message; a turn ends at its `result` event.
-
-    A `None` prompt is a wait turn: send nothing and read the turn the session starts on its own
-    (a background task's completion notification does this). If the previous turn already carried
-    the notification (the task finished before the assistant stopped), there is nothing to wait for
-    and the wait turn is skipped. If no event arrives within `wait_seconds`, driving stops there and
-    later turns count as not reached. `timeout` bounds the
-    whole run and raises `TimeoutError`. After stdin closes, a process still running (a background
-    task) is killed after `close_grace`. `snapshot(n)` runs after turn n's result.
-    """
-    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    lines: queue.Queue[str | None] = queue.Queue()
-
-    def pump() -> None:
-        for line in proc.stdout:
-            lines.put(line)
-        lines.put(None)
-
-    threading.Thread(target=pump, daemon=True).start()
-    deadline = time.monotonic() + timeout
-    turns: list[Turn] = []
-    try:
-        for n, prompt in enumerate(prompts, start=1):
-            if prompt is None and turns and has_notification(turns[-1].events):
-                continue
-            if before_turn is not None:
-                before_turn(n)
-            t_start = datetime.now().astimezone()
-            if prompt is not None:
-                proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n")
-                proc.stdin.flush()
-            events: list[dict[str, Any]] = []
-            eof = False
-            while True:
-                limit = deadline - time.monotonic()
-                if prompt is None and not events:
-                    limit = min(limit, wait_seconds)
-                if limit <= 0 and deadline - time.monotonic() <= 0:
-                    raise TimeoutError(f"turn {n} timed out after {timeout}s")
-                try:
-                    line = lines.get(timeout=max(limit, 0.01))
-                except queue.Empty:
-                    if deadline - time.monotonic() <= 0:
-                        raise TimeoutError(f"turn {n} timed out after {timeout}s") from None
-                    return turns  # wait turn: nothing arrived
-                if line is None:
-                    eof = True
-                    break
-                if line.strip():
-                    events.append(json.loads(line))
-                    if events[-1].get("type") == "result":
-                        break
-            if events:
-                turns.append(Turn(events, t_start, datetime.now().astimezone()))
-                snapshot(n)
-            if eof or events[-1].get("type") != "result":
-                break
-        proc.stdin.close()
-        try:
-            proc.wait(timeout=close_grace)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-    return turns
-
-
-def grade_turns(spec: dict[str, Any], turns: list[Turn], tz: str, out: Path, calls: list[dict[str, Any]]) -> list[tuple[str, bool, str]]:
+def grade_turns(spec: dict[str, Any], turns: list[Turn], tz: str, out: Path, calls: list[dict[str, Any]]) -> list[tuple[str, bool | None, str]]:
     """Grade each turn spec against the turn it belongs to.
 
     A prompt spec takes the next turn. A wait spec (no prompt) takes the turn that carried the
@@ -1374,7 +1352,7 @@ def grade_turns(spec: dict[str, Any], turns: list[Turn], tz: str, out: Path, cal
         if "prompt" in turn_spec:
             ti += 1
             turn_index = ti if ti < len(turns) else None
-        elif ti >= 0 and has_notification(turns[ti].events):
+        elif 0 <= ti < len(turns) and has_notification(turns[ti].events):
             turn_index = ti
         elif ti + 1 < len(turns):
             ti += 1
@@ -1382,7 +1360,7 @@ def grade_turns(spec: dict[str, Any], turns: list[Turn], tz: str, out: Path, cal
         else:
             turn_index = None
         if turn_index is None:
-            results.append((f"T{n}: ran", False, "turn not reached"))
+            results.append((f"T{n}: ran", None, "turn not reached"))
             continue
         turn = turns[turn_index]
         snap = turn_index + 1
@@ -1413,15 +1391,26 @@ with open({log!r}, "a") as log:
 print("spawn: recorded by the eval harness")
 """
 
-RAILWAY_SHIM = '''#!/usr/bin/env python3
-import sys
+# Record all argv, refuse non-allowlisted calls, and delegate only reads. Share the grader's policy verbatim.
+GIT_SHIM = """#!{python}
+import json, os, sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-with open(Path(__file__).parent / "calls.log", "a") as log:
-    log.write(" ".join(["railway", *sys.argv[1:]]) + "\\n")
-print("railway: blocked by eval harness", file=sys.stderr)
-sys.exit(1)
-'''
+{policy}
+with open({log!r}, "a") as log:
+    log.write(json.dumps({{"tool": "git", "argv": sys.argv[1:], "at": datetime.now(ZoneInfo({tz!r})).isoformat()}}) + "\\n")
+if not _git_read_only(sys.argv[1:]):
+    sys.exit("git: refused non-allowlisted invocation by eval harness")
+os.environ["GIT_OPTIONAL_LOCKS"] = "0"
+here = Path(__file__).resolve().parent
+for entry in os.environ["PATH"].split(os.pathsep):
+    real = Path(entry) / "git"
+    if Path(entry).resolve() != here and real.is_file() and os.access(real, os.X_OK):
+        os.execv(real, [str(real), *sys.argv[1:]])
+sys.exit("git: not found past the eval shim")
+"""
 
 GH_SHIM = '''#!/usr/bin/env python3
 import json, sys
@@ -1501,9 +1490,6 @@ def write_recorder(shim_dir: Path, calls_log: Path, tz: str) -> list[str]:
 def write_shims(shim_dir: Path, prs: list | None = None, graphql: dict | None = None,
                 issues: list | None = None) -> None:
     shim_dir.mkdir(parents=True, exist_ok=True)
-    railway = shim_dir / "railway"
-    railway.write_text(RAILWAY_SHIM)
-    railway.chmod(0o755)
     gh = shim_dir / "gh"
     gh.write_text(GH_SHIM)
     gh.chmod(0o755)
@@ -1543,6 +1529,9 @@ def eval_environment(out: Path, calls_log: Path, tz: str, root: Path | None = No
     entry.write_text(f"#!{sys.executable}\nimport os, sys\n"
                      f"os.execv(sys.executable, [sys.executable, {str(release / 'chief_of_stuff.py')!r}, *sys.argv[1:]])\n")
     entry.chmod(0o755)
+    git = shims / "git"
+    git.write_text(GIT_SHIM.format(python=sys.executable, log=str(calls_log), tz=tz, policy=inspect.getsource(_git_read_only)))
+    git.chmod(0o755)
     shell = {}
     if runtimes_present is not None:
         present = (shims / "present").resolve()  # beside PATH, not on it: a stub must not shadow the host's own CLI
@@ -1557,13 +1546,14 @@ def eval_environment(out: Path, calls_log: Path, tz: str, root: Path | None = No
         shell = {"CHIEF_OF_STUFF_SHELL": str(standin.resolve())}
     return dict(os.environ, **shell,
                 PATH=f"{shims}{os.pathsep}{os.environ['PATH']}",
+                CHIEF_OF_STUFF_PATH_PREFIX=str(shims.resolve()),
                 CHIEF_OF_STUFF_GH=str((shims / "gh").resolve()),
                 CHIEF_OF_STUFF_RELEASE=str(release),
                 CHIEF_OF_STUFF_LAUNCHER=json.dumps(write_recorder(shims, calls_log, tz)))
 
 
 def run_one(case: Case, arm: str, model: str, out: Path, root: Path | None = None,
-            runtime: str = "claude", effort: str | None = None) -> tuple[list[tuple[str, bool, str]], str | None, dict[str, Any]]:
+            runtime: str = "claude", effort: str | None = None) -> tuple[list[tuple[str, bool | None, str]], str | None, dict[str, Any]]:
     tz = case.spec.get("tz", "America/Chicago")
     ctx = context(tz, datetime.now(ZoneInfo(tz)))
     out.mkdir(parents=True, exist_ok=True)
@@ -1619,43 +1609,53 @@ def run_one(case: Case, arm: str, model: str, out: Path, root: Path | None = Non
                                       case_root=case.root, ctx=ctx)
             return run_turns(spec, arm, model, out, work, env, mcp_config, calls_log, tz, case_root=case.root, ctx=ctx,
                              root=root, effort=effort)
-        try:
-            cmd = (command(case, arm, model, spec["prompt"], mcp_config=mcp_config, root=root, effort=effort)
-                   if runtime == "claude" else host_command(runtime, model,
-                        host_prompt(runtime, arm, spec["prompt"], root or PLUGIN_ROOT, work),
-                        work, root or PLUGIN_ROOT, mcp_config, effort=effort, extra_write=out))
-        except RuntimeError as exc:
-            return [], str(exc), {"runtime": runtime}
-        (out / "command.json").write_text(json.dumps(cmd, indent=1))
         t_start = datetime.now(ZoneInfo(tz))
-        try:
-            proc = subprocess.run(cmd, cwd=work, env=env, stdin=subprocess.DEVNULL, capture_output=True,
-                                  text=True, timeout=spec.get("timeout_seconds", 300))
-        except subprocess.TimeoutExpired:
-            return [], "timeout", {}
+        if runtime == "claude":
+            request = claude_request(Case(case.name, case.root, spec), arm, model, spec["prompt"], work, root, effort)
+            got = call_claude(request, claude_options(spec, mcp_config, root), env, out)
+            if isinstance(got, Failure):
+                return [], f"claude {got.kind}: {got.message}", {"runtime": runtime}
+        else:
+            try:
+                cmd = host_command(runtime, model,
+                    host_prompt(runtime, arm, spec["prompt"], root or PLUGIN_ROOT, work),
+                    work, root or PLUGIN_ROOT, mcp_config, effort=effort, extra_write=out)
+            except RuntimeError as exc:
+                return [], str(exc), {"runtime": runtime}
+            (out / "command.json").write_text(json.dumps(cmd, indent=1))
+            try:
+                proc = subprocess.run(cmd, cwd=work, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                      text=True, timeout=spec.get("timeout_seconds", 300))
+            except subprocess.TimeoutExpired:
+                return [], "timeout", {}
+            (out / "stream.jsonl").write_text(proc.stdout)
+            (out / "stderr.txt").write_text(proc.stderr)
         t_end = datetime.now(ZoneInfo(tz))
-        (out / "stream.jsonl").write_text(proc.stdout)
-        (out / "stderr.txt").write_text(proc.stderr)
-        shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
     finally:
-        stop_pages(work)
-        shutil.rmtree(work, ignore_errors=True)
-        stop_server(health)
-        stop_server(taken)  # a daemon thread would otherwise outlive this case and serve the next one
+        try:
+            snapshot_ok = snapshot_fixture(work, out / "fixture", out)
+        finally:
+            stop_pages(work, int(ctx["pages_port"]))
+            shutil.rmtree(work, ignore_errors=True)
+            stop_server(health)
+            stop_server(taken)  # a daemon thread would otherwise outlive this case and serve the next one
 
+    if not snapshot_ok:
+        return [], "fixture snapshot failed; see snapshot-errors.jsonl", {"runtime": runtime}
     stream = (load_stream(out / "stream.jsonl") if runtime == "claude" else
               parse_host_stream((out / "stream.jsonl").read_text(), runtime, model))
     meta = {
-        "exit": proc.returncode,
+        "exit": 0 if runtime == "claude" else proc.returncode,
         "turns": (stream.result or {}).get("num_turns"),
         "notional_usd": (stream.result or {}).get("total_cost_usd"),
         "denials": len(stream.denied_ids), "runtime": runtime,
     }
-    if proc.returncode != 0 or stream.result is None:
+    if runtime != "claude" and (proc.returncode != 0 or stream.result is None):
         detail = stream.init.get("error") or proc.stderr.strip()
         return [], f"{runtime} exit {proc.returncode}: {str(detail)[:300]}", meta
     if runtime == "claude":
-        ok, detail = check_arm(stream.init, arm, agent_flag_used="--agent" in cmd and arm != "agent", needs_calendar="calendar" in spec, model=model, needs_peers="peers" in spec)
+        ok, detail = check_arm(stream.init, arm, needs_calendar="calendar" in spec, model=model,
+                               needs_peers="peers" in spec, agent_flag_used=claude_agent_flag(out))
         if not ok:
             return [], f"arm check: {detail}", meta
     elif str((stream.result or {}).get("status", "SUCCESS")).upper() not in ("SUCCESS", "COMPLETED"):
@@ -1673,7 +1673,7 @@ def run_host_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: 
                    env: dict[str, str], mcp_config: dict[str, Any] | None, calls_log: Path, tz: str,
                    *, runtime: str, root: Path, effort: str | None = None,
                    case_root: Path = Path("."), ctx: dict[str, str] | None = None
-                   ) -> tuple[list[tuple[str, bool, str]], str | None, dict[str, Any]]:
+                   ) -> tuple[list[tuple[str, bool | None, str]], str | None, dict[str, Any]]:
     """Drive prompted turns through the host's explicit conversation ID."""
     completed: list[tuple[Stream, datetime, datetime]] = []
     session_id = None
@@ -1728,38 +1728,75 @@ def run_host_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: 
                             "denials": sum(len(s.denied_ids) for s, _, _ in completed)}
 
 
-def run_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: Path, env: dict[str, str], mcp_config: dict[str, Any] | None, calls_log: Path, tz: str, case_root: Path = Path("."), ctx: dict[str, str] | None = None, root: Path | None = None, effort: str | None = None) -> tuple[list[tuple[str, bool, str]], str | None, dict[str, Any]]:
-    """Multi-turn case: one stream-json process, graders scoped to each turn, fixture snapshot per turn."""
-    cmd = command(Case("", Path(), spec), arm, model, None, mcp_config=mcp_config, root=root, effort=effort)
-    (out / "command.json").write_text(json.dumps(cmd, indent=1))
-
-    def snapshot(n: int) -> None:
-        shutil.copytree(work, out / f"fixture-turn{n}", dirs_exist_ok=True)
-
+def run_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: Path, env: dict[str, str], mcp_config: dict[str, Any] | None, calls_log: Path, tz: str, case_root: Path = Path("."), ctx: dict[str, str] | None = None, root: Path | None = None, effort: str | None = None) -> tuple[list[tuple[str, bool | None, str]], str | None, dict[str, Any]]:
+    """Completed calls resume prompted conversations; wait cases keep one adapter stream alive."""
+    owned_sessions: set[str] = set()
     try:
-        def before_turn(n: int) -> None:
-            turn_spec = spec["turns"][n - 1]
-            if "peers" in turn_spec:
-                (out / "peers-sessions.json").write_text(render((case_root / turn_spec["peers"]).read_text(), ctx))
-
-        turns = drive_turns(cmd, [t.get("prompt") for t in spec["turns"]], work, env, spec.get("timeout_seconds", 300), snapshot, wait_seconds=spec.get("wait_seconds", 180), before_turn=before_turn)
-    except TimeoutError as exc:
-        return [], f"timeout: {exc}", {}
-    shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
-    (out / "stream.jsonl").write_text("".join(json.dumps(e) + "\n" for t in turns for e in t.events))
-    streams = [parse_stream(t.events) for t in turns]
-    meta = {
-        "turns_reached": len([st for st in streams if st.result]),
-        "notional_usd": round(sum((st.result or {}).get("total_cost_usd", 0) for st in streams), 4),
-        "denials": sum(len(st.denied_ids) for st in streams),
-    }
-    if not streams or streams[0].result is None:
-        return [], "claude produced no result for turn 1", meta
-    ok, detail = check_arm(streams[0].init, arm, agent_flag_used="--agent" in cmd and arm != "agent", needs_calendar="calendar" in spec, model=model, needs_peers="peers" in spec)
-    if not ok:
-        return [], f"arm check: {detail}", meta
-    calls = [json.loads(l) for l in calls_log.read_text().splitlines() if l.strip()] if calls_log.exists() else []
-    return grade_turns(spec, turns, tz, out, calls), None, meta
+        turns: list[Turn] = []
+        request = claude_request(Case("", case_root, spec), arm, model, "", work, root, effort)
+        request = replace(request, session_id=str(uuid.uuid4()))
+        options = claude_options(spec, mcp_config, root)
+        deadline = time.monotonic() + request.timeout_s
+        if any("prompt" not in t for t in spec["turns"]):
+            def before_turn(n):
+                turn_spec = spec["turns"][n - 1]
+                if "peers" in turn_spec:
+                    (out / "peers-sessions.json").write_text(render((case_root / turn_spec["peers"]).read_text(), ctx))
+            owned_sessions.add(request.session_id)
+            completed = claude_adapter.drive_turns(request,
+                [t.get("prompt") for t in spec["turns"]],
+                [t.get("wait_seconds", spec.get("wait_seconds", 180)) for t in spec["turns"]],
+                extra_args=options, env=env, artifacts=out / "claude",
+                snapshot=lambda n: snapshot_fixture(work, out / f"fixture-turn{n}", out), before_turn=before_turn)
+            command = out / "claude/command.json"
+            if command.exists():
+                shutil.copyfile(command, out / "command.json")
+            if isinstance(completed, Failure):
+                return [], f"claude {completed.kind}: {completed.message}", {"runtime": "claude"}
+            turns = [Turn(*turn) for turn in completed]
+        else:
+            for n, turn_spec in enumerate(spec["turns"], 1):
+                if "peers" in turn_spec:
+                    (out / "peers-sessions.json").write_text(render((case_root / turn_spec["peers"]).read_text(), ctx))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return [], f"timeout before claude turn {n}", {"turns_reached": len(turns)}
+                request = replace(request, prompt=turn_spec["prompt"], timeout_s=remaining)
+                started = datetime.now(ZoneInfo(tz))
+                owned_sessions.add(request.session_id)
+                got = call_claude(request, options, env, out, suffix=f"-turn{n}")
+                if isinstance(got, Failure):
+                    return [], f"claude turn {n} {got.kind}: {got.message}", {"turns_reached": len(turns)}
+                turns.append(Turn(got.events or [], started, datetime.now(ZoneInfo(tz))))
+                if not snapshot_fixture(work, out / f"fixture-turn{len(turns)}", out):
+                    return [], "fixture snapshot failed; see snapshot-errors.jsonl", {"turns_reached": len(turns)}
+                if n < len(spec["turns"]):
+                    if not got.session_id:
+                        return [], f"claude returned no conversation ID after turn {n}", {"turns_reached": len(turns)}
+                    request = replace(request, session_id=got.session_id, resume=True)
+        (out / "stream.jsonl").write_text("".join(json.dumps(e) + "\n" for t in turns for e in t.events))
+        streams = [parse_stream(t.events) for t in turns]
+        meta = {
+            "runtime": "claude", "turns_reached": len(turns),
+            "notional_usd": round(sum((st.result or {}).get("total_cost_usd", 0) for st in streams), 4),
+            "denials": sum(len(st.denied_ids) for st in streams),
+        }
+        if not streams or streams[0].result is None:
+            return [], "claude produced no result for turn 1", meta
+        ok, detail = check_arm(streams[0].init, arm, needs_calendar="calendar" in spec, model=model,
+                               needs_peers="peers" in spec,
+                               agent_flag_used=claude_agent_flag(out) or any(claude_agent_flag(out, f"-turn{n}")
+                                                   for n in range(1, len(spec["turns"]) + 1)))
+        if not ok:
+            return [], f"arm check: {detail}", meta
+        calls = [json.loads(l) for l in calls_log.read_text().splitlines() if l.strip()] if calls_log.exists() else []
+        return grade_turns(spec, turns, tz, out, calls), None, meta
+    finally:
+        try:
+            snapshot_fixture(work, out / "fixture", out)
+        finally:
+            for session_id in owned_sessions:
+                claude_adapter.forget_session(session_id, env)
 
 
 def main(argv: list[str]) -> int:
@@ -1808,25 +1845,32 @@ def main(argv: list[str]) -> int:
                 print(f"  HARNESS ERROR  {error}")
                 continue
             for name, passed, why in results:
-                print(f"  {'PASS' if passed else 'FAIL'}  {name}  — {why}")
-                case_pass &= passed
+                print(f"  {'UNREACHED' if passed is None else 'PASS' if passed else 'FAIL'}  {name}  — {why}")
+                if passed is None:
+                    unmeasured = harness_error = True
+                else:
+                    case_pass &= passed
         # A case that never ran is not a case that failed. One network outage killed fourteen of the
         # fifty-four in the 0.9.0 sweep — no grader ran in any of them — and the log said RED for all
         # fourteen, which reads as fourteen regressions to look for.
-        if unmeasured:
-            verdict, key = "UNMEASURED (no grader ran)", "unmeasured"
+        if not case_pass:
+            verdict, key = "RED", "red"
+            any_fail |= args.arm == "agent"
+        elif unmeasured:
+            verdict, key = "UNMEASURED (turn or grader not reached)", "unmeasured"
         elif args.arm == "baseline":
-            verdict, key = ("NON-DISCRIMINATING (baseline passes)", "green") if case_pass else ("RED", "red")
+            verdict, key = "NON-DISCRIMINATING (baseline passes)", "green"
         else:
-            verdict, key = ("GREEN", "green") if case_pass else ("RED", "red")
-            any_fail |= not case_pass
+            verdict, key = "GREEN", "green"
         tally[key] += 1
         print(f"=> {case.name}: {verdict}")
     print(f"\n{len(cases)} case(s): {tally['green']} green, {tally['red']} red, {tally['unmeasured']} unmeasured")
     print(f"results: {EVALS / 'results' / stamp}")
+    if any_fail:
+        return 1
     if harness_error:
         return 2
-    return 1 if any_fail else 0
+    return 0
 
 
 if __name__ == "__main__":

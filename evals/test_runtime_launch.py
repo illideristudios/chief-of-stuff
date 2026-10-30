@@ -133,8 +133,8 @@ class CoordinatorLaunchTest(unittest.TestCase):
         for runtime in runtimes.NAMES:
             with self.subTest(runtime=runtime):
                 rendered = start.prompt(runtime, release, self.root)
-                self.assertIn("automatically assign and launch ready tasks", rendered)
-                self.assertIn("never ask for approval of routine one-shot assignments or launches", rendered)
+                self.assertIn("automatically assign and launch ready tasks", rendered.casefold())
+                self.assertIn("interactive or one-shot", rendered)
                 self.assertIn("Never automatically open the board URL", rendered)
                 self.assertNotIn("Never launch a new session without", rendered)
                 self.assertNotIn("Do not launch a new session without", rendered)
@@ -185,6 +185,28 @@ class CoordinatorLaunchTest(unittest.TestCase):
                 self.assertIn("versions", argv[1])
                 launch.assert_called_once()
                 self.assertIn("test failure", errors.getvalue())
+
+    def test_store_workspace_also_ensures_engine_supervisor_before_cli(self):
+        (self.root / "store.db").touch()
+        results = [mock.Mock(returncode=0, stderr=""), mock.Mock(returncode=2, stderr="engine: test failure")]
+        with mock.patch.object(start, "resolve", return_value="/bin/fake"), \
+             mock.patch.object(start, "login_argv", side_effect=lambda cmd: cmd), \
+             mock.patch.object(start.subprocess, "run", side_effect=results) as ensured, \
+             mock.patch.object(start.subprocess, "call", return_value=0) as launch, \
+             mock.patch.object(start.threading, "Thread"), \
+             contextlib.redirect_stderr(io.StringIO()) as errors:
+            code = start.main(["--runtime", "claude", "--root", str(self.root),
+                               "--install-dir", str(self.install_dir)])
+        self.assertEqual(code, 0)
+        self.assertEqual(ensured.call_count, 2)
+        scripts_called = [Path(call.args[0][2 if call.args[0][1] == '-I' else 1]).name
+                          for call in ensured.call_args_list]
+        self.assertEqual(scripts_called, ["notify_service.py", "supervisor.py"])
+        self.assertEqual(ensured.call_args_list[1].args[0][1], '-I')
+        self.assertFalse(any(key.upper().startswith('PYTHON') for key in ensured.call_args_list[1].kwargs['env']))
+        self.assertEqual(ensured.call_args_list[1].args[0][-3:], ["--root", str(self.root.resolve()), "ensure-background"])
+        launch.assert_called_once()
+        self.assertIn("engine: test failure", errors.getvalue())
 
     def test_watcher_stops_with_its_session_and_notifies_once_per_change(self):
         release = start.install(ROOT, self.install_dir)
@@ -254,7 +276,7 @@ class CoordinatorLaunchTest(unittest.TestCase):
             with self.subTest(what):
                 if register:
                     session_exec.register(self.root / ".chief-of-stuff" / "sessions" / "worker.json", runtime="cursor",
-                                          name="impl01", worktree="/tmp/impl01-tree", pid=os.getpid())
+                                          name="impl01", worktree=str(pidfile.parents[1]), pid=os.getpid())
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out), mock.patch.object(
                         process_status.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=f" {os.getpid()} /bin/agent\n")):
@@ -298,13 +320,14 @@ class WorkerRuntimeTest(unittest.TestCase):
         (self.root / "daily").mkdir()
         (self.root / "daily" / "2026-09-18-tracker.md").write_text(TRACKER)
 
-    def test_codex_and_cursor_launch_in_planning_state(self):
+    def test_codex_and_cursor_launch_ready_to_implement(self):
         codex = spawn.ghostty_script(cwd="/tmp/wt", agent_type=None, claude=Path("/bin/codex"),
             title="impl01", runtime="codex", workspace=str(self.root))
         cursor = spawn.ghostty_script(cwd="/tmp/wt", agent_type=None, claude=Path("/bin/agent"),
             title="impl02", runtime="cursor", workspace=str(self.root))
-        self.assertIn("/bin/codex -C /tmp/wt --sandbox read-only", codex)
-        self.assertIn("/bin/agent --workspace /tmp/wt --mode plan", cursor)
+        self.assertIn("/bin/codex -C /tmp/wt --sandbox workspace-write", codex)
+        self.assertIn("/bin/agent --workspace /tmp/wt", cursor)
+        self.assertNotIn("--mode plan", cursor)
         for text in (codex, cursor):
             self.assertIn("session_exec.py", text)
             self.assertIn("--registry", text)
@@ -319,23 +342,48 @@ class WorkerRuntimeTest(unittest.TestCase):
             if runtime in ("codex", "cursor"):
                 self.assertIn("--from \"impl01\" --type register", body)
                 self.assertNotIn("List your sessions", body)
-                self.assertIn("/plan", body)
+                self.assertIn("**Plan and proceed.**", body)
             if runtime == "codex":
-                self.assertIn("resume-codex", body)
-                self.assertIn("--session-id <session-id>", body)
+                self.assertNotIn("resume-codex", body)
+                self.assertNotIn("plan gate", body)
 
     def test_registration_and_liveness_use_the_assigned_identity(self):
         path = self.root / ".chief-of-stuff" / "sessions" / "impl01.json"
-        session_exec.register(path, runtime="cursor", name="impl01", worktree="/tmp/wt", pid=123)
+        tree = self.root / "trees" / "wt"
+        tree.mkdir(parents=True)
+        session_exec.register(path, runtime="cursor", name="impl01", worktree=str(tree), pid=123)
         record = json.loads(path.read_text())
         self.assertEqual((record["name"], record["runtime"], record["worktree"]),
-                         ("impl01", "cursor", "/tmp/wt"))
+                         ("impl01", "cursor", str(tree)))
         with mock.patch.object(session_exec.os, "kill") as kill, \
-             mock.patch.object(session_exec.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="/bin/agent --workspace /tmp/wt")):
+             mock.patch.object(session_exec.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=f"/bin/agent --workspace {tree}")):
             self.assertTrue(session_exec.alive(path))
             kill.assert_called_once_with(123, 0)
         with mock.patch.object(session_exec.os, "kill", side_effect=ProcessLookupError):
             self.assertFalse(session_exec.alive(path))
+
+    def test_missing_worktree_stops_every_login_launch_before_registration_or_exec(self):
+        tree = self.root / "trees" / "gone"
+        registry = self.root / ".chief-of-stuff" / "sessions" / "impl01.json"
+        commands = [
+            ["exec-login", "--registry", str(registry), "--name", "impl01", "--worktree", str(tree),
+             "--", "/bin/fake-claude"],
+            ["resume-codex", "--root", str(self.root), "--name", "impl01", "--worktree", str(tree),
+             "--session-id", "sid-1"],
+            ["--registry", str(registry), "--runtime", "cursor", "--name", "impl01", "--worktree", str(tree),
+             "--login-shell", "--", "/bin/fake-agent"],
+        ]
+        for argv in commands:
+            with self.subTest(argv=argv), \
+                    mock.patch.object(session_exec, "resolve", return_value="/bin/fake-codex"), \
+                    mock.patch.object(session_exec, "exec_login", side_effect=AssertionError("worker launched")) as login, \
+                    mock.patch.object(session_exec.os, "execve", side_effect=AssertionError("worker launched")) as launch, \
+                    self.assertRaisesRegex(FileNotFoundError, "worktree"):
+                session_exec.main(argv)
+            login.assert_not_called()
+            launch.assert_not_called()
+            self.assertFalse(registry.exists())
+            self.assertFalse(registry.with_suffix(".tmp").exists())
 
     def test_wrapper_registers_before_exec_of_fake_cursor(self):
         fake = self.root / "fake-agent"

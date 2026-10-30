@@ -220,6 +220,7 @@ def migrate(rows: tuple[Row, ...], decided: dict[str, str], make, source: str = 
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(description="Propose, then apply, a backlog migration into GitLab.")
     ap.add_argument("--tracker", required=True, help="the day's tracker holding `## Issues`")
     ap.add_argument("--report", metavar="FILE", help="write the proposal file and stop")
@@ -283,5 +284,5 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if not got.failed else 1
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())

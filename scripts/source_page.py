@@ -20,8 +20,10 @@ import backlog
 import board_sources
 import decision_page
 import module_graph
+from task_forge import PageData, change_issue_keys, lookup_keys, tracker_issue_tasks
+from fragment import external_url, href, issue_href, issue_page_name, tab_bar
 from decision_page import HEAD
-from fragment import href, tab_bar
+from page_common import drop_html_comments, markdown_blocks
 from issue_page import _paths, _shared, anchor, inputs, put
 from tracker import TRAILING_NUMBER, parse_tracker
 from settings import Graph
@@ -62,7 +64,7 @@ table.split .lno,table.split .rno{width:40px;color:var(--muted);text-align:right
 table.split .rno{border-left:1px solid var(--line)} table.split .left,table.split .right{white-space:pre;overflow:hidden;text-overflow:ellipsis}
 td.left.del{background:color-mix(in srgb,var(--dl) 12%,transparent)} td.right.add{background:color-mix(in srgb,var(--stage-review) 12%,transparent)}
 td.empty{background:repeating-linear-gradient(135deg,var(--ref-bg) 0 4px,var(--surface) 4px 8px)}
-tr.note td{padding:4px 14px 8px 100px;font-family:"Alegreya Sans",system-ui,sans-serif}
+tr.note>td{padding:4px 14px 8px 100px;font-family:"Alegreya Sans",system-ui,sans-serif}
 .nt{background:var(--surface);border:1px solid var(--line);border-top:3px solid var(--stage-pr);border-radius:5px;padding:7px 12px;margin:4px 0;font-size:13px;line-height:1.45;white-space:normal}
 .nt.resolved{border-top-color:var(--stage-review)} .nt p{color:var(--fg)}
 @media (max-width:760px){.src{grid-template-columns:minmax(0,1fr)} ul.files{position:static}}
@@ -89,9 +91,12 @@ def notes(change: board_sources.Change, home, gh=backlog.run_gh, call=backlog._c
     only, apart from the cache refresh's. Never raises."""
     when = board_sources._when
     try:
-        n = int(change.ref[1:])
         if isinstance(home, backlog.GitHubBacklog):
-            owner, name = home.repo.split("/", 1)
+            match = re.fullmatch(r"(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<number>\d+)", change.ref)
+            if not match:
+                return [], "invalid GitHub pull request reference"
+            n = int(match.group("number"))
+            owner, name = (match.group("repo") or home.repo).split("/", 1)
             q = (f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
                  f"{{ pullRequest(number: {n}) {{ {GH_NOTES} }} }} }}")
             code, out, err = gh(["api", "graphql", "-f", f"query={q}"])
@@ -104,6 +109,7 @@ def notes(change: board_sources.Change, home, gh=backlog.run_gh, call=backlog._c
                          board_sources.ReviewThread(bool(t.get("isResolved")), (c.get("author") or {}).get("login") or "",
                                                     c.get("body") or "", when(c.get("createdAt")), c.get("url") or ""))
                     for t in nodes for c in ((t.get("comments") or {}).get("nodes") or [])[:1]], ""
+        n = int(change.ref[1:])
         secret = backlog.token(home)
         if not secret:
             return [], home.missing_token
@@ -125,11 +131,13 @@ def notes(change: board_sources.Change, home, gh=backlog.run_gh, call=backlog._c
         return [], f"{type(e).__name__}: {e}"
 
 
-def _note(n: Note, now: datetime) -> str:
+def _note(n: Note, now: datetime, linker: decision_page.Linker = decision_page.Linker()) -> str:
     t = n.thread
     when = f" · {t.at.astimezone(now.tzinfo):%H:%M}" if t.at else ""
+    t_url = external_url(t.url)
+    link = f' · <a {href(t_url)}>thread</a>' if t_url else ""
     return (f'<div class="nt{" resolved" if t.resolved else ""}"><span><b>{"Resolved" if t.resolved else "Open"} thread · '
-            f'{escape(t.author)}{when}</b> · <a {href(t.url)}>thread</a></span><p>{escape(t.body)}</p></div>')
+            f'{escape(t.author)}{when}</b>{link}</span><div class="prose">{markdown_blocks(drop_html_comments(t.body), linker.resolve)}</div></div>')
 
 
 class File:
@@ -172,17 +180,31 @@ def parse(diff: str) -> list[File]:
     return files
 
 
-def diff(change: board_sources.Change, clone: Path, pages: Path) -> tuple[str, str]:
-    """(merge base, `git diff` of the change's head against it), read once per head commit."""
-    out = pages / CACHE / f"{change.head}.diff"
+def diff_result(change: board_sources.Change, clone: Path, pages: Path) -> tuple[str, str, bool]:
+    """The comparison and diff, with a stale flag when its base cannot be refreshed."""
+    index = pages / CACHE / '.comparisons'
+    base, stale = module_graph.comparison(change, clone, index)
+    out = pages / CACHE / f"{module_graph.cache_key(change, clone, base)}.diff"
     if not out.is_file():
-        base = module_graph.fetch(change, clone)
+        if stale:
+            raise ValueError('cached diff is unavailable while offline')
         # ponytail: the whole diff, however big; cap it per file if a change's page gets slow.
         text = module_graph.run(["git", "-C", str(clone), "diff", "--no-color", "--no-renames", "--no-ext-diff",
                                  "--end-of-options", base, change.head])
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(f"{base}\n{text}")
-    base, _, text = out.read_text().partition("\n")
+    cached_base, separator, text = out.read_text().partition("\n")
+    if not separator or cached_base != base:
+        raise ValueError('cached diff has an invalid comparison identity')
+    if not stale:
+        module_graph.remember_comparison(change, clone, index, base)
+    return base, text, stale
+
+
+def diff(change: board_sources.Change, clone: Path, pages: Path) -> tuple[str, str]:
+    base, text, stale = diff_result(change, clone, pages)
+    if stale:
+        raise ValueError('diff is stale: the current base could not be verified')
     return base, text
 
 
@@ -191,7 +213,7 @@ def _count(a: int, d: int) -> str:
                                   f'<span class="minus">−{d}</span>' if d else ""))) or "+0"
 
 
-def _rows(f: File, mine: list[Note], now: datetime) -> tuple[str, list[Note]]:
+def _rows(f: File, mine: list[Note], now: datetime, linker: decision_page.Linker = decision_page.Linker()) -> tuple[str, list[Note]]:
     """The file's diff rows, each line followed by the notes on it; and the notes on no shown line."""
     out, left = [], list(mine)
     for kind, o, n, tx in f.rows:
@@ -202,18 +224,24 @@ def _rows(f: File, mine: list[Note], now: datetime) -> tuple[str, list[Note]]:
         out.append(f'<tr class="{kind}"><td class="o">{o}</td><td class="n">{n}</td><td class="sign">{sign}</td>'
                    f'<td class="tx">{escape(tx)}</td></tr>')
         on = [x for x in left if x.line is not None and (x.line == n if x.side == "new" else x.line == o)]
-        out += [f'<tr class="note"><td colspan="4">{_note(x, now)}</td></tr>' for x in on]
+        out += [f'<tr class="note"><td colspan="4">{_note(x, now, linker)}</td></tr>' for x in on]
         left = [x for x in left if x not in on]
     return "\n".join(out), left
 
 
-def _change(ref: str, sources: board_sources.Sources) -> board_sources.Change | None:
+def _change_for(keys: tuple[str, ...], sources: board_sources.Sources) -> board_sources.Change | None:
     """The change naming the issue: an open one first, then a merged one."""
     order = {"open": 0, "merged": 1}
-    return min((c for c in sources.changes.values() if ref in c.issues), key=lambda c: order.get(c.state, 2), default=None)
+    wanted = set(keys)
+    return min((c for c in sources.changes.values() if wanted & change_issue_keys(c)),
+               key=lambda c: order.get(c.state, 2), default=None)
 
 
-def _split(f: File, mine: list[Note], now: datetime) -> str:
+def _change(ref: str, sources: board_sources.Sources) -> board_sources.Change | None:
+    return _change_for((ref,), sources)
+
+
+def _split(f: File, mine: list[Note], now: datetime, linker: decision_page.Linker = decision_page.Linker()) -> str:
     """The old side left, the new side right; within a change, removed and added lines pair row by row. A note follows
     the row holding its line."""
     def side(row, cls: str) -> str:
@@ -226,7 +254,7 @@ def _split(f: File, mine: list[Note], now: datetime) -> str:
 
     def row(left, right) -> None:
         out.append("<tr>" + side(left, "left") + side(right, "right") + "</tr>")
-        out.extend(f'<tr class="note"><td colspan="4">{_note(x, now)}</td></tr>' for x in mine if x.line is not None and (
+        out.extend(f'<tr class="note"><td colspan="4">{_note(x, now, linker)}</td></tr>' for x in mine if x.line is not None and (
             (x.side == "old" and left and x.line == left[1]) or (x.side == "new" and right and x.line == right[2])))
 
     def flush():
@@ -256,28 +284,51 @@ LAYOUT = ('  <div class="seg" role="group" aria-label="Diff layout">'
           '<input type="radio" name="layout" id="layout-split"><label for="layout-split">Split</label></div>\n')
 
 
-def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
+def render(number: int | str, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            graph: Graph | None = None, pages: Path | None = None, root: Path | None = None,
-           notes: list[Note] | None = None, notes_error: str = "", pending: int = 0) -> str | None:
-    """The page, or None when no task in `trackers` names issue `number`. `notes` are the change's review threads."""
-    ref = f"#{number}"
-    mine = [t for _, text in trackers for t in parse_tracker(text).tasks
-            if (m := TRAILING_NUMBER.search(t.issue)) and int(m[1]) == number]
-    if not mine:
+           notes: list[Note] | None = None, notes_error: str = "", pending: int = 0,
+           navigation: dict | None = None, db: PageData | None = None,
+           forge: backlog.Backlog | backlog.GitHubBacklog | None = None) -> str | None:
+    """The page, or None when no task in `trackers` or the store names issue `number`. `notes` are the change's review threads."""
+    linker = decision_page.Linker(forge, root)
+    identity = str(number)
+    full_key = identity if "#" in identity else None
+    numeric = int(identity.rpartition("#")[2]) if full_key else int(identity)
+    ref = f"#{numeric}"
+    mine = tracker_issue_tasks(trackers, numeric, sources.home, full_key)
+    if mine is None and db is None:
         return None
-    issue = sources.issues.get(ref)
-    name = issue.title if issue else mine[0].label
-    change = _change(ref, sources)
-    crumb = f"Source · {escape(change.ref) + ' · ' if change else ''}{ref} {escape(name)}"
+    mine = mine or []
+    store_item = None
+    if db is not None:
+        matches = [i for i in db.items() if (i.issue_key == full_key if full_key else
+                   (m := TRAILING_NUMBER.search(i.issue_key)) and int(m[1]) == numeric)]
+        store_item = matches[0] if len(matches) == 1 else None
+        if full_key and store_item is None or not full_key and len(matches) > 1:
+            return None
+    if not mine and store_item is None:
+        return None
+    if store_item is not None:
+        mine = []
+    raw_refs = ((full_key,) if full_key
+                else (store_item.issue_key,) if store_item is not None
+                else tuple(t.issue for t in mine if t.issue.strip()) or (ref,))
+    lookup = lookup_keys(raw_refs, sources.home)
+    issue = next((sources.issues[k] for k in lookup if k in sources.issues), None)
+    name = issue.title if issue else (mine[0].label if mine else (store_item.title or ref))
+    change = _change_for(lookup, sources)
+    crumb = f"Source · {escape(change.ref) + ' · ' if change else ''}{escape(ref)} {escape(name)}"
     title = f"{escape(change.ref)} · {escape(change.title)}" if change else escape(name)
     compare = note = ""
     files: list[File] = []
     if change:
         if graph and pages and root:
             try:
-                base, text = diff(change, root / graph.clone, pages)
+                base, text, stale = diff_result(change, root / graph.clone, pages)
                 files = parse(text)
-                compare = f"{escape(change.base)}@{base[:7]} → {change.head[:7]}"
+                compare = f"{escape(change.base)}@{escape(base[:7])} → {escape(change.head[:7])}"
+                if stale:
+                    note = 'Stale cached diff: the current base could not be verified.'
             except (OSError, ValueError) as e:
                 note = f"The diff is unavailable: {escape(str(e))}"
         else:
@@ -301,17 +352,19 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
         if not f.rows:
             continue
         on = [x for x in notes if x.path == f.path]
-        rows, off = _rows(f, on, now)
+        rows, off = _rows(f, on, now, linker)
         notes = [x for x in notes if x.path != f.path]
-        tables.append(f'    <div class="card"><h3>{escape(f.path)}</h3>\n' + "".join(_note(x, now) for x in off)
+        tables.append(f'    <div class="card"><h3>{escape(f.path)}</h3>\n' + "".join(_note(x, now, linker) for x in off)
                       + f'    <table class="diff" id="{escape(anchor(f.path))}" data-path="{escape(f.path)}">\n{rows}\n    </table>\n'
-                      f'    <table class="split" data-split-path="{escape(f.path)}">\n{_split(f, [x for x in on if x not in off], now)}\n    </table></div>')
+                      f'    <table class="split" data-split-path="{escape(f.path)}">\n{_split(f, [x for x in on if x not in off], now, linker)}\n    </table></div>')
     if notes:  # threads on files the page shows no diff of
-        tables.insert(0, '    <div class="card">' + "".join(_note(x, now) for x in notes) + "</div>")
+        tables.insert(0, '    <div class="card">' + "".join(_note(x, now, linker) for x in notes) + "</div>")
     if notes_error:
         tables.insert(0, f'    <p class="card">Review notes unavailable: {escape(notes_error)}</p>')
     if not change:
-        body = f'  <p class="card">Nothing to diff: no change names {ref} yet.</p>\n'
+        body = f'  <p class="card">Nothing to diff: no change names {escape(ref)} yet.</p>\n'
+        if issue and issue.body:
+            body += f'  <div class="card"><pre>{escape(issue.body)}</pre></div>\n'
     else:
         total = f"{len(files)} · +{sum(f.add for f in files)} −{sum(f.dele for f in files)}"
         body = (LAYOUT if tables else "") + (f'  <div class="src">\n    <div class="card"><div class="cap">files · {total}</div>\n'
@@ -321,19 +374,41 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     cmp = f'    <div class="card cmp"><span class="cap">compare</span><div>{compare}</div></div>\n' if compare else ""
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>Source {escape(change.ref) if change else ref}</title>\n{HEAD}{CSS}</head>\n"
-            f'<body>\n<main class="source">\n{tab_bar("Board", pending, True)}  <header class="top">\n    <div>\n      <span class="eyebrow">{crumb} · '
-            f'<a href="/issues/{number}">task</a> · <a href="/">board</a></span>\n'
+            f"<title>Source {escape(change.ref) if change else escape(ref)}</title>\n{HEAD}{CSS}</head>\n"
+            f'<body>\n<main class="source">\n{tab_bar("Board", pending, True, **(navigation or {}))}  <header class="top">\n    <div>\n      <span class="eyebrow">{crumb} · '
+            f'<a href="{issue_href(number)}">task</a> · <a href="/">board</a></span>\n'
             f"      <h1>{title}</h1>\n    </div>\n{cmp}  </header>\n{body}</main>\n</body>\n</html>\n")
 
 
-def write(root: Path, pages_dir: Path, number: int) -> Path | None:
+def write(root: Path, pages_dir: Path, number: int | str, *, db: PageData | None = None, navigation: dict | None = None) -> Path | None:
     """Render `issue-<number>-source.html`; with no page, remove the file and return None."""
     cfg, now, trackers, settings = inputs(root)
-    sources = board_sources.load(pages_dir)
-    change = _change(f"#{number}", sources)
+    sources = board_sources.for_home(board_sources.load(pages_dir), cfg.backlog)
+    identity = str(number)
+    full_key = identity if "#" in identity else None
+    numeric = int(identity.rpartition("#")[2]) if full_key else int(identity)
+    if full_key:
+        raw_refs: tuple[str, ...] = (full_key,)
+    else:
+        matches = ([i for i in db.items() if (m := TRAILING_NUMBER.search(i.issue_key)) and int(m[1]) == numeric]
+                   if db is not None else [])
+        if len(matches) == 1:
+            raw_refs = (matches[0].issue_key,)
+        elif matches:
+            raw_refs = ()
+        else:
+            mine = tracker_issue_tasks(trackers, numeric, sources.home)
+            raw_refs = tuple(t.issue for t in mine) if mine else ()
+    change = _change_for(lookup_keys(raw_refs, sources.home), sources)
     # ponytail: one small forge query per render (about once a minute while the page is open); cache by head if it bites.
-    found, error = notes(change, cfg.backlog) if change and cfg.backlog else ([], "")
+    found, error = [], ""
+    if change and cfg.backlog:
+        if (sources.home is not None and type(sources.home) is type(cfg.backlog)
+                and backlog.home_of(sources.home) == backlog.home_of(cfg.backlog)):
+            found, error = notes(change, cfg.backlog)
+        else:
+            error = "The cached change's forge home does not match the configured backlog."
+    ctx = decision_page.context(root, now.date().isoformat())
     page = render(number, trackers, sources, now, settings.graph, pages_dir, root, found, error,
-                  decision_page.pending_count(pages_dir, decision_page.context(root, now.date().isoformat())))
-    return put(pages_dir / f"issue-{number}-source.html", page)
+                  decision_page.pending_count(pages_dir, ctx), navigation, db=db, forge=cfg.backlog)
+    return put(pages_dir / issue_page_name(number, source=True), page)

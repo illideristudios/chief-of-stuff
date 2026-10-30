@@ -10,11 +10,13 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parent / "scripts"), str(HERE)]
 import backlog_ref as backlog  # noqa: E402
 import board_sources as bs  # noqa: E402
+import fragment  # noqa: E402
 import columns  # noqa: E402
 import decision_page  # noqa: E402
 import panels  # noqa: E402
@@ -26,17 +28,19 @@ from workspace import parse_coordinator  # noqa: E402
 import settings as st  # noqa: E402
 from test_render_board import CLAUDE_MD, NOW  # noqa: E402
 
+CLAUDE_MD = CLAUDE_MD.replace("- Human-only", "- Backlog: GitLab; host https://forge.example; project group/project\n- Human-only")
+
 
 def change(ref: str, *, state="open", draft=False, pipeline="passed", approved=False, merged_at=None,
            files=(), issues=(), title="") -> bs.Change:
-    return bs.Change(ref, f"https://forge/{ref[1:]}", title or f"Change {ref}", state, draft, pipeline, approved,
+    return bs.Change(ref, f"https://forge.example/group/project/-/merge_requests/{ref[1:]}", title or f"Change {ref}", state, draft, pipeline, approved,
                      int(approved), merged_at, "main", files, issues)
 
 
 SOURCES = bs.Sources(
     fetched={"kanban": NOW - timedelta(minutes=2), "merge requests": NOW - timedelta(minutes=3), "workers": NOW},
-    issues={"#9": bs.Issue("#9", "https://forge/i/9", "Cut", "open", ("stage::review",)),
-            "#7": bs.Issue("#7", "https://forge/i/7", "README", "open", ("stage::implement",))},
+    issues={"#9": bs.Issue("#9", "https://forge.example/group/project/-/issues/9", "Cut", "open", ("stage::review",)),
+            "#7": bs.Issue("#7", "https://forge.example/group/project/-/issues/7", "README", "open", ("stage::implement",))},
     changes={c.ref: c for c in (
         change("!41", approved=True, files=("a.py",), issues=("#2",), title="Password reset copy"),
         change("!42", approved=True, files=("b.py", "c.py"), issues=("#3",), title="Health check timeout"),
@@ -48,7 +52,7 @@ SOURCES = bs.Sources(
     )},
     workers=(bs.Worker("impl-07", "one-shot", "claude", "opus", "Cut the release", "trees/cut", NOW - timedelta(minutes=42), None),
              bs.Worker("impl-04", "session", "codex", "", "Audit", "", NOW - timedelta(hours=1, minutes=23), NOW - timedelta(minutes=11))),
-    errors={},
+    errors={}, home=backlog.Backlog("https://forge.example", "group/project"),
 )
 
 TRACKER = """# Tracker 2026-09-16
@@ -60,7 +64,7 @@ Coordinator: coordinator. Board: board-7.
 | name | item | owner | state | since | due | size | lane | stage | issue | checklist |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Cut the release | Cut the release branch | impl-2 | running 10:30 | 10:30 | 23:00 | M | build | review | #9 | Checklist: cut |
-| Write README | Write eval README | Robin | open | 09:00 | 17:00 | S | build | triage | https://forge/i/7 | Checklist: readme |
+| Write README | Write eval README | Robin | open | 09:00 | 17:00 | S | build | triage | https://forge.example/group/project/-/issues/7 | Checklist: readme |
 | Webhook check | Check webhook signature | unassigned | orphaned | 09:00 |  | S | build | implement |  | Checklist: hook |
 | Console | Rotate the key in the console | Robin | open | 09:00 | 17:00 | S |  |  |  | Checklist: key |
 
@@ -93,7 +97,11 @@ class HoldCauseTest(unittest.TestCase):
                                      pending_refs=refs, home=None, lane=LANES["build"])
 
     def test_a_pending_decision_on_the_issue_comes_first(self) -> None:
-        self.assertEqual(self.cause("Write README", {"#7"}), "decision")
+        task = replace(self.tasks["Write README"], issue="#7")
+        self.assertEqual(self.cause("Write README", {"#7"}, task=task), "decision")
+
+    def test_an_unrecognized_issue_url_does_not_match_a_bare_decision_ref(self) -> None:
+        self.assertEqual(self.cause("Write README", {"#7"}), "triage")
 
     def test_else_a_kanban_hold_stage_names_the_stage(self) -> None:
         self.assertEqual(self.cause("Write README"), "triage")
@@ -171,8 +179,27 @@ class SinceLookedTest(unittest.TestCase):
             with self.subTest(moved):
                 earlier = TRACKER.replace("| Write README | Write eval README |", earlier_row)
                 moves = tracker_log.moves(earlier + f"- 11:00 stage: {moved} → triage\n", day, NOW.tzinfo)
-                began = task_forge.hold_began({task: "triage"}, moves, {}, None, tasks, parse_tracker(earlier).tasks)
+                began = task_forge.hold_began({task: "triage"}, moves, {}, None, tasks, [(day, parse_tracker(earlier).tasks)])
                 self.assertEqual(began[task], datetime.combine(day, time(11, 0), NOW.tzinfo))
+
+    def test_an_unnamed_task_still_resolves_moves_by_its_item(self):
+        task = replace(parse_tracker(TRACKER).tasks[0], name="", issue="")
+        moves = tracker_log.moves(TRACKER + "- 09:00 stage: Cut the release branch → fix\n"
+                                  "- 10:00 stage: Cut the release branch → review\n"
+                                  "- 11:00 stage: Cut the release branch → fix\n", NOW.date(), NOW.tzinfo)
+        self.assertEqual(task_forge.looping([task], moves, {"build": st.Lane(("review", "fix", "merge"))}, None), {task})
+        self.assertEqual(task_forge.hold_began({task: "fix"}, moves, {}, None, [task])[task], NOW.replace(hour=11, minute=0))
+
+    def test_a_historical_launcher_cannot_start_a_reused_names_new_issue_hold(self):
+        day = NOW.date() - timedelta(days=1)
+        old = TRACKER.replace("| #9 |", "| #99 |")
+        old += "- 12:00 one-shot w1 started: claude, task Cut the release branch, extra prompt\n"
+        old += "- 13:00 one-shot w1: completed; awaiting integration\n"
+        html = rb.render(TRACKER.replace("| build | review |", "| build | pr |"),
+                         parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
+                         lanes=LANES, kanban=replace(KANBAN, hold_stages=("pr",)), sources=SOURCES,
+                         stage_log=[(day, old)], looked=NOW - timedelta(days=2))
+        self.assertEqual(re.findall(r'title="(\d+) went needs input since', html), [])
 
     def test_a_gate_hold_begins_at_the_tasks_last_move_into_that_gate(self) -> None:
         # #579 review R3, R7: moves read as flow_chart reads them: by name or item, any case; the latest move into the
@@ -217,62 +244,7 @@ class SinceLookedTest(unittest.TestCase):
         self.assertEqual(self.since(None, kanban=gate, log=move), [("1 went needs input since 00:00", "1")])
 
 
-class MergeOrder(unittest.TestCase):
-    def setUp(self) -> None:
-        self.panel = rb.merge_order(SOURCES)
-
-    def test_approved_first_ready_before_failed_unshared_before_shared_then_in_review(self) -> None:
-        self.assertEqual([(r.num, r.ref) for r in self.panel.rows], [("1", "!41"), ("2", "!42"), ("3", "!52"), ("4", "!48")])
-
-    def test_drafts_and_closed_changes_are_not_in_the_order(self) -> None:
-        self.assertNotIn("!50", [r.ref for r in self.panel.rows])
-        self.assertNotIn("!37", [r.ref for r in self.panel.rows])
-
-    def test_facts_are_approval_pipeline_base_and_shared_files(self) -> None:
-        facts = {r.ref: r.facts for r in self.panel.rows}
-        self.assertEqual(facts["!41"], "approved · pipeline passed · base main · no shared files")
-        self.assertEqual(facts["!42"], "approved · pipeline passed · base main · shares 1 file with !48, !50")
-        self.assertEqual(facts["!48"], "in review · pipeline passed · base main · shares 1 file with !42, !50")
-        self.assertEqual(facts["!52"], "approved · pipeline failed · base main · no shared files")
-
-    def test_head_counts(self) -> None:
-        self.assertEqual((self.panel.id, self.panel.count, self.panel.note), ("merge", 4, "3 approved · 1 in review"))
-        self.assertEqual((self.panel.rows[0].name, self.panel.rows[0].href), ("Password reset copy", "https://forge/41"))
-
-    def test_the_order_shows_five_and_counts_the_rest(self) -> None:
-        many = bs.Sources({}, {}, {f"!{n}": change(f"!{n}") for n in range(1, 9)}, (), {})
-        p = rb.merge_order(many)
-        self.assertEqual((p.count, len(p.rows), p.foot), (8, 5, "+ 3 more"))
-
-    def test_empty_sources_leave_an_empty_order(self) -> None:
-        p = rb.merge_order(bs.EMPTY)
-        self.assertEqual((p.count, p.rows, p.note), (0, (), "0 approved · 0 in review"))
-
-
-class Workers(unittest.TestCase):
-    def test_one_row_per_worker_with_age_and_facts(self) -> None:
-        p = rb.worker_panel(SOURCES, NOW)
-        self.assertEqual((p.id, p.count, p.note), ("workers", 2, "1 one-shot · 1 session"))
-        # (#199) facts are `<kind> · <runtime model> · <task> · <tree>`, empty parts skipped: impl-04 has
-        # no tree, so nothing stands in for it — not the old "last reply" fallback.
-        self.assertEqual([(r.name, r.side, r.facts) for r in p.rows], [
-            ("impl-07", "0h42m", "one-shot · claude opus · Cut the release · trees/cut"),
-            ("impl-04", "1h23m", "session · codex · Audit"),
-        ])
-
-    def test_empty(self) -> None:
-        self.assertEqual(rb.worker_panel(bs.EMPTY, NOW).rows, ())
-
-
 class Decisions(unittest.TestCase):
-    def test_pending_rows_carry_asked_recommended_and_default(self) -> None:
-        d = {"headline": "Cache warmup: keep the pool?", "recommended": "A", "default": "pool stays"}
-        p = rb.decision_panel([("cache", d, NOW.replace(hour=1, minute=41), ""), ("bad", None, None, "no ask")], 4, NOW)
-        self.assertEqual((p.id, p.count, p.foot, p.link), ("decisions", 1, "4 answered today", ("decisions page", "/decisions")))
-        self.assertEqual(p.rows[0], panels.Row("Cache warmup: keep the pool?", "asked 01:41 · recommended A · default: pool stays",
-                                               href="/decisions/cache"))
-        self.assertEqual(p.rows[1], panels.Row("decision-bad.json", "unreadable: no ask"))
-
     def test_the_pending_list_is_the_decisions_page_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pages = Path(tmp)
@@ -295,8 +267,33 @@ class Build(unittest.TestCase):
     def test_a_card_gains_its_change_ref_and_marks(self) -> None:
         # Both refs open the task page (#209): !48 names #9, so it lands there too.
         card = next(c for col in self.cols() for c in col.cards if c.name == "Cut the release")
-        self.assertEqual(card.refs, (("#9", "/issues/9"), ("!48", "/issues/9")))
-        self.assertEqual(card.marks, (columns.Mark("passed", "passed"),))
+        self.assertEqual(card.refs, (("#9", fragment.issue_href("gitlab:forge.example/group/project#9")), ("!48", fragment.issue_href("gitlab:forge.example/group/project#9"))))
+        self.assertEqual(card.marks, (columns.Mark("passed", "passed"),
+                                      columns.Mark("shares file with !42", "shared"),
+                                      columns.Mark("shares file with !50", "shared")))
+
+    def test_a_task_with_a_worker_thread_links_to_it(self) -> None:
+        # #1178: a T3 worker's thread is a deep link on its task's card; a task without one gains nothing.
+        link = "t3code://threads/env-1/mcp:t-1"
+        cols = rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, SOURCES, NOW, threads={"#9": link})
+        card = next(c for col in cols for c in col.cards if c.name == "Cut the release")
+        self.assertEqual(card.refs[-1], ("T3 thread", link))
+        self.assertIn(f'href="{link}"', columns.render(cols))
+        other = next(c for col in cols for c in col.cards if c.name == "Write README")
+        self.assertNotIn("T3 thread", [text for text, _ in other.refs])
+
+    def test_board_thread_uses_start_time_instead_of_json_key_order(self):
+        from types import SimpleNamespace
+        runs = {"fix-2": {"thread_link": "t3code://threads/e/latest", "started_at": "2026-01-02T00:00:00+00:00"},
+                "review-1": {"thread_link": "t3code://threads/e/old", "started_at": "2026-01-01T00:00:00+00:00"}}
+        db = SimpleNamespace(items=lambda: [SimpleNamespace(issue_key="github:o/r#1")], resume=lambda key: {"runs": runs})
+        self.assertEqual(rb._worker_threads(db), {"github:o/r#1": "t3code://threads/e/latest"})
+
+    def test_a_bare_issue_does_not_match_a_change_without_a_home(self) -> None:
+        sources = replace(SOURCES, home=None)
+        card = next(c for col in self.cols(sources) for c in col.cards if c.name == "Cut the release")
+        self.assertEqual(card.refs, (("#9", "/issues/9"),))
+        self.assertEqual(card.marks, ())
 
     def test_approval_and_a_failed_pipeline_are_marks(self) -> None:
         self.assertEqual(rb.change_marks((SOURCES.changes["!52"],)),
@@ -304,24 +301,42 @@ class Build(unittest.TestCase):
         self.assertEqual(rb.change_marks((change("!1", pipeline="running"),)), (columns.Mark("running", "pending"),))
 
     def test_an_issue_url_matches_its_number(self) -> None:
-        # A ref's number, not a matching sources.issues URL, decides its link: it still opens /issues/7,
-        # sources.issues["#7"] notwithstanding (#209).
+        # The task's URL determines the canonical issue route, independently of the cache.
         card = next(c for col in self.cols() for c in col.cards if c.name == "Write README")
-        self.assertEqual(card.refs, (("#7", "/issues/7"),))
+        self.assertEqual(card.refs, (("#7", fragment.issue_href("gitlab:forge.example/group/project#7")),))
 
     def test_a_tracker_issue_url_links_without_sources(self) -> None:
-        card = next(c for col in rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES) for c in col.cards if c.name == "Write README")
-        self.assertEqual(card.refs, (("#7", "/issues/7"),))
+        card = next(c for col in rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES,
+                                                  sources=replace(bs.EMPTY, home=SOURCES.home))
+                    for c in col.cards if c.name == "Write README")
+        self.assertEqual(card.refs, (("#7", fragment.issue_href("gitlab:forge.example/group/project#7")),))
         bare = next(c for col in self.cols() for c in col.cards if c.name == "Webhook check")
         self.assertEqual((bare.refs, bare.href), ((), ""))
 
     def test_main_holds_the_changes_merged_today(self) -> None:
         main = self.cols()[-1]
         self.assertEqual((main.name, [(c.name, c.refs, c.owner, c.state, c.kind) for c in main.cards]),
-                         ("main", [("Locale fallback", (("#8", "/issues/8"), ("!37", "/issues/8")),
+                         ("main", [("Locale fallback", (("#8", fragment.issue_href("gitlab:forge.example/group/project#8")), ("!37", fragment.issue_href("gitlab:forge.example/group/project#8"))),
                                     "merged 12:30", "done", "merged today")]))
         html = columns.render([columns.Column("main", main.cards * 5)])
-        self.assertIn("+ <span>2 merged today</span>", html)
+        self.assertEqual(html.count('class="columns-card"'), 5)
+        self.assertNotIn("columns-more", html)
+
+    def test_a_needs_input_card_past_the_third_is_drawn(self) -> None:
+        # #938: the plan column folded past three, so a NEEDS INPUT card in fourth place sat in a closed
+        # <details> and the board hid it at rest. The flag has to be in the column, with every card.
+        head = ("| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+                "|---|---|---|---|---|---|---|---|---|---|---|\n")
+        rows = "".join(
+            f"| Card {i} | Card {i} | Robin | open | 09:00 |  | S | build | plan |  |  |\n" for i in range(3)
+        ) + "| Hidden ask | Hidden ask | Robin | waiting | 09:00 |  | S | build | plan |  |  |\n"
+        lanes = {"build": st.Lane(("plan", "implement"))}
+        html = columns.render(rb.build_columns(rb.parse_tracker(f"# Tracker\n\n## Tasks\n\n{head}{rows}").tasks, lanes))
+        self.assertIn('<div class="columns-tag columns-flag" data-cat="hold">NEEDS INPUT</div>', html)
+        self.assertIn("Hidden ask", html)
+        self.assertEqual(len(re.findall(r'class="columns-card(?: |")', html)), 4)
+        self.assertNotIn("columns-more", html)
+        self.assertNotIn("<details", html)
 
     def test_drift_marks_the_card(self) -> None:
         card = next(c for col in self.cols(kanban=KANBAN) for c in col.cards if c.name == "Write README")
@@ -333,6 +348,10 @@ class Build(unittest.TestCase):
         tasks = rb.parse_tracker(TRACKER).tasks
         self.assertEqual(rb.build_columns(tasks, LANES, KANBAN, bs.EMPTY, NOW), rb.build_columns(tasks, LANES, KANBAN))
         self.assertEqual([c.name for c in rb.build_columns(tasks, LANES)], ["implement", "review", "triage", "merge"])
+
+    def test_unverified_bare_issue_does_not_match_a_home_less_cached_change(self) -> None:
+        task = next(t for t in rb.parse_tracker(TRACKER).tasks if t.name == "Cut the release")
+        self.assertEqual(task_forge.task_changes(task, replace(SOURCES, home=None)), ())
 
     def test_a_merged_change_draws_the_card_at_its_lanes_last_stage(self) -> None:
         # (#240) A stalled coordinator can leave the tracker cell at `merge` for hours after the change actually
@@ -362,6 +381,187 @@ def card_named(cols: list[columns.Column], name: str) -> columns.Card:
     return next(c for col in cols for c in col.cards if c.name == name)
 
 
+class CardFactsTest(unittest.TestCase):
+    """#208: facts formerly in side panels are visible on the task's own card."""
+
+    def cols(self, changes, log="", *, earlier=(), refs=None, tracker=TRACKER, lanes=None):
+        sources = replace(SOURCES, changes={c.ref: c for c in changes})
+        lanes = lanes or {"build": st.Lane(("implement", "review", "fix", "merge"))}
+        html = rb.render(tracker + log, parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
+                         lanes=lanes, sources=sources, pending_refs=refs,
+                         stage_log=[(d, text) for d, text in earlier if d >= NOW.date() - timedelta(days=2)],
+                         look_log=[(d, text) for d, text in earlier if d < NOW.date() - timedelta(days=2)])
+        # Capture the actual cards produced by render, including stage history and decision holds.
+        return html.split("</style>", 1)[1]
+
+    def marks(self, html, name="Cut the release"):
+        card = re.split(rf'>{re.escape(name)}</(?:a|div)>', html, maxsplit=1)[1].split('<div class="columns-card', 1)[0]
+        return re.findall(r'class="columns-tag columns-mark" data-cat="[^"]+">([^<]+)<', card)
+
+    def test_approved_cards_keep_the_complete_merge_order_past_the_old_five_row_limit(self):
+        changes = [change(f"!{i}", approved=True, issues=("#9",) if i == 8 else ()) for i in range(1, 9)]
+        self.assertIn("queue 8", self.marks(self.cols(changes)))
+
+    def test_the_queue_uses_approval_pipeline_overlap_and_change_number(self):
+        changes = [change("!3", approved=True, issues=("#9",), files=("a",)),
+                   change("!1", approved=True, files=("a",)),
+                   change("!7", approved=True), change("!2", approved=True, pipeline="failed"),
+                   change("!4", approved=False)]
+        for ref, position in (("!7", 1), ("!1", 2), ("!3", 3), ("!2", 4)):
+            with self.subTest(ref=ref):
+                rows = [replace(c, issues=("#9",) if c.ref == ref else ()) for c in changes]
+                self.assertIn(f"queue {position}", self.marks(self.cols(rows)))
+
+    def test_only_open_approved_non_draft_changes_receive_a_queue_mark(self):
+        for attrs in ({"approved": False}, {"approved": True, "draft": True},
+                      {"approved": True, "state": "merged"}, {"approved": True, "state": "closed"}):
+            with self.subTest(attrs=attrs):
+                self.assertFalse(any(m.startswith("queue ") for m in self.marks(
+                    self.cols([change("!1", issues=("#9",), **attrs)]))))
+
+    def test_shared_file_marks_include_drafts_but_exclude_closed_and_merged_changes(self):
+        changes = [change("!1", issues=("#9",), files=("a", "b")),
+                   change("!2", draft=True, files=("a", "b")),
+                   change("!3", state="closed", files=("a",)),
+                   change("!4", state="merged", files=("b",)), change("!5", files=("c",))]
+        self.assertEqual([m for m in self.marks(self.cols(changes)) if m.startswith("shares")],
+                         ["shares file with !2"])
+        self.assertNotIn("shares file with", self.cols([replace(c, state="merged") for c in changes]))
+
+    def test_a_pending_decision_marks_only_the_task_it_holds(self):
+        html = self.cols([], refs={"#9": None})
+        self.assertIn("decision pending", self.marks(html))
+        self.assertNotIn("decision pending", self.marks(html, "Write README"))
+        self.assertNotIn("decision pending", self.cols([], refs={}))
+
+    def test_looping_counts_entries_into_the_lanes_fix_stage_across_days(self):
+        earlier = TRACKER + "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n"
+        log = "- 11:00 stage: Cut the release → fix\n"
+        self.assertIn("looping", self.marks(self.cols([], log, earlier=[(NOW.date() - timedelta(days=1), earlier)])))
+        for history in ("", "- 09:00 stage: Cut the release → fix\n",
+                        "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → fix\n"):
+            with self.subTest(history=history):
+                self.assertNotIn("looping", self.marks(self.cols([], history)))
+        self.assertNotIn("looping", self.cols([], earlier + log, lanes=LANES))  # no fix stage in this lane
+
+    def test_looping_resolves_a_renamed_task_by_its_issue_and_does_not_mark_other_cards(self):
+        earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft release | Draft the release |")
+        earlier += "- 09:00 stage: Draft release → fix\n- 10:00 stage: Draft the release → review\n"
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n",
+                         earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertIn("looping", self.marks(html))
+        self.assertNotIn("looping", self.marks(html, "Write README"))
+
+    def test_write_reads_fix_entries_older_than_the_flow_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(CLAUDE_MD + "\n- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "fix", "merge"] }\n')
+            (root / "daily").mkdir()
+            today = datetime.now(NOW.tzinfo).date()
+            (root / f"daily/{today}-tracker.md").write_text(TRACKER + "- 11:00 stage: Cut the release → fix\n")
+            earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
+            earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"
+            (root / f"daily/{today - timedelta(days=5)}-tracker.md").write_text(earlier)
+            html = rb.write(root, day=today.isoformat())[0].read_text().split("</style>", 1)[1]
+            self.assertIn("looping", self.marks(html))
+
+    def test_write_reads_old_fix_history_when_cached_forge_home_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(CLAUDE_MD + "\n- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "fix", "merge"] }\n')
+            (root / "daily").mkdir()
+            today = datetime.now(NOW.tzinfo).date()
+            tracker = "\n".join(line for line in TRACKER.splitlines() if not line.startswith(("| Write README |", "| Webhook check |", "| Console |"))) + "\n"
+            (root / f"daily/{today}-tracker.md").write_text(tracker + "- 11:00 stage: Cut the release → fix\n")
+            earlier = tracker.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
+            earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"
+            (root / f"daily/{today - timedelta(days=5)}-tracker.md").write_text(earlier)
+            old = replace(SOURCES, home=backlog.Backlog("https://forge.example", "group/old"),
+                          changes={"!48": replace(change("!48", state="merged", issues=("#9",)),
+                                                  url="https://forge.example/group/old/-/merge_requests/48")})
+            bs._write(root / "daily" / bs.CACHE, old)
+            html = rb.write(root, day=today.isoformat())[0].read_text().split("</style>", 1)[1]
+            self.assertIn("looping", self.marks(html))
+
+    def test_a_reused_name_keeps_moves_with_the_issue_on_their_day(self):
+        earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
+        earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"
+        tracker = TRACKER.replace("| Write README | Write eval README |", "| Draft | Draft release |")
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n- 11:30 stage: Draft → fix\n",
+                         tracker=tracker, earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertIn("looping", self.marks(html))
+        self.assertNotIn("looping", self.marks(html, "Draft"))
+
+    def test_a_new_issue_with_the_same_name_does_not_inherit_fix_visits(self):
+        earlier = TRACKER.replace("| #9 |", "| #99 |")
+        earlier += "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n"
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n",
+                         earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertNotIn("looping", self.marks(html))
+
+    def test_unrelated_workflow_rows_do_not_share_fix_visits(self):
+        earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Prior workflow | Prior item |")
+        earlier = earlier.replace("| #9 |", "| workflow |")
+        earlier += "- 09:00 stage: Prior workflow → fix\n- 10:00 stage: Prior item → review\n"
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n",
+                         tracker=TRACKER.replace("| #9 |", "| workflow |"),
+                         earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertNotIn("looping", self.marks(html))
+
+    def test_finished_tasks_have_no_looping_mark(self):
+        log = "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n- 11:00 stage: Cut the release → fix\n"
+        lanes = {"build": st.Lane(("implement", "review", "fix", "merge", "main"))}
+        for tracker, changes in (
+                (TRACKER.replace("running 10:30", "done 10:30"), []),
+                (TRACKER.replace("| build | review |", "| build | main |"), []),
+                (TRACKER, [change("!3", state="merged", issues=("#9",))])):
+            with self.subTest(tracker=tracker, changes=changes):
+                self.assertNotIn("looping", self.marks(self.cols(changes, log, tracker=tracker, lanes=lanes)))
+
+    def test_old_loop_history_does_not_suppress_a_recent_launcher_hold(self):
+        old = TRACKER + "- 09:00 stage: Cut the release → review\n"
+        log = "- 12:00 one-shot w1 started: claude, task Cut the release branch\n- 13:00 one-shot w1: completed; awaiting integration\n"
+        html = rb.render(TRACKER.replace("| build | review |", "| build | pr |") + log,
+                         parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
+                         lanes=LANES, kanban=replace(KANBAN, hold_stages=("pr",)),
+                         look_log=[(NOW.date() - timedelta(days=5), old)], looked=NOW - timedelta(hours=3),
+                         sources=SOURCES)
+        self.assertIn('title="1 went needs input since 11:30"', html)
+
+    def test_write_stops_loop_history_at_the_tasks_first_absent_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(CLAUDE_MD + "\n- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "fix", "merge"] }\n')
+            (root / "daily").mkdir()
+            today = datetime.now(NOW.tzinfo).date()
+            for days, text in ((0, TRACKER), (5, TRACKER), (6, "## Tasks\n"), (100, TRACKER)):
+                (root / f"daily/{today - timedelta(days=days)}-tracker.md").write_text(text)
+            # Isolate board history reads from the pre-existing decision deadline/context readers.
+            original = Path.read_text
+            reads = []
+            def read(path, *args, **kwargs):
+                reads.append(path)
+                return original(path, *args, **kwargs)
+            with mock.patch.object(rb, "with_workspace_decision_deadlines", side_effect=lambda root, cfg, *a: cfg), \
+                    mock.patch.object(rb.decision_page, "decision_context", return_value=decision_page.Context(NOW)), \
+                    mock.patch.object(rb, "render", wraps=rb.render) as render, \
+                    mock.patch.object(Path, "read_text", read):
+                rb.write(root, day=today.isoformat())
+            self.assertNotIn(root / f"daily/{today - timedelta(days=100)}-tracker.md", reads)
+            self.assertEqual(render.call_args.kwargs["look_log"], [])  # no previous look: today only for holds
+
+    def test_tiles_and_tabs_still_reach_their_destinations_without_the_panels(self):
+        html = self.cols([])
+        for target in re.findall(r'class="panels-tile"[^>]+href="#([^"]+)"', html):
+            self.assertIn(f'id="{target}"', html)
+        self.assertIn('href="/workers"', html)
+        self.assertIn('href="/decisions#pending-decisions"', html)
+        self.assertFalse('class="panels-panel"' in html)
+
+
 class HomeProjectUrlTest(unittest.TestCase):
     """#409 review: a home-project task named by its issue's URL reads the forge's `#8` keys through `sources.home`;
     each reader (task_changes, drifts, the board card) must pass it, or its change, drift or ref silently vanishes."""
@@ -371,7 +571,7 @@ class HomeProjectUrlTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.sources = bs.Sources({}, {"#8": bs.Issue("#8", self.CELL, "Locale", "open", ("stage::implement",))},
-                                  {"!60": change("!60", issues=("#8",))}, (), {}, self.HOME)
+                                  {"!60": replace(change("!60", issues=("#8",)), url="https://example.com/o/app/-/merge_requests/60")}, (), {}, self.HOME)
         tracker = TRACKER.replace("## Decisions", f"| Ship it | Ship | Robin | waiting | 09:00 |  | S | build | review | {self.CELL} | c |\n\n## Decisions")
         self.tasks = rb.parse_tracker(tracker).tasks
         self.task = next(t for t in self.tasks if t.name == "Ship it")
@@ -385,14 +585,14 @@ class HomeProjectUrlTest(unittest.TestCase):
 
     def test_the_card_names_the_issue_by_its_short_key(self) -> None:
         card = card_named(rb.build_columns(self.tasks, LANES, KANBAN, self.sources, NOW), "Ship it")
-        self.assertEqual(card.refs, (("#8", "/issues/8"), ("!60", "/issues/8")))
+        self.assertEqual(card.refs, (("#8", fragment.issue_href("gitlab:example.com/o/app#8")), ("!60", fragment.issue_href("gitlab:example.com/o/app#8"))))
         self.assertIn(columns.Mark("drift", "drift"), card.marks)
 
     def test_the_cards_own_key_decides_its_ref(self) -> None:
         # no change and no known issue: only the card's own issue_key call decides its ref
         bare = replace(self.sources, changes={}, issues={})
         card = card_named(rb.build_columns(self.tasks, LANES, KANBAN, bare, NOW), "Ship it")
-        self.assertEqual(card.refs, (("#8", "/issues/8"),))
+        self.assertEqual(card.refs, (("#8", fragment.issue_href("gitlab:example.com/o/app#8")),))
 
 
 class CardLinkTest(unittest.TestCase):
@@ -403,14 +603,14 @@ class CardLinkTest(unittest.TestCase):
         # "A card whose issue cell ends in a number links its name to `/issues/<number>`." "A card's `#N` ref
         # links to `/issues/N`, and its `!N` ref links to the change's page" — !48 names #9, so both land there.
         # Cut the release has an open change; Write README's issue cell is a URL.
-        for sources in (SOURCES, bs.EMPTY):
+        for sources in (SOURCES, replace(bs.EMPTY, home=SOURCES.home)):
             cols = rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, sources, NOW)
             with self.subTest(sources="some" if sources.changes else "none"):
-                self.assertEqual(card_named(cols, "Write README").href, "/issues/7")
-                self.assertEqual(card_named(cols, "Write README").refs, (("#7", "/issues/7"),))
-                self.assertEqual(card_named(cols, "Cut the release").href, "/issues/9")
+                self.assertEqual(card_named(cols, "Write README").href, fragment.issue_href("gitlab:forge.example/group/project#7"))
+                self.assertEqual(card_named(cols, "Write README").refs, (("#7", fragment.issue_href("gitlab:forge.example/group/project#7")),))
+                self.assertEqual(card_named(cols, "Cut the release").href, fragment.issue_href("gitlab:forge.example/group/project#9"))
         cut = card_named(rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, SOURCES, NOW), "Cut the release")
-        self.assertEqual(cut.refs, (("#9", "/issues/9"), ("!48", "/issues/9")))
+        self.assertEqual(cut.refs, (("#9", fragment.issue_href("gitlab:forge.example/group/project#9")), ("!48", fragment.issue_href("gitlab:forge.example/group/project#9"))))
 
     def test_a_card_whose_issue_has_no_number_keeps_its_link(self) -> None:
         # "A card whose issue cell has no number keeps its current link." Set beside a numbered card, which moves.
@@ -427,8 +627,9 @@ class CardLinkTest(unittest.TestCase):
                                                                             title="Unfiled fix")})
         main = rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, sources, NOW)[-1]
         self.assertEqual({c.name: (c.href, c.refs) for c in main.cards}, {
-            "Locale fallback": ("/issues/8", (("#8", "/issues/8"), ("!37", "/issues/8"))),
-            "Unfiled fix": ("https://forge/38", (("!38", "https://forge/38"),))})
+            "Locale fallback": (fragment.issue_href("gitlab:forge.example/group/project#8"), (("#8", fragment.issue_href("gitlab:forge.example/group/project#8")), ("!37", fragment.issue_href("gitlab:forge.example/group/project#8")))),
+            "Unfiled fix": ("https://forge.example/group/project/-/merge_requests/38",
+                            (("!38", "https://forge.example/group/project/-/merge_requests/38"),))})
 
 
 class UnassignedCardTest(unittest.TestCase):
@@ -457,13 +658,13 @@ class CardRefAndOwnerLinkTest(unittest.TestCase):
 
     def test_an_issue_ref_links_to_its_issues_page(self) -> None:
         html = columns.render(rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, SOURCES, NOW))
-        self.assertIn('<a href="/issues/9">#9</a>', html)
+        self.assertIn(f'<a href="{fragment.issue_href("gitlab:forge.example/group/project#9")}">#9</a>', html)
 
     def test_a_change_ref_links_to_its_issues_task_page_not_the_forge(self) -> None:
         # !48 belongs to #9 (SOURCES). Today it opens https://forge/48; no change route exists to replace that
         # with, so it should take #9's task page instead.
         html = columns.render(rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, SOURCES, NOW))
-        self.assertIn('<a href="/issues/9">!48</a>', html)
+        self.assertIn(f'<a href="{fragment.issue_href("gitlab:forge.example/group/project#9")}">!48</a>', html)
         self.assertNotIn('href="https://forge/48"', html)
 
     def test_a_change_ref_takes_the_changes_own_first_issue(self) -> None:
@@ -472,7 +673,7 @@ class CardRefAndOwnerLinkTest(unittest.TestCase):
         multi = change("!99", issues=("#3", "#9"), title="Cross-filed fix")
         sources = replace(SOURCES, changes={**SOURCES.changes, "!99": multi})
         html = columns.render(rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, sources, NOW))
-        self.assertIn('<a href="/issues/3">!99</a>', html)
+        self.assertIn(f'<a href="{fragment.issue_href("gitlab:forge.example/group/project#3")}">!99</a>', html)
 
     def test_only_a_worker_owner_becomes_a_link(self) -> None:
         # "A worker owner links to that worker on /workers; a person or unassigned owner stays plain text."
@@ -499,11 +700,11 @@ class Page(unittest.TestCase):
         self.cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         self.html = rb.render(TRACKER, self.cfg, NOW, lanes=LANES, kanban=KANBAN, sources=SOURCES,
                               decisions=[("x", {"headline": "Pick", "recommended": "B", "default": "d"}, NOW.replace(hour=10, minute=0), "")],
-                              answered=1, tracker_at=NOW - timedelta(minutes=5))
+                              tracker_at=NOW - timedelta(minutes=5))
         self.body = self.html.split("</style>", 1)[1]
 
     def test_the_board_is_the_flow_artboard_in_order(self) -> None:
-        marks = ['class="panels-head"', 'class="panels-tiles"', '<section id="flow">', 'class="panels"']
+        marks = ['class="panels-head"', 'class="panels-tiles"', '<section id="flow">']
         at = [self.body.index(m) for m in marks]
         self.assertEqual(at, sorted(at), [m for _, m in sorted(zip(at, marks))])
 
@@ -519,17 +720,17 @@ class Page(unittest.TestCase):
     def test_tile_counts(self) -> None:
         # #349: the artboard's label. ALL counts every task (the header's 4 tasks); NEEDS INPUT is what BLOCKED counted, the held
         # cards (none: no kanban hold stage); RUNNING is the two workers; DRIFT: README at triage has stage::implement.
-        # The DECISIONS tile's count is no tile now: the tab bar's badge and the DECISIONS panel carry it.
+        # The DECISIONS tile's count is no tile now: the tab bar's badge carries it.
         tiles = re.findall(r'<span class="panels-label">([A-Z ]+)</span><b class="panels-count">(\d+)</b>', self.body)
         self.assertEqual(tiles, [("ALL", "4"), ("NEEDS INPUT", "0"), ("RUNNING", "2"), ("APPROVED", "3"), ("ORPHANED", "1"), ("DRIFT", "1")])
 
-    def test_each_tile_links_where_it_linked_before(self) -> None:
-        # #349: the artboard's label. BLOCKED linked to #flow, APPROVED to #merge, RUNNING to #workers, ORPHANED and DRIFT to #flow;
-        # ALL had no tile, and the BUILD section whose cards it counts is #flow.
-        links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="#([a-z]+)"><span class="panels-label">([A-Z ]+)</span>', self.body)
+    def test_each_tile_links_to_the_cards_that_carry_its_facts(self) -> None:
+        # #208: the removed panels no longer have anchors; tiles reach BUILD, and tabs reach the detail pages.
+        links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="([#/][a-z#-]+)"><span class="panels-label">([A-Z ]+)</span>', self.body)
         # #349 review: the kind is what the stylesheet colours a tile by, so each is pinned with its link and label.
-        self.assertEqual(links, [("all", "flow", "ALL"), ("blocked", "flow", "NEEDS INPUT"), ("running", "workers", "RUNNING"),
-                                 ("approved", "merge", "APPROVED"), ("orphaned", "flow", "ORPHANED"), ("drift", "flow", "DRIFT")])
+        # #1122: NEEDS INPUT opens the decisions page.
+        self.assertEqual(links, [("all", "#flow", "ALL"), ("blocked", "/decisions#pending-decisions", "NEEDS INPUT"), ("running", "#flow", "RUNNING"),
+                                 ("approved", "#flow", "APPROVED"), ("orphaned", "#flow", "ORPHANED"), ("drift", "#flow", "DRIFT")])
 
     def test_every_tile_kind_has_a_colour_and_all_draws_in_the_artboards_ink(self) -> None:
         # #349 review: the artboard's tone map gives ALL ink (Flow.dc.html `all: '#2f2630'`, the light --fg); a tile with
@@ -612,7 +813,16 @@ class Page(unittest.TestCase):
         self.assertTrue(overrides)
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", overrides), [])
         self.assertIn(".panels-head,.panels-tiles,.panels{--panels-ink:var(--fg)", css)
-        self.assertIn('[data-kind="merge"]{--k:var(--stage-review)}', css)
+        self.assertIn('[data-kind="approved"]{--k:var(--stage-review)}', css)
+
+    def test_board_supplies_every_token_used_by_the_panel_layout(self) -> None:
+        required = set(re.findall(r"var\(--panels-([a-z-]+)\)", panels.BASE_CSS))
+        self.assertTrue(required)
+        self.assertEqual(required - rb.PANEL_TOKENS.keys(), set())
+        css = self.html.split("<style>", 1)[1].split("</style>", 1)[0]
+        for name in required:
+            with self.subTest(token=name):
+                self.assertIn(f"--panels-{name}:{rb.PANEL_TOKENS[name]}", css)
 
     def test_the_clocks_tick_every_second_with_seconds(self) -> None:
         script = self.html.split("<script>", 1)[1]
@@ -770,6 +980,20 @@ class BuildFollowsFlowTest(unittest.TestCase):
         self.assertEqual(tiles["ALL"], "2")
         self.assertEqual(self.notes(html)["Early done"].split(" · ")[0], "plan")
 
+    def test_a_done_cell_keeps_a_verified_live_worker_visible(self):
+        task = rb.Task("Still running", "worker", "done", "09:00", "", "",
+                       name="Live task", issue="#3", lane="build", stage="design")
+        cols = rb.build_columns([task], self.LANES, live_keys=frozenset({"#3"}))
+        cards = [card for col in cols for card in col.cards]
+        self.assertEqual([card.name for card in cards], ["Live task"])
+        self.assertIn("running", [mark.text for mark in cards[0].marks])
+
+    def test_a_merged_done_task_with_a_stale_cell_keeps_its_terminal_card(self):
+        rows = "| Merged task | Merged item | unassigned | done | 09:00 | | S | build | design | #3 | |\n"
+        merged = change("!70", state="merged", merged_at=NOW, issues=("#3",))
+        src = replace(bs.EMPTY, home=SOURCES.home, changes={merged.ref: merged})
+        self.assertIn("Merged task", self.placed(self.page(rows, sources=src))["main"])
+
     def test_a_logged_pr_draws_in_the_following_column(self) -> None:
         rows = "| Review it | Review item | Robin | open | 09:00 |  | S | fix | design | #6 | c |\n"
         cols = self.placed(self.page(rows, "- 10:00 stage: Review it → pr\n"))
@@ -790,15 +1014,30 @@ class BuildFollowsFlowTest(unittest.TestCase):
 """
         newer = change("!70", state="merged", merged_at=NOW - timedelta(hours=1), issues=("#20",), title="Newer merge")
         older = change("!71", state="merged", merged_at=NOW - timedelta(hours=3), issues=("#21",), title="Older merge")
-        sources = replace(bs.EMPTY, changes={c.ref: c for c in (older, newer)})
+        sources = replace(bs.EMPTY, home=SOURCES.home, changes={c.ref: c for c in (older, newer)})
         self.assertEqual(self.placed(self.page(rows, sources=sources))["main"],
                          ["Also", "Landed", "Newer merge", "Older merge"])
+
+    def test_store_item_without_a_stage_uses_its_last_segment_in_build_and_flow(self):
+        import shutil
+        from test_m6_store_board import make_store_workspace, KEY
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        db.upsert_item(KEY, title="Store fallback", workflow="build", stage="")
+        db.record_segment(KEY, "plan", 1, (NOW - timedelta(minutes=2)).isoformat(),
+                          ended_at=(NOW - timedelta(minutes=1)).isoformat(), outcome="done")
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        html = rb.render("", cfg, NOW, lanes=self.LANES, db=task_forge.page_data(db))
+        self.assertEqual(self.placed(html)["plan"], ["Store fallback"])
+        self.assertEqual(self.placed(html)["design"], [])
+        self.assertTrue(self.notes(html)["Store fallback"].endswith("plan"))
 
     def test_a_hold_and_drift_use_the_logged_stage(self) -> None:
         rows = "| Moved | Moved item | Robin | open | 09:00 |  | S | build | design | #2 | c |\n"
         log = "- 10:00 stage: Moved → plan\n"
         kanban = st.Kanban(("stage::design", "stage::plan"), "needs-human", {"design": 0, "plan": 1})
-        sources = replace(bs.EMPTY, issues={"#2": bs.Issue("#2", "https://forge/i/2", "Moved", "open", ("stage::plan",))})
+        sources = replace(bs.EMPTY, home=SOURCES.home, issues={"#2": bs.Issue("#2", "https://forge/i/2", "Moved", "open", ("stage::plan",))})
         figure = self.page(rows, log, sources, kanban).split('<figure class="columns"', 1)[1].split("</figure>", 1)[0]
         self.assertNotIn('data-cat="hold"', figure)
         self.assertNotIn('data-cat="drift"', figure)
@@ -806,6 +1045,46 @@ class BuildFollowsFlowTest(unittest.TestCase):
         held = self.page(rows, log, sources, replace(kanban, hold_stages=("plan",)))
         figure = held.split('<figure class="columns"', 1)[1].split("</figure>", 1)[0]
         self.assertIn('data-cat="hold"', figure)
+
+
+class StoreKeyCardTest(unittest.TestCase):
+    """#903: a card for the workspace's own backlog reads `#N`, with or without a change. Another project names itself."""
+
+    HOME = backlog.GitHubBacklog("team/app")
+    OWN = "github:team/app#9"
+    FOREIGN = "github:o/n#9"
+
+    def card(self, issue: str, changes=()):
+        sources = bs.Sources({}, {}, {c.ref: c for c in changes}, (), {}, self.HOME)
+        task = rb.Task("Ship the release", "Robin", "open", "09:00", "", "c",
+                       name="Ship it", issue=issue, lane="build", stage="implement")
+        return card_named(rb.build_columns([task], LANES, KANBAN, sources, NOW), "Ship it")
+
+    def test_a_home_store_key_reads_as_a_number_with_or_without_a_change(self):
+        bare = self.card(self.OWN)
+        self.assertEqual(bare.refs[0], ("#9", fragment.issue_href(self.OWN)))
+        changed = self.card(self.OWN, (change("!60", issues=(self.OWN,)),))
+        self.assertEqual(changed.refs[0], ("#9", fragment.issue_href(self.OWN)))
+
+    def test_another_projects_store_key_names_the_project(self):
+        bare = self.card(self.FOREIGN)
+        self.assertEqual(bare.refs[0], ("o/n#9", fragment.issue_href(self.FOREIGN)))
+        changed = self.card(self.FOREIGN, (change("!61", issues=(self.FOREIGN,)),))
+        self.assertEqual(changed.refs[0], ("o/n#9", fragment.issue_href(self.FOREIGN)))
+
+
+class ReadyTasksTest(unittest.TestCase):
+    """#1039 (C29): no file is anybody's, so the dispatch count filters nothing on paths."""
+
+    def test_two_open_tasks_on_the_same_files_are_both_ready(self):
+        text = ("## Tasks\n\n| item | owner | state | since | due | checklist |\n|---|---|---|---|---|---|\n"
+                "| Fix the parser | unassigned | open | 09:00 | | Edit src/a.py |\n"
+                "| Test the parser | unassigned | open | 09:00 | | Edit src/a.py |\n"
+                "| Tune the parser | worker01 | running 09:00 | 09:00 | | Edit src/a.py |\n\n"
+                "## File ownership\n\n| context | paths |\n|---|---|\n"
+                "| Fix the parser | `src/a.py` |\n| Test the parser | `src/a.py` |\n"
+                "| Tune the parser | `src/a.py`; worktree `tune` (tune) |\n\n## Log\n")
+        self.assertEqual([t.item for t in task_forge.ready_tasks(text, 3)], ["Fix the parser", "Test the parser"])
 
 
 if __name__ == "__main__":

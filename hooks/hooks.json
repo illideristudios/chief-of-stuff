@@ -22,6 +22,17 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "set -f; for name in $(env | sed -n 's/^\\([Pp][Yy][Tt][Hh][Oo][Nn][A-Za-z0-9_]*\\)=.*/\\1/p'); do unset \"$name\"; done; exec python3 -I \"${CLAUDE_PLUGIN_ROOT}/scripts/supervisor.py\" --root . ensure-background",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
