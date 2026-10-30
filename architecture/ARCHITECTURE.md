@@ -321,6 +321,21 @@ Del only by an explicit step   [1.1]
 ∴ no abort or recovery path can destroy work, and the abort machinery needs no content hashing, ignore rules or retire predicate
 ```
 
+Removing a finished tree runs the workspace's teardown before the container-mount guard (#717, closed by #792; migration `0014_cleanup_teardown`). `cleanup.py` removes a tree only past every finding-27 guard, and the teardown is what stops a stack the tree started, so its mounts are judged after it.
+- **Only on removal, once per tree.** Teardown runs only with `--remove`, never in a preview (`scripts/cleanup.py:241`). A tree whose other guards pass and whose teardown has not been attempted defers its mount guard (`:256-270`).
+- **Under the launch lock, recorded before it runs.** Holding the lock workers register under, cleanup re-checks the guards, then claims the attempt in the store's `cleanup_teardown` table before running the command, so a timeout or an interrupted pass never retries it forever (`:296-300`). The attempt is keyed by the tree's admin directory and its backlink's identity and the command (`teardown_identity`, `:221`), so a tree recreated at the same path, or a changed command, gets one new attempt.
+- **Every guard again after it.** The command runs through `shell_setup.teardown` (`:307`), and its warnings are reported and logged without blocking removal. The layout, claim and git guards run again, and a teardown that removed or replaced the worktree's metadata keeps the tree (`:308-322`). The container-mount guard runs after the teardown (`:323-324`).
+
+```
+Rm := a tree is removed      Gd := every finding-27 guard passes      Td := the teardown ran in the tree
+Mg := the container-mount guard is judged      Cl := the attempt is claimed in the store first      Rr := the attempt is retried for the same tree and command
+1.  Rm → Gd                   [scripts/cleanup.py:2-15]
+2.  Td → Cl                   [scripts/cleanup.py:296-300]
+3.  Cl → ¬Rr                  [scripts/cleanup.py:221, :258, :284]
+4.  Td → Mg after Td, with every other guard re-run    [scripts/cleanup.py:308-324]
+∴   a tree's stack is torn down at most once per tree and command, and its mounts are judged on the state the teardown left
+```
+
 On the engine path, a person's release of a human-review hold on an implement run accepts that run's work when its work product exists (issue #1030).
 - **Release is observed, never assumed.** A release counts only when this pass's forge read shows the hold label gone. An omitted field is unknown, never a release.
 - **The work product is the request review would open.** It is the open request `forge.closing_request` selects, the newest that closes only this issue, on the run's recorded branch. Its CI, approval and merge verdict do not matter here; the later gates still apply.
