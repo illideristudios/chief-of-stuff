@@ -1,4 +1,4 @@
-"""Ready: file-ownership conflicts, dependency blockers and stop records."""
+"""Ready: dependency blockers and stop records. File ownership never holds an item (#1039, C29)."""
 
 import sys
 import unittest
@@ -13,26 +13,12 @@ OTHER = "github:example/project#2"
 
 class ReadinessTest(unittest.TestCase):
     def why(self, **kwargs):
-        base = dict(claims=(), running=(), blockers=(), asks=(), reports=())
+        base = dict(blockers=(), asks=(), reports=())
         base.update(kwargs)
         return readiness.why_not(KEY, **base)
 
-    def test_a_write_path_that_overlaps_a_running_issue_is_not_ready(self):
-        claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(OTHER, "src/a.py"))
-        self.assertEqual(self.why(claims=claims, running=(OTHER,)),
-                         f"file ownership conflict with {OTHER}")
-
-    def test_a_read_only_claim_overlaps_nothing(self):
-        claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(OTHER, "src/a.py", "read"))
-        self.assertIsNone(self.why(claims=claims, running=(OTHER,)))
-
-    def test_an_issue_does_not_conflict_with_itself(self):
-        claims = (readiness.Claim(KEY, "src/a.py"),)
-        self.assertIsNone(self.why(claims=claims, running=(KEY,)))
-
-    def test_repository_relative_paths_do_not_conflict_across_repositories(self):
-        foreign = "github:other/project#2"
-        self.assertIsNone(self.why(claims=(readiness.Claim(KEY, "."), readiness.Claim(foreign, ".")), running=(foreign,)))
+    def test_an_undeclared_issue_is_ready(self):
+        self.assertIsNone(self.why())
 
     def test_an_open_blocker_and_an_unknown_read_are_not_ready(self):
         self.assertEqual(self.why(blockers=(OTHER,)), f"blocked by {OTHER}")

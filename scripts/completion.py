@@ -2,9 +2,10 @@
 
 Landing means on main, with the suite run there: unknown does not clear. Stage completion can
 precede landing. Before landing, dirty files and commits absent from remote refs need recovery;
-inherited, published PR commits do not. Missing tree or read-only baseline evidence requires a
-human hold without changing the reported outcome. Retryable and blocked writable runs keep
-their outcome and tree unless the tree is unreadable. Final completion also judges orphans.
+inherited, published PR commits do not. A verified landing of this tree's HEAD and a clean tree
+clear squash history even after branch deletion. Missing tree evidence requires a human hold without
+changing the reported outcome. Retryable and blocked runs keep their outcome and tree unless the tree is
+unreadable. Final completion also judges orphans.
 """
 
 from __future__ import annotations
@@ -34,13 +35,6 @@ def done_on_main(on_main: bool | None, suite_on_main: bool | None) -> str | None
     return None
 
 
-def read_only_left_changes(read_only: bool, changed: bool | None) -> str | None:
-    """A read-only run that left a commit or a file, or whose tree could not be shown clean."""
-    if read_only and changed is not False:
-        return "read-only run left changes" if changed else "worker starting HEAD could not be verified"
-    return None
-
-
 def unlanded(state: TreeState | None) -> str | None:
     if state is None:
         return None
@@ -55,20 +49,17 @@ def orphan_reason(name: str, state: TreeState | None, claims: Sequence[Claim]) -
     return None if found is None else str(found)
 
 
-def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only: bool = False,
-              changed: bool | None = None, on_main: bool | None = None, suite_on_main: bool | None = None,
+def abandoned(worker_alive: bool | None, *, report: str | None = None,
+              on_main: bool | None = None, suite_on_main: bool | None = None,
               tree: TreeState | None = None, tree_name: str = "",
               tree_claims: Sequence[Claim] = (), tree_unreadable: bool = False,
-              landing_required: bool = True) -> Verdict | None:
+              landing_required: bool = True, tree_landed: bool | None = None) -> Verdict | None:
     """Close a gone worker using the module contract; holds preserve its report or failed outcome."""
     if worker_alive is not False:
         return None
     outcome = report or "failed"
     if tree_unreadable:
         return Verdict(outcome, "worker tree could not be read", True)
-    why = read_only_left_changes(read_only, changed)
-    if why:
-        return Verdict(outcome, why, True)
     if report in (*RETRYABLE, "blocked"):
         return Verdict(report, "")
     if not landing_required:
@@ -83,10 +74,12 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
         reason = ", ".join(left) if left else ("" if report == "done" else "worker gone")
         return Verdict(outcome, reason, bool(left))
     left = unlanded(tree)
+    landed = (tree_landed is True and tree is not None and tree.dirty == 0
+              and done_on_main(on_main, suite_on_main) is None)
     # Preserve explicit completion behind a hold; retrying could overwrite the delivered work.
-    if report == "done" and left and on_main is not True:
-        return Verdict("done", left, True)
-    orphaned = orphan_reason(tree_name, tree, tree_claims)
+    if report == "done" and not landed and (left or tree_landed is False):
+        return Verdict("done", left or "tree HEAD is outside the verified landing", True)
+    orphaned = None if landed and report == "done" else orphan_reason(tree_name, tree, tree_claims)
     if orphaned:
         return Verdict("failed", orphaned, True)
     if report == "done":

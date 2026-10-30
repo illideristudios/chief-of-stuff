@@ -4,7 +4,7 @@
 
 - Daily log dir: `daily/`
 - Daily log template: none
-- Tracker: `daily/<date>-tracker.md` (sections: Tasks, Decisions, File ownership, Log)
+- Tracker: `daily/<date>-tracker.md` (sections: Tasks, Decisions, Log)
 - Timezone: {{tz}}
 - Calendars: none
 - Deadlines:

@@ -310,6 +310,39 @@ class WorkerTeardownTest(unittest.TestCase):
                 self.assertFalse(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"].get("torn_down"))
                 self.assertIsNone(fx.db.segments(engine_fixtures.KEY)[0].ended_at)
 
+    def test_t3_worker_keeps_stack_until_remote_thread_ends(self):
+        fx = engine_fixtures.WorkerTest("runTest")
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        run = fx.launched()
+        fx.db.update_resume(engine_fixtures.KEY, lambda d: d["runs"]["implement-1"].update(
+            launcher="t3", runtime="claude", identity="t3", runner_identity="t3", branch_heads={}))
+        live = worker.t3_adapter.Evidence(alive=True, launcher="t3", status="running")
+        unknown = worker.t3_adapter.Evidence(launcher="t3", error="T3 evidence unavailable")
+        for observed in (live, unknown):
+            with self.subTest(observed=observed), \
+                 mock.patch.object(worker.t3_adapter, "observe", return_value=observed), \
+                 mock.patch.object(worker.process_status, "identity", side_effect=AssertionError("PID check forbidden for T3")), \
+                 mock.patch.object(worker, "teardown") as teardown:
+                worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW, teardown_command="down")
+                teardown.assert_not_called()
+                self.assertFalse(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"].get("torn_down"))
+        ended = worker.t3_adapter.Evidence(alive=False, launcher="t3", status="completed")
+        def refresh(run_dir):
+            (run_dir / "exit.json").write_text("{\"exit_code\": 0}")
+            (run_dir / "stdout").write_text("done")
+            (run_dir / "stderr").write_text("")
+            return {"status": "completed", "activeRunId": None, "pendingRequestCount": 0}
+        fx.report(run)
+        with mock.patch.object(worker.t3_adapter, "observe", return_value=ended), \
+             mock.patch.object(worker.t3_adapter, "refresh", side_effect=refresh), \
+             mock.patch.object(worker.host_adapter, "moved_outside_engine", return_value=""), \
+             mock.patch.object(worker.process_status, "identity", side_effect=AssertionError("PID check forbidden for T3")), \
+             mock.patch.object(worker, "teardown", return_value=[]) as teardown:
+            worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW, teardown_command="down")
+        teardown.assert_called_once_with(fx.root, fx.tree, fx.tree.name, "down")
+        self.assertTrue(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"].get("torn_down"))
+
     def test_a_stuck_teardown_warns_after_sigkill_without_waiting(self):
         class Child:
             def __init__(self):

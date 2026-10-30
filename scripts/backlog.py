@@ -27,6 +27,7 @@ from backlog_ref import (  # noqa: F401
 )
 
 TIMEOUT = 5.0
+GH_TIMEOUT = 60.0  # a stalled gh must not hold a caller (the board POST, the engine pass) forever
 PER_PAGE = 100
 MAX_PAGES = 50
 OPEN, CLOSED = "opened", "closed"
@@ -44,9 +45,12 @@ def run_gh(args: list[str], input_text: str | None = None) -> tuple[int, str, st
     if binary != "gh" and not Path(binary).is_absolute():
         return 127, "", "CHIEF_OF_STUFF_GH must be an absolute executable path"
     try:
-        done = subprocess.run([binary, *args], input=input_text, capture_output=True, text=True, check=False)
+        done = subprocess.run([binary, *args], input=input_text, capture_output=True, text=True, check=False,
+                              timeout=GH_TIMEOUT)
     except FileNotFoundError:
         return 127, "", "gh not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"gh timed out after {GH_TIMEOUT:g}s"
     return done.returncode, done.stdout, done.stderr
 
 
@@ -396,9 +400,7 @@ def counts(cfg: Backlog | GitHubBacklog, token: str | None = None, timeout: floa
 
 # ---- the write side -------------------------------------------------------------------------
 #
-# `--dry-run` is the default and `--commit` is required, because a write is outward-facing and the
-# GitLab *web UI* is on the coordinator's human-only list. The API is not the web UI, but the
-# caution transfers: the default has to be the mode that cannot do damage.
+# Forge writes preview unless the caller commits them explicitly.
 
 CREATE, CLOSE, COMMENT, LABEL = "create", "close", "comment", "label"
 LABEL_COLOR = "#428bca"

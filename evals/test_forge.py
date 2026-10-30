@@ -52,7 +52,7 @@ class FakeGh(tma.FakeGhGraphql):
     round-trip can be verified. `fail` names the `gh` subcommands (`("issue", "list")`) that answer an error."""
 
     def __init__(self, issues=(), prs=(), merged=(), bodies=None, fail=(), status=None, project=PROJECT):
-        super().__init__([{**p, "body": (bodies or {}).get(p["number"], "")} for p in prs])
+        super().__init__([{**p, "body": (bodies or {}).get(p["number"], p.get("body", ""))} for p in prs])
         self.issues = {i["number"]: i for i in issues}
         self.merged = [{**p, "body": (bodies or {}).get(p["number"], p.get("body", ""))} for p in merged]
         self.fail = set(fail)
@@ -362,32 +362,36 @@ class LandingTest(unittest.TestCase):
                 ("older", "passed", "older", (False, False))):
             with self.subTest(sha=sha, status=status), \
                  mock.patch.object(forge.Forge, "_pipeline_read", return_value={"merge_base_commit": {"sha": base}}):
-                result = adapter.landings(forge.Pipeline(1, "main", sha, status, ""), [key])
+                heads = {}
+                result = adapter.landings(forge.Pipeline(1, "main", sha, status, ""), [key], heads=heads)
                 self.assertEqual(result[key], expected)
+                self.assertEqual(heads, {key: "head"} if expected[0] else {})
         merged["baseRefName"] = "release"
         gh.merged = [merged]
         self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""), [key])[key], (None, None))
 
     def test_gitlab_uses_the_squash_sha_and_merge_base(self):
-        adapter = forge.Forge(GL)
+        adapter = forge.Forge(GL, token="test-token")
         row = {"iid": 21, "description": "Closes #3", "target_branch": "main",
                "merge_commit_sha": "merge", "squash_commit_sha": "squash", "sha": "head"}
         with mock.patch.object(forge.Forge, "_merged_requests", return_value=[row]), \
-             mock.patch.object(forge.Forge, "_pipeline_read", side_effect=lambda path:
-                               [] if path.startswith("merge_requests?") else {"id": "squash"}) as read:
+             mock.patch.object(backlog, "_call", return_value=([], {}, "")), \
+             mock.patch.object(forge.Forge, "_pipeline_read", return_value={"id": "squash"}) as read:
             key = adapter.key(3)
-            self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key])[key], (True, True))
+            heads = {}
+            self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key], heads=heads)[key], (True, True))
+            self.assertEqual(heads, {key: "head"})
             self.assertIn("repository/merge_base?", read.call_args.args[0])
 
     def test_gitlab_fast_forward_uses_source_sha_and_verifies_ancestry(self):
-        adapter = forge.Forge(GL)
+        adapter = forge.Forge(GL, token="test-token")
         row = {"iid": 21, "description": "Closes #3", "target_branch": "main",
                "merge_commit_sha": None, "squash_commit_sha": None, "sha": "source-head"}
         for base, expected in (("source-head", (True, True)), ("older", (False, False))):
             with self.subTest(base=base), \
                  mock.patch.object(forge.Forge, "_merged_requests", return_value=[row]), \
-                 mock.patch.object(forge.Forge, "_pipeline_read", side_effect=lambda path:
-                                   [] if path.startswith("merge_requests?") else {"id": base}) as read:
+                 mock.patch.object(backlog, "_call", return_value=([], {}, "")), \
+                 mock.patch.object(forge.Forge, "_pipeline_read", return_value={"id": base}) as read:
                 key = adapter.key(3)
                 self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key])[key], expected)
                 self.assertIn("source-head", read.call_args.args[0])
@@ -459,7 +463,7 @@ class LandingTest(unittest.TestCase):
                         self.assertEqual(args[args.index("--state") + 1], "open")
                         self.assertEqual(args[args.index("--base") + 1], "main")
                         self.assertEqual(set(args[args.index("--json") + 1].split(",")),
-                                         {"number", "headRefOid", "baseRefName", "closingIssuesReferences"})
+                                         {"number", "body", "headRefOid", "baseRefName", "closingIssuesReferences"})
                         call.assert_not_called()
                     else:
                         call.assert_called_once()
@@ -490,6 +494,54 @@ class LandingTest(unittest.TestCase):
                 self.assertEqual(args[args.index("--base") + 1], pipeline.ref)
                 self.assertEqual(args[args.index("--limit") + 1], str(backlog.GH_LIMIT))
 
+    def test_gitlab_open_closers_filter_the_base_and_page_until_a_short_page(self):
+        merged = {"iid": 21, "description": "Closes #3", "sha": "head",
+                  "target_branch": "main", "merge_commit_sha": "squashed"}
+        release = {n: {"target_branch": "release"} for n in range(100, 201)}
+        for main_count in (0, 100, 101, backlog.GH_LIMIT - 1, backlog.GH_LIMIT, backlog.GH_LIMIT + 1):
+            with self.subTest(main_count=main_count):
+                opened = {**release, **{n: {"target_branch": "main"}
+                                       for n in range(300, 300 + main_count)}}
+                call = gitlab_call({}, opened)
+                adapter = forge.Forge(GL, token="test-token")
+                key = adapter.key(3)
+                pipeline = forge.Pipeline(1, "main", "squashed", "passed", "")
+                with mock.patch.object(forge.Forge, "_merged_requests", return_value=[merged]), \
+                     mock.patch.object(backlog, "_call", call):
+                    if main_count >= backlog.GH_LIMIT:
+                        with self.assertRaises(forge.ForgeError):
+                            adapter.landings(pipeline, [key])
+                    else:
+                        self.assertEqual(adapter.landings(pipeline, [key])[key], (True, True))
+                pages = min(main_count // backlog.PER_PAGE + 1, backlog.MAX_PAGES)
+                self.assertEqual(len(call.calls), pages)
+                for page, (method, url, payload) in enumerate(call.calls, 1):
+                    self.assertEqual(method, "GET")
+                    self.assertEqual(urlsplit(url).path, "/api/v4/projects/team%2Fapp/merge_requests")
+                    self.assertEqual(parse_qs(urlsplit(url).query), {
+                        "state": ["opened"], "target_branch": ["main"],
+                        "per_page": [str(backlog.PER_PAGE)], "page": [str(page)]})
+                    self.assertIsNone(payload)
+
+    def test_gitlab_open_closers_keep_every_page(self):
+        first = [{"iid": n} for n in range(backlog.PER_PAGE)]
+        last = [{"iid": backlog.PER_PAGE, "sha": "new-head", "target_branch": "main",
+                 "description": "Closes #3"}]
+        adapter = forge.Forge(GL, token="test-token")
+        with mock.patch.object(backlog, "_call", side_effect=[(first, {}, ""), (last, {}, "")]) as call:
+            self.assertEqual(adapter._open_closers("main"), first + last)
+        self.assertEqual(call.call_count, 2)
+
+    def test_gitlab_open_closers_refuse_failed_or_malformed_later_pages(self):
+        first = [{"iid": n} for n in range(backlog.PER_PAGE)]
+        for batch, error in ((None, "HTTP 500 from GitLab"), (None, ""), ({"message": "bad response"}, ""),
+                             ([None], ""), (["unreadable"], "")):
+            with self.subTest(batch=batch, error=error), \
+                 mock.patch.object(backlog, "_call", side_effect=[(first, {}, ""), (batch, {}, error)]) as call:
+                with self.assertRaises(forge.ForgeError):
+                    forge.Forge(GL, token="test-token")._open_closers("main")
+                self.assertEqual(call.call_count, 2)
+
     def test_a_newer_open_request_or_changed_head_cannot_use_an_old_landing(self):
         merged = {"number": 21, "headRefOid": "old-head", "body": "Closes #3",
                   "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
@@ -507,6 +559,10 @@ class LandingTest(unittest.TestCase):
         adapter.gh.prs = [{**opened, "number": 21, "headRefOid": "old-head"}]
         self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
                                           [key])[key], (True, True))
+        body_only = {"number": 22, "headRefOid": "new-head", "baseRefName": "main", "body": "Closes #3"}
+        adapter = forge.Forge(GH, gh=FakeGh(merged=[merged], prs=[body_only]))
+        self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
+                                          [key])[key], (None, None))
 
     def test_landing_comparison_errors_are_attached_to_the_affected_issue(self):
         merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "merge"}}
@@ -793,6 +849,8 @@ def gitlab_call(issues, mrs, fail="", merged=None):
                 numbers.sort(key=lambda i: pool[i].get("updated_at", ""), reverse=True)
                 numbers = numbers[:forge.forge_review.REQUEST_LIMIT]
             else:
+                if "target_branch" in query:
+                    numbers = [i for i in numbers if pool[i].get("target_branch") == query["target_branch"][0]]
                 size, page = int(query.get("per_page", ["100"])[0]), int(query.get("page", ["1"])[0])
                 numbers = sorted(numbers)[(page - 1) * size:page * size]
             return [{"iid": i, "description": pool[i].get("description", "")} for i in numbers], {}, ""
@@ -1251,6 +1309,48 @@ class ProtectedBranchesTest(unittest.TestCase):
         with mock.patch.object(backlog, "_call", call):
             self.assertEqual(forge.Forge(GL, token="t").protected_branches(), ("trunk", "release"))
 
+    def test_default_branch_protected_reads_whether_the_forge_protects_the_default(self):
+        # §13 (b): a non-Claude worker launches only where the default branch itself is protected.
+        def gh(protected):
+            def answer(args, input_text=None):
+                if args[:2] == ["api", f"repos/{REPO}"]:
+                    return 0, "trunk\n", ""
+                if args[:2] == ["api", f"repos/{REPO}/branches?protected=true&per_page=100"]:
+                    return 0, protected, ""
+                return 1, "", "unexpected"
+            return answer
+        self.assertTrue(forge.Forge(GH, gh=gh("release\ntrunk\n")).default_branch_protected())
+        self.assertFalse(forge.Forge(GH, gh=gh("release\n")).default_branch_protected())
+        self.assertEqual(forge.Forge(GH, gh=gh("release\n")).protected_branches(), ("trunk", "release"))
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).default_branch_protected()
+
+    def test_request_base_reads_the_branch_a_request_targets(self):
+        gh = lambda args, input_text=None: (0, '{"baseRefName": "develop"}', "") if args[:2] == ["pr", "view"] else (1, "", "x")
+        self.assertEqual(forge.Forge(GH, gh=gh).request_base(7), "develop")
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "not found")).request_base(7)
+        base = GL.api(GL.project)
+        with mock.patch.object(backlog, "_call", lambda method, url, token, timeout, payload=None:
+                               ({"target_branch": "main"}, {}, "") if url == f"{base}/merge_requests/7" else (None, {}, "x")):
+            self.assertEqual(forge.Forge(GL, token="t").request_base(7), "main")
+
+    def test_merge_commit_reads_what_a_merged_request_landed_as(self):
+        # §13 (c): the engine records this; an unreadable or unmerged answer is None, which the check cannot vouch for.
+        def gh(out, code=0):
+            return lambda args, input_text=None: (code, out, "") if args[:2] == ["pr", "view"] else (1, "", "unexpected")
+        self.assertEqual(forge.Forge(GH, gh=gh('{"mergeCommit": {"oid": "abc123"}}')).merge_commit(7), "abc123")
+        self.assertIsNone(forge.Forge(GH, gh=gh('{"mergeCommit": null}')).merge_commit(7))
+        self.assertIsNone(forge.Forge(GH, gh=gh("", 1)).merge_commit(7))
+        base = GL.api(GL.project)
+        for answer, want in (({"state": "merged", "merge_commit_sha": None, "squash_commit_sha": "sq1", "sha": "head"}, "sq1"),
+                             ({"state": "merged", "merge_commit_sha": None, "squash_commit_sha": None, "sha": "head"}, "head"),
+                             ({"state": "opened", "merge_commit_sha": "m1"}, None)):
+            with self.subTest(answer=answer), mock.patch.object(
+                    backlog, "_call", lambda method, url, token, timeout, payload=None, a=answer:
+                    (a, {}, "") if url == f"{base}/merge_requests/7" else (None, {}, "unexpected")):
+                self.assertEqual(forge.Forge(GL, token="t").merge_commit(7), want)
+
     def test_an_unreadable_answer_is_an_error_never_an_empty_list(self):
         with self.assertRaises(forge.ForgeError):
             forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).protected_branches()
@@ -1636,6 +1736,24 @@ class GitHubProjectWriteTest(unittest.TestCase):
                                  expected_stage="invented")
         self.assertIn("unmapped prior stage", got.error)
         self.assertFalse(self.calls)
+
+
+class CommentTest(unittest.TestCase):
+    """A committed comment reaches the forge on GitLab as on GitHub; "" means it was posted (#643 review)."""
+
+    def test_a_gitlab_comment_is_posted_and_a_failed_post_is_reported(self):
+        calls = []
+
+        def call(method, url, token, timeout, body=None):
+            calls.append((method, url, body))
+            return None, {}, "" if len(calls) == 1 else "HTTP 500"
+
+        with mock.patch.object(backlog, "_call", call):
+            f = forge.Forge(GL, token="t")
+            self.assertEqual(f.comment(5, "hello", commit=True), "")
+            self.assertEqual(calls, [("POST", f"{GL.issues_url}/5/notes", {"body": "hello"})])
+            self.assertEqual(f.comment(5, "again", commit=True), "HTTP 500")
+
 
 if __name__ == "__main__":
     unittest.main()

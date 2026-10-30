@@ -52,3 +52,18 @@ def done_clock(value: str, now: datetime, zone: ZoneInfo) -> datetime | None:
 def dur(td: timedelta) -> str:
     h, m = divmod(int(td.total_seconds()) // 60, 60)
     return f"{h}h{m:02d}m" if h else f"{m}m"
+
+
+def parse_stamp(raw: str | None, fallback: datetime) -> datetime:
+    """Read a stored ISO timestamp in the fallback zone; malformed values use the fallback instant."""
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None and fallback.tzinfo is not None:
+                dt = dt.replace(tzinfo=fallback.tzinfo)
+            elif dt.tzinfo is not None and fallback.tzinfo is not None:
+                dt = dt.astimezone(fallback.tzinfo)
+            return dt
+        except ValueError:
+            pass
+    return fallback

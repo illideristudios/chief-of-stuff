@@ -7,6 +7,9 @@ name: tests
 on:
   push:
 
+permissions:
+  contents: read
+
 jobs:
   unittest:
     runs-on: self-hosted
