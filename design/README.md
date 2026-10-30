@@ -26,6 +26,14 @@ Open `index.html` through a local server (`python3 -m http.server --directory de
 
 The files were unpacked from a bundled Claude Design export. `lib/` holds its `dc-runtime` script and `fonts/` the font faces it inlined, each stored once under its content hash. The data on the screens is sample data.
 
+The following interactive concepts extend the worker designs for the orchestration rework. They use sample data and simulated controls, and do not launch, message, restart, or stop real workers. Open each file directly; the concepts use the fonts in `fonts/` and do not require a server or network connection. They are not yet included in the design index.
+
+| Concept | File |
+|---|---|
+| Worker session: transcript and messaging | `worker-session-transcript.html` |
+| Workers overview and session drilldown | `workers-overview-rework.html` |
+| Worker recovery: stalls and repeated failures | `worker-recovery-rework.html` |
+
 ```
 S := a board page has a screen here          M := the page matches its screen
 A := the screens here are the approved concepts

@@ -5,7 +5,7 @@
 - User: Robin
 - Daily log dir: `daily/`
 - Daily log template: none
-- Tracker: `daily/<date>-tracker.md` (sections: Tasks, Decisions, File ownership, Log)
+- Tracker: `daily/<date>-tracker.md` (sections: Tasks, Decisions, Log)
 - Worktrees: `trees/`
 - Timezone: {{tz}}
 - Calendars: none
