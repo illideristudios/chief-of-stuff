@@ -570,7 +570,7 @@ Fr(c) is read from the forge's record, never from c's subject or a branch name  
 ## 14. Release installation
 
 One install puts one release everywhere chief-of-stuff runs. `chief-of-stuff install` copies the release and moves `current`, and the same install brings the Claude Code plugin to that release (owner, 2026-10-21, on finding the plugin at 0.129.69 while the engines ran 0.129.113: "that's not functionally complete").
-- **The plugin installs from the installed release.** The `chief-of-stuff` marketplace's source is the `current` release pointer, never a git worktree, so the plugin can only be at a release that was installed.
+- **The plugin installs from the installed release.** The `chief-of-stuff` marketplace's source is the `current` release pointer, never a git worktree, so the plugin can only be at a release that was installed. The install never moves the marketplace source itself, because removing and re-adding a marketplace can uninstall the plugin in every profile (pull request 1157). Pointing it at `current` is a one-time step on each machine, and until it is done the install reports the source it reads beside the scopes left behind (`scripts/claude_adapter.py:94-95`).
 - **The install updates the plugin.** After `current` moves, the install refreshes the marketplace and updates the plugin in every scope it is installed in. The `claude plugin` commands run through `claude_adapter.py`, because host adapters are the only modules that spawn a host CLI (section 4).
 - **A plugin left behind is reported, never silent.** When Claude Code is missing or the update fails, the engines keep the new release, and the install reports the plugin's version beside the release's. It never reports the release as installed everywhere. A running Claude session loads the new plugin when it restarts, and the install says so.
 
@@ -583,6 +583,40 @@ I → Pc            [chief_of_stuff.install]
 M ∧ Pc ∧ U → Pl   [this section]
 ¬Pl → F           [this section; owner, 2026-10-21]
 ∴ I → Pl ∨ F: no install leaves the plugin silently behind the engines
+```
+
+As built (pull request 1157, closing #1003 and C27): `install` moves `current` and then calls `claude_adapter.update_plugin` with the release's plugin version (`chief_of_stuff.py:233-239`). It refreshes the marketplace, runs `claude plugin update` for each installed scope behind the release, and returns the plugin at the release, behind it with each scope's version, or not updated and why; it never fails the install (`scripts/claude_adapter.py:69-96`).
+
+The engine installs every merge to main by itself, with no approval step (owner, 2026-10-27: "self-update every merge", and "No approval step before each install, let's not slow down like that every time"; pull request 1157).
+- **Only an installed engine on the upstream's own clone.** After each pass the engine loop calls `_follow_main` (`scripts/engine.py:1499`), which acts only when the engine runs from an installed release under `versions` (`:1208`). The upstream is the `repository` named in the running release's own `plugin.json`, never a value read from the workspace (`:1223`), and `self_update.follow_main` proceeds only when the workspace's `origin` is that same network repository by a strict parse of https, ssh and scp-style remotes, so a fork, a checkout, a local path or `file://` never moves the shared `current` (`scripts/self_update.py:29-54`).
+- **The head is fetched privately and installed once.** It fetches `refs/heads/main` with an explicit refspec into `refs/chief-of-stuff/main`, so no configured refspec can map another branch onto what is installed, and it skips a head it has already installed (`:56-59`). It extracts that head with `git archive` and tarfile's `data` filter (`:60-62`).
+- **The same install, under the supervisor lock.** It installs through `chief_of_stuff.install`, the one install `chief-of-stuff install` runs, so the plugin rules above hold for every automatic install (`:64`). Only the install runs under the supervisor lock; the fetch runs before it. A busy lock, or a release selection that changed during the fetch, waits for a later pass, and a failed install is logged and the loop goes on (`scripts/engine.py:1215-1232`). The existing hand-off then moves the engine onto the new `current`.
+- **Known residue, accepted.** Commit signatures are not checked, so whoever can push to the upstream's main ships to every engine on the machine, as a manual reinstall would.
+
+```
+In := the engine runs from an installed release      Up := the running release names an upstream      Or := the workspace's origin is that upstream (strict parse)
+Hd := the upstream's main has a head not yet installed      K := the supervisor lock is free      Cm := current moves to a release built from that head
+Ap := a person approves the install      Si := the install is chief_of_stuff.install
+1.  In ∧ Up ∧ Or ∧ Hd ∧ K ∧ ¬Ap → Cm      [owner, 2026-10-27: self-update every merge, no approval step]
+2.  ¬In ∨ ¬Up ∨ ¬Or → ¬Cm                [scripts/engine.py:1208; scripts/self_update.py:53-54]
+3.  ¬K → ¬Cm now, retried next pass      [scripts/engine.py:1228-1229]
+4.  Cm → Si                              [scripts/self_update.py:64]
+∴   only the upstream's main, seen by an installed engine on the upstream's own clone, ever becomes current, and it carries the plugin with it or reports it (4 and the block above)
+```
+
+The `chief-of-stuff` command launcher answers help and usage errors without building the engine's environment (`chief_of_stuff.py`).
+- **Parse first.** A store-backed command first runs its script under the launcher's own interpreter only as far as argument parsing (`PARSE_PROBE`, `:78-88`; `:299-310`). Help (exit 0) and a usage error (exit 2) are final, so `--help` and a bad argument work offline and on a first run. Any other result, a successful parse or an import that fails for lack of the requirements, falls through to building the engine's virtual environment under the supervisor lock and the real run (`:312-326`).
+- **`board` is a hidden alias.** `chief-of-stuff board` runs the page server with `--board` (`:305`, `:326`). It has no group, so the top-level help does not list it (`:48`, `:103-113`).
+- **`docs` needs the requirements.** `chief-of-stuff docs` runs each command's script directly under the current interpreter with `--help` and captures the output (`command_help`, `:116-129`), so it builds no virtual environment, and a store-backed script's help imports SQLAlchemy and Alembic there. It succeeds only where the requirements are installed in that interpreter.
+
+```
+Sb := the command is store-backed      Pr := the parse probe exits 0 or 2      Vb := the engine's environment is built
+Dc := `chief-of-stuff docs` runs      Rq := the requirements import in the current interpreter      Ok := the docs are generated
+1.  Sb ∧ Pr → ¬Vb             [chief_of_stuff.py:299-310]
+2.  Sb ∧ ¬Pr → Vb             [chief_of_stuff.py:312-323]
+3.  Dc → ¬Vb                  [chief_of_stuff.py:120-124]
+4.  Dc ∧ Sb ∧ ¬Rq → ¬Ok       [store-backed scripts import the store at load]
+∴   help and usage errors never build the environment (1), and docs work only where the requirements are installed (3, 4)
 ```
 
 ## 15. Autonomy
