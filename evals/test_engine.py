@@ -1049,6 +1049,14 @@ class EngineTest(unittest.TestCase):
                 self.run_pass()
         self.assertEqual(self.db.items()[0].forge_state, "open")
 
+    def test_a_repeated_dispatch_failure_is_logged_once(self):
+        self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
+        self.run_pass()
+        self.run_pass()
+        # A failed start also parks the issue for human review, which logs its own wait; only the failure repeats.
+        self.assertEqual([log.message for log in self.db.log(KEY) if log.message.startswith("dispatch failed")],
+                         ["dispatch failed: spawn failed"])
+
     def test_one_failed_action_does_not_stop_the_next(self):
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
         self.launch = mock.Mock(side_effect=[RuntimeError("spawn failed"), ("model", "low")])

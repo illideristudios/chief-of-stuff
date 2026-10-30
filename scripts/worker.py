@@ -30,7 +30,7 @@ from settings import ModelEntry, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import RETRYABLE, Failure, Reply, Request, retry_at
-from shell_setup import teardown
+from shell_setup import ShellError, teardown
 from reconcile import OP_WORKER_RUN
 
 _runners: dict[str, Any] = {}
@@ -453,12 +453,23 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
            **guard_binding.guard_env(guard_binding.Binding(
                issue_key, stage, attempt, session_id, root.resolve(), clock(), protected))}
     protects: list[bool] = []  # the forge is asked once, and only when a non-Claude entry is considered
+    clock_refusals: list[ShellError | None] = []  # the worker clock is checked once, and only for a local Claude CLI entry
+
+    def local_claude_ready() -> bool:
+        # Only a local Claude CLI worker loads the clock plugin; T3 threads and other hosts are not checked (§13).
+        if not clock_refusals:
+            try:
+                claude_adapter.require_worker_clock(claude_as_profile, str(root))
+                clock_refusals.append(None)
+            except ShellError as exc:
+                clock_refusals.append(exc)
+        return clock_refusals[0] is None
 
     def launchable(runtime: str) -> bool:
         if launcher == "t3":
             return t3_adapter.available(runtime) and _guarded(forge, issue_key)
         if runtime == "claude":
-            return True
+            return local_claude_ready()
         if not host_adapter.available(runtime):
             return False
         if not protects:
@@ -478,9 +489,14 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     rotation = loaded.models.get(TASK_CLASS.get(stage, stage), ())
     if launcher == "t3" and rotation and not any(entry.runtime in t3_adapter.PROVIDERS for entry in rotation):
         raise RuntimeError("T3 has no engine channel for any runtime in this rotation")
-    chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
-                    how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
-                    attempt=attempt, available=available, workflow=workflow)
+    try:
+        chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
+                        how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
+                        attempt=attempt, available=available, workflow=workflow)
+    except RuntimeError:
+        if clock_refusals and clock_refusals[0] is not None:
+            raise clock_refusals[0] from None  # the clock, not the rotation, is why nothing could launch
+        raise
     try:
         if launcher == "t3" and chosen.runtime not in t3_adapter.PROVIDERS:
             raise RuntimeError(f"T3 has no engine channel for {chosen.runtime}; refusing a local fallback")
