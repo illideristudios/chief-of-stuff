@@ -12,10 +12,6 @@
 | time | item | Robin's words |
 |---|---|---|
 
-## File ownership
-
-- Security audit: `src/a/` (read-only for the audit; findings go to `notes/audit.md`)
-
 ## Log
 
 - 09:00 opened the day

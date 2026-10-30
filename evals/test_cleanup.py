@@ -85,7 +85,7 @@ class CleanupTest(unittest.TestCase):
     def finish(self, name: str, state: str = "closed") -> None:
         key = f"{KEY}-{name}"
         self.store.upsert_item(key, forge_state=state)
-        self.store.set_ownership(key, str(self.trees / name))
+        self.store.set_tree(key, str(self.trees / name))
 
     def run_cleanup(self, *flags: str) -> tuple[int, str]:
         out = io.StringIO()
@@ -163,7 +163,7 @@ class CleanupTest(unittest.TestCase):
         command.assert_called_once()
         line = self.kept(out)["done"]
         self.assertIn("teardown: exit 7: stack service unavailable", line)
-        self.assertIn("a container binds a path in it", line)
+        self.assertIn("a container mount overlaps it", line)
         self.assertTrue(tree.is_dir())
         self.assertEqual(self.store.log(f"{KEY}-done")[0].message, line)
 
@@ -298,7 +298,7 @@ class CleanupTest(unittest.TestCase):
         tree = self.trees / "done"
         second = f"{KEY}-second"
         self.store.upsert_item(second, forge_state="closed")
-        self.store.set_ownership(second, str(tree / "shared.txt"))
+        self.store.set_tree(second, str(tree / "shared.txt"))
         real_set = store.Store.set_resume
         writes = 0
 
@@ -385,7 +385,7 @@ class CleanupTest(unittest.TestCase):
                 code, out = self.run_cleanup("--remove")
             self.assertEqual(code, 1, out)
             self.assertIn("store teardown attempt cannot be checked", self.kept(out)["done"])
-            self.assertIn("a container binds a path in it", self.kept(out)["done"])
+            self.assertIn("a container mount overlaps it", self.kept(out)["done"])
             self.assertEqual(owners.call_count, 1 if method == "teardown_attempt" else 2)
             containers.assert_called_once()
             stop.assert_not_called()
@@ -402,7 +402,7 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertEqual(self.kept(out)["done"],
                          "keep done — store teardown attempt cannot be checked (OSError); "
-                         "a container binds a path in it")
+                         "a container mount overlaps it")
         stop.assert_not_called()
         self.assertTrue(tree.is_dir())
         self.assertEqual(self.store.log(f"{KEY}-done")[-1].message, self.kept(out)["done"])
@@ -413,7 +413,7 @@ class CleanupTest(unittest.TestCase):
         real_lock = cleanup.trees_lock
         admin = cleanup.git_view.locate(tree).gitdir
         for refusal in ("layout", "claim", "git", "owner", "store"):
-            for mounts, reason in (([tree / "data"], "a container binds a path in it"),
+            for mounts, reason in (([tree / "data"], "a container mount overlaps it"),
                                    (None, "containers cannot be checked")):
                 with self.subTest(refusal=refusal, mounts=mounts):
                     @contextlib.contextmanager
@@ -481,7 +481,7 @@ class CleanupTest(unittest.TestCase):
     def test_outer_refusals_retain_mount_reasons_with_teardown_configured(self) -> None:
         self.configure_teardown()
         self.finish("done", state="open")
-        for mounts, reason in (([self.trees / "done" / "data"], "a container binds a path in it"),
+        for mounts, reason in (([self.trees / "done" / "data"], "a container mount overlaps it"),
                                (None, "containers cannot be checked")):
             with self.subTest(mounts=mounts), \
                     mock.patch.object(cleanup, "containers", return_value=mounts), \
@@ -578,6 +578,17 @@ class CleanupTest(unittest.TestCase):
             self.assertIn(reason, self.kept(out)["done"])
         self.assertTrue(tree.is_dir())
 
+    def test_merged_tree_requires_verified_completion_before_removal(self):
+        key = f"{KEY}-done"
+        self.store.upsert_item(key, merge_state="merged")
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True), 0)
+        self.assertIn("merged, awaiting main CI", out.getvalue())
+        self.assertTrue((self.trees / "done").is_dir())
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True, completed={key}), 0)
+        self.assertFalse((self.trees / "done").exists())
+
     def test_a_tree_redirected_to_another_repository_is_kept(self) -> None:
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `settings.toml`\n")
         (self.root / "settings.toml").write_text('[repos]\nproject = "repo"\n')
@@ -611,6 +622,70 @@ class CleanupTest(unittest.TestCase):
         self.assertIn("git cannot read this tree", self.kept(out)["done"])
         self.assertTrue(tree.is_dir() and admin.is_dir())
 
+    def repository_workspace(self, name: str) -> Path:
+        return make_repo.build(self.root / name, {
+            "trees": "repo/trees",
+            "files": {".gitignore": "*.db\nnode_modules/\n", "CLAUDE.md": CLAUDE},
+            "worktrees": [{"name": "done", "branch": "done"}],
+        })
+
+    def test_repository_workspace_rejects_a_decoy_before_and_during_removal(self) -> None:
+        for during_removal in (False, True):
+            with self.subTest(during_removal=during_removal):
+                root = self.repository_workspace(f"workspace-{during_removal}")
+                tree = root / "trees" / "done"
+                self.store.set_tree(f"{KEY}-done", str(tree))
+                original = (tree / ".git").read_text()
+                original_admin = cleanup.git_view.locate(tree).gitdir
+                decoy_root = self.root / f"decoy-{during_removal}"
+                make_repo.build(decoy_root, {
+                    "files": {".gitignore": "*.db\nnode_modules/\n", "CLAUDE.md": CLAUDE,
+                              "scratch.txt": "only copy\n"},
+                    "worktrees": [{"name": "decoy", "branch": "decoy"}],
+                })
+                admin = cleanup.git_view.locate(decoy_root / "trees" / "decoy").gitdir
+                (admin / "gitdir").write_text(str(tree / ".git") + "\n")
+
+                def redirect() -> None:
+                    (tree / "scratch.txt").write_text("only copy\n")
+                    (tree / ".git").write_text(f"gitdir: {admin}\n")
+
+                lock = cleanup.trees_lock
+
+                @contextlib.contextmanager
+                def redirect_then_check(trees: Path):
+                    with lock(trees):
+                        redirect()
+                        yield
+
+                if not during_removal:
+                    redirect()
+                    # The decoy hides the real tree's unsaved file; the trusted common must reject it.
+                    self.assertEqual(cleanup.git_guards(tree), [])
+                with mock.patch.object(cleanup, "trees_lock", redirect_then_check if during_removal else lock), \
+                        mock.patch.object(cleanup.git_view, "_opened", wraps=cleanup.git_view._opened) as opened, \
+                        redirect_stdout(io.StringIO()) as out:
+                    code = cleanup.main(["--root", str(root), "--store", str(self.db), "--remove"])
+                self.assertEqual(code, 0, out.getvalue())
+                self.assertIn("git cannot read this tree", self.kept(out.getvalue()).get("done", out.getvalue()))
+                self.assertEqual((tree / "scratch.txt").read_text(), "only copy\n")
+                self.assertTrue(original_admin.is_dir() and admin.is_dir())
+                if not during_removal:
+                    self.assertFalse(any(call.args[0] == tree for call in opened.call_args_list))
+                (tree / ".git").write_text(original)
+
+    def test_repository_workspace_removes_a_clean_finished_tree(self) -> None:
+        root = self.repository_workspace("workspace")
+        tree = root / "trees" / "done"
+        admin = cleanup.git_view.locate(tree).gitdir
+        self.store.set_tree(f"{KEY}-done", str(tree))
+        with redirect_stdout(io.StringIO()) as out:
+            code = cleanup.main(["--root", str(root), "--store", str(self.db), "--remove"])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertEqual(self.removable(out.getvalue()), ["done"])
+        self.assertFalse(tree.exists())
+        self.assertFalse(admin.exists())
+
 
     def test_remove_deletes_the_clean_finished_tree_and_its_build_output_and_logs_it(self) -> None:
         admin = cleanup.git_view.locate(self.trees / "done").gitdir
@@ -632,6 +707,52 @@ class CleanupTest(unittest.TestCase):
         (tree / ".chief-of-stuff" / "worker-stderr.log").write_text("finished\n")
         (tree / "node_modules").mkdir()
         (tree / "node_modules" / "index.js").write_text("generated\n")
+        _, out = self.run_cleanup("--remove")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse(tree.exists())
+
+    def test_cursor_channel_file_alone_is_removable_while_sibling_or_other_ignored_files_keep_the_tree(self) -> None:
+        tree = self.trees / "done"
+        exclude = self.clone / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("/.cursor/mcp.json\n")
+        (tree / ".cursor").mkdir()
+        (tree / ".cursor" / "mcp.json").write_text("{}\n")
+
+        sibling = tree / ".cursor" / "other.txt"
+        sibling.write_text("untracked\n")
+        _, out = self.run_cleanup("--remove")
+        self.assertNotIn("done", self.removable(out))
+        self.assertIn("unsaved by git status --ignored (.cursor/", self.kept(out)["done"])
+        self.assertIn("1 uncommitted", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
+        sibling.unlink()
+
+        gitignore = tree / ".cursor" / ".gitignore"
+        notes = tree / ".cursor" / "notes.md"
+        gitignore.write_text("*\n")
+        notes.write_text("only copy\n")
+        _, out = self.run_cleanup("--remove")
+        self.assertNotIn("done", self.removable(out))
+        self.assertIn("1 unsaved by git status --ignored (.cursor/)", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
+        gitignore.unlink()
+        notes.unlink()
+
+        real_git = cleanup.git
+        for reply in ((128, "unreadable"), (0, "")):
+            with self.subTest(reply=reply), mock.patch.object(
+                cleanup, "git", side_effect=lambda args, cwd, view=None, r=reply: (
+                    r if args == ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ".cursor"]
+                    else real_git(args, cwd, view)
+                ),
+            ):
+                self.assertEqual(cleanup.git_guards(tree), ["1 unsaved by git status --ignored (.cursor/)"])
+
+        code, out = self.run_cleanup()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertNotIn("done", self.kept(out))
         _, out = self.run_cleanup("--remove")
         self.assertEqual(self.removable(out), ["done"])
         self.assertFalse(tree.exists())
@@ -695,6 +816,39 @@ class CleanupTest(unittest.TestCase):
         self.assertTrue((self.trees / "done").is_dir())
         self.assertEqual([entry.message for entry in self.store.log(key)],
                          [f"keep done — {key} is not finished", "wait: human review"])
+
+    def test_changing_process_pids_and_count_keeps_one_history_step(self) -> None:
+        tree = self.trees / "done"
+        for current in ([(12345, tree), (12346, tree / "node_modules")], [(23456, tree)]):
+            with mock.patch.object(cleanup, "processes", return_value=current):
+                code, out = self.run_cleanup("--remove")
+            self.assertEqual(code, 0, out)
+            self.assertTrue(tree.is_dir())
+        messages = [entry.message for entry in self.store.log(f"{KEY}-done")]
+        self.assertEqual(messages, ["keep done — live process in tree"])
+
+    def test_several_processes_add_one_claim_without_pids(self) -> None:
+        tree = self.trees / "done"
+        current = [(os.getpid(), tree), (12345, tree), (12346, tree / "node_modules"),
+                   (12347, self.trees / "done-other")]
+        with mock.patch.object(cleanup, "processes", return_value=current):
+            self.assertEqual(cleanup.claims(self.root, self.trees, tree), ["live process in tree"])
+
+    def test_process_replaced_by_uncommitted_work_adds_a_history_step(self) -> None:
+        tree = self.trees / "done"
+        with mock.patch.object(cleanup, "processes", return_value=[(12345, tree)]):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        (tree / "notes.md").write_text("unfinished work\n")
+        with mock.patch.object(cleanup, "processes", return_value=[]):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        messages = [entry.message for entry in self.store.log(f"{KEY}-done")]
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0], "keep done — live process in tree")
+        self.assertIn("uncommitted", messages[1])
+        self.assertNotIn("live process in tree", messages[1])
+        self.assertTrue(tree.is_dir())
 
     def test_changed_cleanup_results_and_removal_still_log(self) -> None:
         key = f"{KEY}-done"
@@ -982,7 +1136,7 @@ class CleanupTest(unittest.TestCase):
             with self.subTest(cwd=cwd):
                 self.lsof.return_value = subprocess.CompletedProcess(["lsof"], 0, f"p12345\nfcwd\nn{cwd}\n", "")
                 _, out = self.run_cleanup("--remove")
-                self.assertIn("live process in tree (pid 12345)", self.kept(out).get("done", out))
+                self.assertIn("live process in tree", self.kept(out).get("done", out))
                 self.assertTrue(tree.is_dir())
         self.lsof.assert_called_with(["lsof", "-a", "-d", "cwd", "-Fpn"],
                                      capture_output=True, text=True, timeout=cleanup.TIMEOUT)
@@ -1052,7 +1206,7 @@ class CleanupTest(unittest.TestCase):
 
         with mock.patch.object(cleanup, "trees_lock", launch_then_lock):
             _, out = self.run_cleanup("--remove")
-        self.assertIn("live process in tree (pid 12345)", self.kept(out).get("done", out))
+        self.assertIn("live process in tree", self.kept(out).get("done", out))
         self.assertTrue(tree.is_dir())
 
     def test_a_reused_pid_is_not_a_live_worker(self) -> None:
@@ -1177,7 +1331,7 @@ class CleanupTest(unittest.TestCase):
             calls += 1
             if calls == 2:  # the last container check, while cleanup holds the tree lock
                 self.store.upsert_item(key, forge_state="open")
-                self.store.set_ownership(key, "trees/done/new.txt")
+                self.store.set_tree(key, "trees/done/new.txt")
             return []
 
         with mock.patch.object(cleanup, "containers", side_effect=mounts):
@@ -1214,6 +1368,19 @@ class CleanupTest(unittest.TestCase):
         self.assertIn("container", self.kept(out)["done"])
         self.assertTrue((self.trees / "done").is_dir())
 
+    def test_a_container_bound_to_a_parent_of_the_tree_keeps_it(self) -> None:
+        self.plant("docker", "import sys\nprint('c1') if sys.argv[1] == 'ps' else print(%r)\n" % str(self.trees))
+        _, out = self.run_cleanup("--remove")
+        self.assertIn("container", self.kept(out)["done"])
+        self.assertTrue((self.trees / "done").is_dir())
+
+    def test_a_container_mount_of_a_sibling_tree_does_not_keep_done(self) -> None:
+        mount = self.trees / "done-not"
+        self.plant("docker", "import sys\nprint('c1') if sys.argv[1] == 'ps' else print(%r)\n" % str(mount))
+        _, out = self.run_cleanup("--remove")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse((self.trees / "done").exists())
+
     def test_a_container_runtime_that_cannot_answer_keeps_every_tree(self) -> None:
         self.plant("docker", "import sys\nsys.exit('Cannot connect to the Docker daemon')\n")
         _, out = self.run_cleanup("--remove")
@@ -1233,7 +1400,23 @@ class CleanupTest(unittest.TestCase):
         with mock.patch.object(cleanup, "containers", return_value=[]) as mounts, \
                 mock.patch.object(cleanup, "trees_lock", mount_then_lock):
             _, out = self.run_cleanup("--remove")
-        self.assertIn("a container binds a path in it", self.kept(out)["done"])
+        self.assertIn("a container mount overlaps it", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
+
+    def test_a_container_mount_of_a_parent_that_appears_before_the_delete_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        real = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def mount_then_lock(trees: Path):
+            mounts.return_value = [tree.parent]
+            with real(trees):
+                yield
+
+        with mock.patch.object(cleanup, "containers", return_value=[]) as mounts, \
+                mock.patch.object(cleanup, "trees_lock", mount_then_lock):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("a container mount overlaps it", self.kept(out)["done"])
         self.assertTrue(tree.is_dir())
 
     def test_a_failing_final_container_query_keeps_the_tree(self) -> None:

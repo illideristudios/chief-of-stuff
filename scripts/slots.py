@@ -45,14 +45,14 @@ def _exclusive(path: Path) -> Iterator[None]:
 
 
 def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
-          max_concurrency: int | None, launch: Callable[[], tuple[str, str] | None],
+          max_concurrency: int | None, launch: Callable[[], tuple[str, ...] | None],
           clock: clock.Clock = clock.system,
           runtime: str | None = None, model: str | None = None,
           effort: str | None = None, agent_type: str | None = None) -> None:
     """Claim one worker slot: reserve it under the lock, launch outside it, then stamp the real start — or refuse.
 
     The reservation is an open segment, so concurrent claims count it; a failed launch drops it. Launch may
-    return the (model, effort) actually used.
+    return the (model, effort) actually used, or (model, effort, runtime) when another host ran it (#700).
     """
     with _exclusive(trees):
         n = running(store)
@@ -67,6 +67,9 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
     except BaseException:
         store.drop_segment(issue_key, stage, attempt)
         raise
+    ran = None
     if used is not None:
-        model, effort = used
-    store.record_segment(issue_key, stage, attempt, started_at=clock().isoformat(), model=model, effort=effort)
+        model, effort, *rest = used
+        ran = rest[0] if rest else "claude"
+    store.record_segment(issue_key, stage, attempt, started_at=clock().isoformat(), runtime=ran, model=model,
+                         effort=effort)

@@ -25,6 +25,8 @@ COMMANDS = {
     "start": "start_coordinator.py",
     "init": "scripts/init_workspace.py",
     "work": "scripts/work.py",
+    "engine": "scripts/engine.py",
+    "supervisor": "scripts/supervisor.py",
     "models": "scripts/install_model_guidance.py",
     "worktree": "scripts/make_worktree.py",
     "worker": "scripts/spawn_session.py",
@@ -32,7 +34,7 @@ COMMANDS = {
     "processes": "scripts/process_status.py",
     "result": "scripts/one_shot_result.py",
     "adopt": "scripts/adopt_one_shots.py",
-    "board": "scripts/render_board.py",
+    "board": "scripts/pages.py",
     "inbox": "scripts/inbox.py",
     "backlog": "scripts/backlog.py",
     "kanban": "scripts/kanban_cli.py",
@@ -41,6 +43,7 @@ COMMANDS = {
     "health": "scripts/probe_health.py",
     "pages": "scripts/pages.py",
     "decision": "scripts/decision_page.py",
+    "decisions": "scripts/decisions_cli.py",
     "log": "scripts/tracker_write.py",
     "tracker": "scripts/tracker_read.py",
     "merge-approved": "scripts/merge_approved.py",
@@ -50,9 +53,10 @@ COMMANDS = {
     "review-threads": "scripts/review_threads.py",
     "sources": "scripts/board_sources.py",
     "tick": "scripts/flow.py",
+    "architect-signals": "scripts/architect_signals_cli.py",
 }
-# Commands whose scripts import store (SQLAlchemy/Alembic). Add cleanup/engine when they join COMMANDS.
-STORE_BACKED = frozenset({"performance", "work", "limits"})
+# Commands whose scripts import store (SQLAlchemy/Alembic).
+STORE_BACKED = frozenset({"adopt", "board", "decision", "decisions", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
 
 
 def wrapper_text(current: Path) -> str:
@@ -165,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     else:
         python = sys.executable
-    os.execv(python, [python, str(target), *args[1:]])
+    os.execv(python, [python, str(target), *(["--board"] if args[0] == "board" else []), *args[1:]])
     return 0
 
 
