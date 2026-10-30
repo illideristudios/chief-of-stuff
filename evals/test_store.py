@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 import store
@@ -248,6 +248,20 @@ class StoreTest(unittest.TestCase):
         changed = [*identity[:-1], "stack-stop --retry"]
         self.assertTrue(other.claim_teardown("trees/tree", changed))
         self.assertEqual(self.store.teardown_attempt("trees/tree"), changed)
+
+    def test_the_0014_migration_downgrades_and_upgrades_without_losing_earlier_rows(self) -> None:
+        self.store.upsert_item(KEY, title="kept")
+        self.assertTrue(self.store.claim_teardown("trees/tree", ["stack-stop"]))
+        self.store.engine.dispose()
+        cfg = store._config(self.path)
+        command.downgrade(cfg, "0013")
+        self.assertNotIn("cleanup_teardown", inspect(self.store.engine).get_table_names())
+        self.assertIn("transcript", inspect(self.store.engine).get_table_names())  # 0013's table survives
+        self.assertEqual([item.issue_key for item in self.store.items()], [KEY])
+        command.upgrade(cfg, "0014")
+        self.assertIn("cleanup_teardown", inspect(self.store.engine).get_table_names())
+        self.assertEqual([item.issue_key for item in self.store.items()], [KEY])
+        self.assertIsNone(self.store.teardown_attempt("trees/tree"))  # the dropped attempt record is not restored
 
     def test_failed_teardown_attempt_commit_rolls_back_and_allows_a_retry(self) -> None:
         identity = ["/repo/.git/worktrees/tree", 1, 2, 3, "stack-stop"]

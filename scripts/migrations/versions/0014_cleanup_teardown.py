@@ -16,3 +16,7 @@ def upgrade() -> None:
         sa.Column("tree", sa.String(), primary_key=True),
         sa.Column("identity", sa.JSON(), nullable=False),
     )
+
+
+def downgrade() -> None:
+    op.drop_table("cleanup_teardown")
