@@ -21,7 +21,7 @@ import supervisor  # noqa: E402
 
 
 # A per-command help issue opts in here after bringing its parser up to the standard.
-ENFORCED = frozenset({"docs"})
+ENFORCED = frozenset({"docs", "init"})
 
 
 def missing_sections(help_text: str, name: str) -> list[str]:
@@ -480,48 +480,9 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
         self.assertEqual(reaching, set(cli.STORE_BACKED))
 
 
-# #838: one shared help check. A per-command issue adds its name to ENFORCED.
-HELP_PROSE = ("When not to use", "Output", "Exit codes", "Side effects", "Examples")
-ENFORCED = frozenset({"init"})
-
-
-def missing_sections(help_text: str, name: str) -> list[str]:
-    """Problems in one command's --help. Empty means the #838 sections are present."""
-    problems = []
-    lines = help_text.splitlines()
-    usage = next((line for line in lines if line.startswith("usage: ")), "")
-    if not usage.startswith(f"usage: chief-of-stuff {name}"):
-        problems.append(f"usage does not start chief-of-stuff {name}")
-    options_at = next((i for i, line in enumerate(lines) if line.rstrip(":") in ("options", "optional arguments")), None)
-    if options_at is None:
-        problems.append("missing heading: Options")
-        description = ""
-    else:
-        description = " ".join(line.strip() for line in lines[:options_at]
-                               if line.strip() and not line.startswith("usage:") and not line[:1].isspace())
-    if not description:
-        problems.append("empty description")
-    headings = [line.strip() for line in lines]
-    for heading in HELP_PROSE:
-        if heading not in headings:
-            problems.append(f"missing heading: {heading}")
-    example_at = next((i for i, line in enumerate(headings) if line == "Examples"), None)
-    tail = "\n".join(lines[example_at + 1:]) if example_at is not None else ""
-    if f"chief-of-stuff {name}" not in tail:
-        problems.append(f"no chief-of-stuff {name} line under Examples")
-    return problems
-
-
 def _help_section(help_text: str, heading: str) -> str:
-    lines = help_text.splitlines()
-    headings = [line.strip() for line in lines]
-    start = headings.index(heading)
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        if headings[index] in HELP_PROSE:
-            end = index
-            break
-    return "\n".join(lines[start:end])
+    body = re.split(rf"(?m)^{re.escape(heading)}:\n", help_text, maxsplit=1)[1]
+    return re.split(r"(?m)^[A-Z][\w ]*:$", body, maxsplit=1)[0]
 
 
 class InitHelpTest(unittest.TestCase):
@@ -535,18 +496,6 @@ class InitHelpTest(unittest.TestCase):
     def init(self, *args):
         return subprocess.run([sys.executable, str(ROOT / "chief_of_stuff.py"), "init", *args],
                               cwd=self.cwd, capture_output=True, text=True)
-
-    def test_missing_sections_rejects_a_deficient_sample(self):
-        complete = "\n".join([
-            "usage: chief-of-stuff init [-h]", "", "Bootstrap a workspace.", "", "options:", "  -h, --help  show help",
-            "", "When not to use", "  models", "Output", "  text", "Exit codes", "  0", "Side effects", "  files",
-            "Examples", "  chief-of-stuff init --help",
-        ])
-        self.assertEqual(missing_sections(complete, "init"), [])
-        bare = missing_sections("usage: init_workspace.py\n\noptions:\n", "init")
-        self.assertIn("usage does not start chief-of-stuff init", bare)
-        self.assertIn("empty description", bare)
-        self.assertIn("missing heading: Examples", bare)
 
     def test_public_help_meets_the_shared_standard_and_writes_nothing(self):
         self.assertIn("init", ENFORCED)
@@ -586,7 +535,7 @@ class InitHelpTest(unittest.TestCase):
                      "does not create a store", "no rollback"):
             self.assertIn(fact, effects, fact)
         examples = [line.strip() for line in _help_section(text, "Examples").splitlines()
-                    if line.strip().startswith("mkdir")]
+                    if line.strip().startswith("chief-of-stuff init")]
         self.assertEqual(len(examples), 3, examples)
         self.assertIn("Robin", examples[0])
         self.assertIn("/tmp/alder", examples[0])

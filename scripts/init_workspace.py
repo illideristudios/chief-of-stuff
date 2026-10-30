@@ -186,7 +186,7 @@ def provision_kanban(forge, config: Kanban | None, dry: bool) -> tuple[str, str]
 
 
 EPILOG = """\
-When not to use
+When not to use:
   A workspace that already has a ## Coordinator block is refused. To install or
   keep model guidance on a workspace that is already configured, use
   chief-of-stuff models --root PATH. Init is not an update and not a reset.
@@ -194,7 +194,7 @@ When not to use
   implemented: init does not read or write that table, register child
   workspaces, or start an engine.
 
-Output
+Output:
   Human-readable text. Not TOON and not JSON, and there are no structured
   fields. --help writes this text on stdout and leaves stderr empty.
   A successful write prints, on stdout, an optional "ignored in EXCLUDE" line,
@@ -212,7 +212,7 @@ Output
   not created" on stderr, and initialization still continues. Configuration and I/O refusals print
   "refused:" on stderr. Usage faults print usage and an error on stderr.
 
-Exit codes
+Exit codes:
   0  initialization, --dry-run, or --help succeeded. A label warning on stderr
      is still exit 0.
   1  refused configuration or I/O, including a missing GitLab partner flag, a
@@ -221,7 +221,7 @@ Exit codes
   2  usage fault: a missing required argument, an unknown option, an invalid
      choice, a non-integer --board-port, or both --github-repo and --gitlab-host.
 
-Side effects
+Side effects:
   Reads the workspace directory, an existing Coordinator file, existing
   settings (validated, not rewritten), the shipped model-guidance template
   when guidance is created, and timezone data. Inside a git work tree it also
@@ -254,10 +254,11 @@ Side effects
   them. There is no rollback: label provisioning runs before the local writes,
   and a later I/O failure can leave a partial workspace.
 
-Examples
-  mkdir -p /tmp/alder && chief-of-stuff init --dry-run --root /tmp/alder --user Robin --timezone America/Chicago --github-repo example-team/alder
-  mkdir -p /tmp/birch && chief-of-stuff init --root /tmp/birch --user Morgan --timezone America/Chicago --github-repo example-team/birch --agent implementer:task --launcher tmux
-  mkdir -p /tmp/cedar && chief-of-stuff init --root /tmp/cedar --user Casey --timezone America/Chicago --gitlab-host https://gitlab.example.test --gitlab-project example-team/cedar --gitlab-token-env CEDAR_GITLAB_TOKEN
+Examples:
+  The --root directory must already exist: run mkdir -p ROOT first.
+  chief-of-stuff init --dry-run --root /tmp/alder --user Robin --timezone America/Chicago --github-repo example-team/alder
+  chief-of-stuff init --root /tmp/birch --user Morgan --timezone America/Chicago --github-repo example-team/birch --agent implementer:task --launcher tmux
+  chief-of-stuff init --root /tmp/cedar --user Casey --timezone America/Chicago --gitlab-host https://gitlab.example.test --gitlab-project example-team/cedar --gitlab-token-env CEDAR_GITLAB_TOKEN
 """
 
 
