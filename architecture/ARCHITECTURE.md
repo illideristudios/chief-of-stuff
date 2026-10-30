@@ -28,11 +28,11 @@ New work goes on the engine path: the store, the forge adapter, the model port, 
 
 | Circle | Modules |
 |---|---|
-| Entities | `tracker.py`, `md.py`, `clock.py`, `runtimes.py`, `policy.py`, `findings.py`, `orphans.py`, `estimate.py`, `tracker_log.py`, `tree_state.py`, the finding types of `audit_tasks.py`, the message format of `inbox.py`, `guard_commands.py` (the worker guard's pure shell-command judgements), `limits.py` (runtime limit readings and their judgements, section 10) |
-| Use Cases | the judgements of `audit_tasks.py`, `dispatch_prompt.py`, `one_shot.py`, `kanban.py`, `merge_ready.py`, `merge_approved.py`, `review_threads.py`, `task_forge.py`, `model_port.py` (the model port), `issue_gate.py` (issue first, then one store row), `trio_gate.py` (the decision trio, design 5a), `decision_actions.py` (a board decision's lifecycle: answer, reverse, re-route, and an answered decision whose action is blocked. The page server only validates and records a person's intent through it; the engine alone applies intents, see section 6), `engine_merge.py` (executes a planned merge, logged on the issue), `forge_port.py` (`ForgeError`, the forge failure boundary), `reconcile.py` (the engine's planner: what the state calls for), `readiness.py` (the Ready predicate over a pass's facts: dependency blockers and stop records), `completion.py` (judgements on a finished or abandoned run: done-on-main, the read-only rule, unlanded work and orphan recovery), `guard_rules.py` (the worker guard's Stop, permission-relay and session-start rules), the ready-task and stagnation judgements of `flow.py`, `performance.py`, `worker_health.py` (a worker's six health signals and the stall judgement, section 8) |
-| Interface Adapters, presenters | `fragment.py`, `columns.py`, `panels.py`, `gantt.py`, `flow_chart.py`, `render_board.py`, `decision_page.py`, `issue_page.py`, `source_page.py`, `module_graph.py`, `workers_page.py`, `page_reload.py`, and the page module of section 3 |
-| Interface Adapters, gateways | `store.py` (the issue-keyed store and the workspace's engine log, such as policy changes, behind the ORM, and its `migrations/`), `forge.py` (the one forge adapter for GitHub and GitLab), `backlog.py`, `backlog_ref.py`, `board_sources.py`, `session_logs.py` (each runtime's session log, found and read into one shape), `workspace.py`, `settings.py`, `tracker_read.py`, `tracker_write.py`, `forge_review.py`, `one_shot_report.py`, `tree_claims.py`, `slots.py` (the worker concurrency cap, E21), `limits_history.py` (the account-wide limit readings behind the ORM, section 10), the git and forge fact gathering of `audit_tasks.py`, the mailbox storage of `inbox.py` |
-| Frameworks and Drivers | `claude_adapter.py` and the other host adapters, the T3 launcher `t3_adapter.py` among them (section 13; host adapters are the only modules that spawn a host CLI, and the `t3` CLI counts as one), `git_trees.py`, `git_view.py`, the command line of `inbox.py`, the audit orchestration and command line of `audit_tasks.py`, `notify.py`, `notify_service.py`, `supervisor.py` (the engine venv and LaunchAgent), `startup.py` (the engine and `work` commands' workspace settings and forge), `store_access.py` (the migrated store, under the migrate lock), `kanban_cli.py` (the `kanban` command line), `pipeline_cli.py` (the `pipeline` command line: a pipeline's status, or a branch's head and latest pipeline, read through `forge.Forge`), `process_status.py`, `session_exec.py`, `spawn_session.py`, `probe_health.py`, `pages.py`, `chief_of_stuff.py`, `start_coordinator.py`, `hooks/hooks.json`, `board_guard.py`, `init_workspace.py`, `install_model_guidance.py`, `make_worktree.py`, `migrate_backlog.py`, `one_shot_result.py`, `shell_setup.py` (the login shell, and the only place the workspace's `[workers] teardown` and `teardown_list` commands run; Use Cases receive teardown as a passed-in function, never by import), `cleanup.py` (engine-owned worktree removal behind every finding-27 guard, E19; it runs the workspace teardown in a tree before its container-mount guard), `engine.py` (the workspace singleton loop that executes the reconcile plan), `engine_facts.py` (gathers one pass's git, worktree, process and forge facts into plain records for the planner), `work.py` (the issue-first intake command line), `worker.py` (worker launch through the adapter and completion collection), `worker_guard.py` (the worker guard's hook entry point), `guard_binding.py` (the worker's binding read from its environment), `engine_mcp.py` (the engine's report and ask MCP server), `guard/hooks/hooks.json`, `adopt_one_shots.py`, `sync_page_theme.py`, the command line and tick orchestration of `flow.py`, `performance_report.py`, `limits_probe.py` (unbilled reads of each runtime's limits, section 10), `limits_cli.py` (the `limits` command line), `merge_order.py` (the `merge-order` command line, #75: it reads the open requests through `backlog.py`, trial-merges each overlapping pair in a scratch checkout through git, and prints the least-conflict order; its ordering judgement takes plain records and runs no I/O) |
+| Entities | `tracker.py`, `md.py`, `clock.py`, `runtimes.py`, `policy.py`, `findings.py`, `orphans.py`, `estimate.py`, `tracker_log.py`, `tree_state.py`, the finding types of `audit_tasks.py`, the message format of `inbox.py`, `guard_commands.py` (the worker guard's pure shell-command judgements), `limits.py` (runtime limit readings and their judgements, section 10), `decision_graph.py` (the decision graph's leaves, ancestors and rejected alternatives, pure, importing no other script; section 17) |
+| Use Cases | the judgements of `audit_tasks.py`, `dispatch_prompt.py`, `one_shot.py`, `kanban.py`, `merge_ready.py`, `merge_approved.py`, `review_threads.py`, `task_forge.py`, `model_port.py` (the model port), `issue_gate.py` (issue first, then one store row), `trio_gate.py` (the decision trio, design 5a), `decision_escalation.py` (trio retries, owner waits, reversals and replacement asks), `architect_signals.py` (section 16's judgements over gap rows, the pending filter, signal keys and issue bodies), `decision_history.py` (the harsh judgement of a history request from its text and the current leaves, and the precedent seam; section 17), `decision_actions.py` (a board decision's lifecycle: answer, reverse, re-route, and an answered decision whose action is blocked. The page server only validates and records a person's intent through it; the engine alone applies intents, see section 6), `engine_merge.py` (executes a planned merge, logged on the issue), `forge_port.py` (`ForgeError`, the forge failure boundary), `reconcile.py` (the engine's planner: what the state calls for), `readiness.py` (the Ready predicate over a pass's facts: dependency blockers and stop records), `completion.py` (judgements on a finished or abandoned run: done-on-main, the read-only rule, unlanded work and orphan recovery), `guard_rules.py` (the worker guard's Stop, permission-relay and session-start rules), the ready-task and stagnation judgements of `flow.py`, `performance.py`, `worker_health.py` (a worker's six health signals, the stall judgement and the per-issue failure count, sections 8 and 18), `heartbeat.py` (the heartbeat's status, its sink seam and the failure-tolerant delivery; section 18) |
+| Interface Adapters, presenters | `fragment.py`, `columns.py`, `panels.py`, `gantt.py`, `flow_chart.py`, `render_board.py`, `decision_page.py`, `issue_page.py`, `source_page.py`, `module_graph.py`, `workers_page.py`, `page_reload.py`, `heartbeat_page.py` (the `/report` page, section 18), and the page module of section 3 |
+| Interface Adapters, gateways | `store.py` (the issue-keyed store and the workspace's engine log, such as policy changes, behind the ORM, and its `migrations/`, among them `0012_decision_graph`, section 17), `forge.py` (the one forge adapter for GitHub and GitLab), `backlog.py`, `backlog_ref.py`, `board_sources.py`, `session_logs.py` (each runtime's session log, found and read into one shape), `workspace.py`, `settings.py`, `tracker_read.py`, `tracker_write.py`, `forge_review.py`, `one_shot_report.py`, `tree_claims.py`, `slots.py` (the worker concurrency cap, E21), `limits_history.py` (the account-wide limit readings behind the ORM, section 10), `architect_signal_store.py` (reads `compliance.md` and keeps the coordinator's ledger file, never editing a row; section 16), `precedent_source.py` (the tracker and decision-graph precedent sources behind the seam; section 17), `heartbeat_store.py` (the heartbeat's facts read from the store, and its file sink; section 18), `private_state.py` (message-bearing files kept private), `github_admission.py`, `github_graphql_transport.py` and `github_scan.py` (host-wide admission of GitHub GraphQL requests, one admitted request per attempt, and the crash-resumable source scan), the git and forge fact gathering of `audit_tasks.py`, the mailbox storage of `inbox.py` |
+| Frameworks and Drivers | `claude_adapter.py` and the other host adapters, the T3 launcher `t3_adapter.py` among them (section 13; host adapters are the only modules that spawn a host CLI, and the `t3` CLI counts as one), `git_trees.py`, `git_view.py`, the command line of `inbox.py`, the audit orchestration and command line of `audit_tasks.py`, `notify.py`, `notify_service.py`, `supervisor.py` (the engine venv and LaunchAgent), `startup.py` (the engine and `work` commands' workspace settings and forge), `store_access.py` (the migrated store, under the migrate lock), `kanban_cli.py` (the `kanban` command line), `pipeline_cli.py` (the `pipeline` command line: a pipeline's status, or a branch's head and latest pipeline, read through `forge.Forge`), `process_status.py`, `session_exec.py`, `spawn_session.py`, `probe_health.py`, `pages.py`, `chief_of_stuff.py`, `start_coordinator.py`, `hooks/hooks.json`, `board_guard.py`, `init_workspace.py`, `install_model_guidance.py`, `make_worktree.py`, `migrate_backlog.py`, `one_shot_result.py`, `shell_setup.py` (the login shell, and the only place the workspace's `[workers] teardown` and `teardown_list` commands run; Use Cases receive teardown as a passed-in function, never by import), `cleanup.py` (engine-owned worktree removal behind every finding-27 guard, E19; it runs the workspace teardown in a tree before its container-mount guard), `engine.py` (the workspace singleton loop that executes the reconcile plan), `engine_facts.py` (gathers one pass's git, worktree, process and forge facts into plain records for the planner), `work.py` (the issue-first intake command line), `worker.py` (worker launch through the adapter and completion collection), `worker_guard.py` (the worker guard's hook entry point), `guard_binding.py` (the worker's binding read from its environment), `engine_mcp.py` (the engine's report and ask MCP server), `guard/hooks/hooks.json`, `adopt_one_shots.py`, `sync_page_theme.py`, the command line and tick orchestration of `flow.py`, `performance_report.py`, `limits_probe.py` (unbilled reads of each runtime's limits, section 10), `limits_cli.py` (the `limits` command line), `architect_signals_cli.py` (the `architect-signals` command line; section 16), `decisions_cli.py` (the `decisions` command line of the coordinator, the architect and the owner, which refuses a worker binding; section 17), `release_selection.py` (selects the installed release or a newer plugin-cache sibling), `engine_intent.py` (the engine's private ordered intent), `merge_order.py` (the `merge-order` command line, #75: it reads the open requests through `backlog.py`, trial-merges each overlapping pair in a scratch checkout through git, and prints the least-conflict order; its ordering judgement takes plain records and runs no I/O) |
 
 The T3 launcher is a host adapter (owner, 2026-10-29, T3 design §9). It implements the start, cancel and classify contract of section 13 and sits in Frameworks and Drivers beside the other adapters, so the rule that only host adapters spawn a host CLI holds without an exception: the `t3` CLI counts as a host CLI under that rule, and no module but the T3 launcher runs it. T3 is a launcher, not a fifth runtime (call, T3 design §9): `runtimes.py` keeps its four runtimes, and a worker launched through T3 is still a claude, codex, cursor or agy worker. The launcher is `t3_adapter.py` (#1178). It runs the `t3` CLI, writes the engine channel into the worker tree, and hands its host to `claude_adapter`'s detached runner, so the run evidence, cancel and collection are the contract's own. It imports `claude_adapter`, `host_adapter` and `shell_setup` (Frameworks and Drivers), `model_port` (Use Cases) and `runtimes` (Entities), all in its own circle or inward. It draws nothing.
 
@@ -49,14 +49,28 @@ Rt := T3 is a runtime in runtimes.py      In := every import of t3_adapter.py is
 ∴   ∀m: T(m) → Ha(m), the rule needs no exception for T3, and t3_adapter.py in Frameworks and Drivers obeys section 1's dependency rule (5)
 ```
 
-The architect signals of section 16 (#1180) are placed by their parts. The judgements over gap rows, the pending filter, signal keys and issue bodies are Use Cases. Reading `compliance.md` and keeping the coordinator's ledger file are Interface Adapters, gateways. The `architect-signals` command line is Frameworks and Drivers. A module that holds all three is a gap against this section until it is split.
+The architect signals of section 16 (#1180) are placed by their parts, one module each. The judgements over gap rows, the pending filter, signal keys and issue bodies are `architect_signals.py` (Use Cases, no I/O). Reading `compliance.md` and keeping the coordinator's ledger file are `architect_signal_store.py` (Interface Adapters, gateways). The `architect-signals` command line is `architect_signals_cli.py` (Frameworks and Drivers), which imports the other two. A module that holds two of the three parts is a gap against this section.
 
 ```
 J := the signal judgements      G := the compliance read and the ledger file      C := the architect-signals command line
 M(x, y) := x and y are in one module
 1.  J ∈ Use Cases ∧ G ∈ gateways ∧ C ∈ Drivers      [section 1: the circles; this section]
-2.  M(J, G) ∨ M(J, C) → gap                          [this section: one module, one circle]
-∴   the signal judgements stay pure, and the file and command-line work sits in the outer circles
+2.  M(J, G) ∨ M(J, C) ∨ M(G, C) → gap                [this section: one module, one circle]
+3.  ¬M(J, G) ∧ ¬M(J, C) ∧ ¬M(G, C)                   [architect_signals.py, architect_signal_store.py, architect_signals_cli.py; evals/test_architecture.py CIRCLES]
+∴   the signal judgements stay pure, the file and command-line work sits in the outer circles, and no gap is open against this paragraph
+```
+
+The decision graph of section 17 (#1181) is placed the same way. `decision_graph.py` is an Entity: the graph's leaves, ancestors and rejected alternatives, importing no other script and no I/O. `decision_history.py` is a Use Case: the harsh judgement of a history request and the precedent seam, reaching no adapter and no I/O. `precedent_source.py` is a gateway: the tracker's Decisions rows and the graph's leaves behind that seam. The store keeps the graph (migration `0012_decision_graph`). `decisions_cli.py` is the `decisions` command line, in Frameworks and Drivers. The heartbeat of section 18 (#1179) is placed by its parts too: `heartbeat.py` (Use Cases) computes the status and delivers it, `heartbeat_store.py` (gateways) reads its facts from the store and writes the file sink, and `heartbeat_page.py` (presenters) renders `/report` from that file and never acts. `evals/test_architecture.py` holds each of these in the circle named here, and its dependency tests hold `decision_graph` to no imports and `decision_history` to no adapter and no I/O.
+
+```
+Gr := decision_graph.py      Dh := decision_history.py      Ps := precedent_source.py      Dc := decisions_cli.py
+Hb := heartbeat.py      Hs := heartbeat_store.py      Hp := heartbeat_page.py      c(m) := m's circle
+I(m) := every import of m is in c(m) or an inner circle
+1.  c(Gr) = Entities ∧ c(Dh) = Use Cases ∧ c(Ps) = gateways ∧ c(Dc) = Drivers      [evals/test_architecture.py CIRCLES]
+2.  c(Hb) = Use Cases ∧ c(Hs) = gateways ∧ c(Hp) = presenters                      [evals/test_architecture.py CIRCLES, PAGES]
+3.  Gr imports no script; Dh imports decision_graph and md; Hb imports worker_health      [scripts/decision_graph.py, scripts/decision_history.py:14, scripts/heartbeat.py:16]
+4.  Ps imports decision_graph, decision_history, store, workspace; Hs imports heartbeat, workspace; Hp imports heartbeat_store, decision_page, fragment      [scripts/precedent_source.py:13, scripts/heartbeat_store.py:12, scripts/heartbeat_page.py:9]
+∴   I(m) holds for each of the seven (1 to 4), so section 1's dependency rule holds for this round's modules
 ```
 
 ## 5. Enforcement
@@ -75,19 +89,34 @@ The engine runs the review panel.
 
 A review is bound to the head it reviewed: the segment records the reviewed commit, and a merge happens only when that commit is the change's current head.
 
-The default is motion (owner, 2026-10-29, T3 design §5). The review panel, the fix loop and the merge gate stay, because they are automated checks and not stops. The merge gate merges with no wait on the owner once the review matches the change's current head and main's CI is green, and, where the policy requires the architect's approval, once the architect has given it for that head. The engine executes the merge (`engine_merge.py`); this is the T3 design's "the coordinator merges". A change surfaces for human review only on a contradiction (two current decisions, or a decision and the code) or after three fix rounds with findings still open. Human review stays possible at any time.
+The default is motion (owner, 2026-10-29, T3 design §5). The review panel, the fix loop and the merge gate stay, because they are automated checks and not stops. The merge gate merges with no wait on the owner once the review matches the change's current head and main's CI is green, and, where the policy requires the architect's approval, once the architect has given it for that head. The engine executes the merge (`engine_merge.py`); this is the T3 design's "the coordinator merges". A change surfaces for human review only on a contradiction (two current decisions, or a decision and the code), on a person's change request on the forge, or after three fix rounds with findings still open. Human review stays possible at any time.
 
 ```
 M := the merge gate merges the change      Rv := the review matches the change's current head      Ci := main's CI is green
 Rq := the policy requires the architect's approval      Ap := the architect approved the current head
-X := a contradiction exists      Fx := three fix rounds ended with findings still open
+X := a contradiction exists      Fx := three fix rounds ended with findings still open      Fc := a person requested changes on the forge
 Hr := the change surfaces for human review      Pk := the issue is parked (section 15)      Wo := the merge waits on the owner
 
-1.  Rv ∧ Ci ∧ (Rq → Ap) ∧ ¬X ∧ ¬Fx → M      [owner, 2026-10-29: "the default should be to try to make motion"]
-2.  X ∨ Fx → Hr                              [owner, 2026-10-29]
+1.  Rv ∧ Ci ∧ (Rq → Ap) ∧ ¬X ∧ ¬Fx ∧ ¬Fc → M      [owner, 2026-10-29: "the default should be to try to make motion"]
+2.  X ∨ Fx ∨ Fc → Hr                              [owner, 2026-10-29: "Human review surfaces when there are contradictions or issues or problems"]
 3.  Fx → Pk                                  [call, T3 design §5: the three-round ping becomes a park]
 4.  ¬Wo                                      [owner, 2026-10-29: merges waiting on the owner are removed]
 ∴   a merge waits on the architect only where the policy requires it, never on the owner, and the owner sees a change only when something is wrong
+```
+
+The gate is the same for every workflow. "The review" in the rule above is the engine's review panel, so a workflow with no review stage still has its change reviewed before it merges. A person's forge approval is human review and does not stand in for the panel. A person's forge change request is an issue raised on the change, so it holds the merge and the change surfaces for human review (owner, 2026-10-29: "Human review surfaces when there are contradictions or issues or problems"). That hold fires only on a problem and never by default, so it is not one of the waits section 15 removes. The fix-round limit is policy data like the other retry limits. Where the code disagrees, the rows are in `compliance.md`: a workflow with no review stage merges on the configured forge approver's approval alone (C37), code left from the removed hard stops is still threaded through the planner and the settings (C39), and the three fix rounds are a constant in the planner, not the policy's `retry_limit` (C40). The hold on a forge change request (`scripts/reconcile.py:296`) is this rule as built; C38 is withdrawn.
+
+```
+Rv := the engine's review panel reviewed the change's current head      Fa := a person approved on the forge      Fc := a person requested changes on the forge
+M := the merge gate merges      Wo := the merge waits on the owner by default      Hr := the change surfaces for human review
+Pb := a contradiction, an issue or a problem was raised
+1.  M → Rv                      [rule 1 above: Rv is the review]
+2.  ¬Wo                         [owner, 2026-10-29: the default is motion; merges waiting on the owner are removed]
+3.  Pb → Hr ∧ ¬M                [owner, 2026-10-29: "Human review surfaces when there are contradictions or issues or problems"; T3 design §5]
+4.  Fc → Pb                     [coordinator, relaying the owner's rule: a person's change request is such a problem]
+5.  Fa ∧ ¬Rv → ¬M               [from 1]
+6.  Fc → Hr ∧ ¬M                [from 3, 4]
+∴   a forge approval never replaces the panel (5), and a forge change request holds the merge and surfaces for human review (6), which is a hold on a problem and not the default wait that 2 removes
 ```
 
 The reviewer personas are the 22 personas of the `extras` plugin's code-review skill (1.2.0, `skills/code-review/personas/`). Each ships whole, as its own file under `assets/personas/`, copied with its source noted. A persona's rules are its full lens and numbered checks, never a one-line summary. Making the set pluggable is later work (owner, 2026-10-16).
@@ -112,8 +141,8 @@ The engine never starts an architect run on its own (owner, 2026-10-17). The arc
 - **A consult is a request.** The engine posts it where the architect watches, on the change or its issue, in the form `Architect review requested: <sha>`, with the findings to dispose of. It then waits for the architect's reply on the same thread, and treats the issue as waiting on the architect until the reply comes.
 - **The engine reads the reply as data:** `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>`, plus one disposition per finding.
 - **The head is the forge's.** "The current head" is the change's head as the forge adapter reports it, never a worker's local `HEAD`.
-- **Only the approval binds to the head.** An approval counts for that head only, so a new head needs a new approval and one new request.
-- **Dispositions persist.** A finding disposed as fix, file, keep or discard stays disposed across heads, keyed by its finding. A request for a later head carries only the findings not yet disposed, and a `CHANGES` reply whose findings are all disposed needs no further request until the head moves.
+- **Only the approval binds to the head.** An approval counts for that head only, so a new head needs a new approval and one new request. As built (#1197), a reply counts only when its first line is exactly `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>` for the full forge head, the engine posts one request per unapproved head, and at merge time it reads the thread again for the request's head and discards the planning pass's reading. A `CHANGES` reply sends the change down the workflow's fix edge.
+- **Dispositions persist.** A finding disposed as fix, file, keep or discard stays disposed across heads, keyed by its finding. A request for a later head carries only the findings not yet disposed, and a `CHANGES` reply whose findings are all disposed needs no further request until the head moves. This is not built: dispositions are not stored, and each request carries every finding of the latest review (`compliance.md` row C36).
 - **The architect grades and signals unprompted** (owner, 2026-10-29, T3 design §11). This replaces the rule that a new architect run happened only when the owner asked for one. The architect grades compliance after each merge to main and whenever a worker or the coordinator reports a mismatch between a decision and the code (call), records each gap as a row in `compliance.md`, and signals the coordinator as section 16 sets out. The policy, the planner and the trio never start a second architect session beside the standing one, and how the standing session is started and kept alive is the builder's.
 
 ```
@@ -573,6 +602,25 @@ Hit := a rejected alternative matches a      Sl := the tool returns that alterna
 ∴   history reaches a worker only on a justified, approved and logged request, and a rejected approach reaches it without the history around it
 ```
 
+As built (#1181), the rules above hold this way:
+- **The tool.** A worker reaches the graph only through the engine MCP server's `decisions` tool: the current leaves, or a request for ancestors or for whether an approach was rejected. The coordinator, the architect and the owner use the `decisions` command line (`decisions_cli.py`), which refuses to run under a worker's binding.
+- **A grant is capped to the depth the justification names.** The coordinator's judgement (`decision_history.judge_justification`) grants one level unless the justification itself names more (a number of levels, "grandparent", "two hops"), and never more than the worker asked for. Every grant is a row in the store's grant log. Where the coordinator records a verdict by hand (`decisions decide`), the depth is not yet capped (`compliance.md` row C41).
+- **No direct read.** The worker guard denies a worker's `sqlite3` (or `sqlite`), any run of `decisions_cli.py`, and `chief-of-stuff decisions`, with the reason that history is reached only through the tool. The guard is a Claude Code hook, so a worker on a host without that Bash guard can still open the store directly (`compliance.md` row C42).
+- **The worker waits without polling a model.** The tool records the request, opens a named pipe for its verdict, and only then posts the request to the coordinator. Each wait cycle checks the store first and returns at once when a verdict is already there; otherwise it waits on the pipe, registered as a reader on the server's event loop, which the coordinator's verdict writes to. A one-second recheck of the store covers a pipe that could not be opened or a missed wake.
+- **The graph's storage is reversible.** Migration `0012_decision_graph` keeps the graph in the store and has a downgrade, as does `0011_rotation_records` (#1187). Migrations `0001` to `0010` have none, so the store steps back no further than `0010`.
+
+```
+Rq := a worker requests history      Tl := the request goes through the decisions MCP tool      Gd := the guard denies the command
+Dr := the command reads the store or the decisions CLI directly      Cg := the worker's host runs the Claude Code Bash guard
+Dj := the depth the justification names      Rd := the depth the worker asked for      Ad := the approved depth
+Vr := a verdict is recorded      Pw := the worker's tool is waiting on the pipe      Wk := the worker's tool returns
+1.  Dr ∧ Cg → Gd                         [scripts/guard_commands.py:72, :428; guard/hooks/hooks.json:4]
+2.  Dr ∧ ¬Cg → ¬Gd                       [guard/hooks/hooks.json:4: the guard is a Claude Code hook; C42]
+3.  Ad = min(Rd, Dj), Dj = 1 when the text names no depth      [scripts/decision_history.py:180; owner, 2026-10-29: "as far up as the justification requires"]
+4.  Vr → Wk                              [scripts/engine_mcp.py:132: the store is checked first; :149: the pipe wakes the loop]
+∴   on a Claude host every worker read of history goes through the tool (1), the depth granted never exceeds what the justification names (3), and a verdict reaches the waiting worker without a model loop (4); on other hosts, 2 is the open gap
+```
+
 ## 18. Observability, heartbeat and stalls
 
 The coordinator's dashboards are shown in T3 (owner, 2026-10-29, T3 design §10). The board, the decisions, the per-issue pages and the flow and Gantt charts are still rendered by the page server from the tracker and the store, and T3 shows them. Each task links to its worker's thread. The page server still records and never acts (section 6).
@@ -591,25 +639,49 @@ The engine has a heartbeat, in both of two forms (owner, 2026-10-29).
 - **B. The pinned board.** The board pinned in a T3 Browser panel, with the heartbeat's age at its top. T3 does not keep a pin across restarts. If the rename path fails, B alone carries the heartbeat (call).
 - **Deep links.** A dashboard page links to a thread as `t3code://threads/<environment>/<thread>`. The `<environment>` part is read from T3's data directory (its `environment-id`) and is never hard-coded (call). The `t3-thread://` form works only as a chat chip and is never written into HTML. Behaviour in the desktop app is untested (section 19).
 
+The heartbeat's status is computed once and delivered to sinks (#1179).
+- **One status, two forms.** `heartbeat.status` (Use Cases) classifies each item as running, stalled, parked, done, or done on assumptions, from plain facts. It gives one short line, short enough for a thread title (`chief · N running · N stalled · N parked · N done · N assumed · tick HH:MM`), and one longer summary that names the age of the last tick and each stalled and parked item with its reason. Whether a running worker is stalled is `worker_health.silence`'s call, not a second judgement in the heartbeat.
+- **A sink is where the heartbeat shows.** `heartbeat.Sink` is the seam, and `heartbeat.deliver` hands the status to every sink. A sink that fails is reported as `name: reason` and never stops the other sinks or the engine. The engine delivers after each pass and writes each failure to its engine log.
+- **The file sink is the one built.** `heartbeat_store.FileSink` writes the status to the engine state directory, and the board and the report read it there. A T3 thread-title sink (form A) and a pinned-board sink (form B) plug in at the same seam. Neither is built, and both need the engine's MCP client, which waits on the owner's approval (section 19). Until then the file carries the heartbeat, which is the design's fallback when the rename fails.
+- **The report page.** The page server renders `/report` (`heartbeat_page.py`) from the delivered file. It lists done, done on assumptions, and parked, each item linked to its worker's thread or, without one, to its issue page, under the heartbeat's line and summary. It reads and never acts.
+
+```
+St := the heartbeat status      Sk := a sink      F(Sk) := Sk failed to deliver St
+Ot := the other sinks still receive St      En := the engine pass continues      Lg := F(Sk) is written to the engine log
+Fs := the file sink delivered St      Rp := /report and the board show St
+1.  ∀Sk: F(Sk) → Ot ∧ En ∧ Lg      [#1179: heartbeat.deliver; the engine's beat after each pass]
+2.  Fs → Rp                         [#1179: the page server reads the file the file sink wrote]
+∴   a failing title or board sink never hides the heartbeat that the file sink delivered (1, 2)
+```
+
 The stall watcher is a small, non-model watcher in the engine (call, T3 design §10). It is not in the page server, which records and never acts, and not in the coordinator, which stays on prioritization and execution.
-- **Stalled** means a worker's item count and update time have stopped moving past a threshold, after a startup grace period. The grace period defaults to three minutes and is configurable; the thresholds are the builder's.
-- **Waiting is not stalled.** A pending request count above zero is a worker waiting: the coordinator answers it as section 17 describes, and it counts as a stall only when it stays unanswered past a threshold.
-- **Recovery follows section 15's outcomes** (call), and a relaunch after a stall counts as a failure.
-- **The judgement is pure.** It belongs with the stall judgement already in `worker_health.py` (Use Cases), fed the thread's state as plain facts; the engine gathers the facts, acts on the verdict, and the page server displays it (architect, by section 1: one stall judgement, not two).
+- **Stalled** means a worker's item count and update time have stopped moving past a threshold, after a startup grace period. The grace period defaults to three minutes and is configurable; the thresholds are the builder's. As built, one setting, `[workers.stall] after_minutes` (default 3), is both the grace period and the silence threshold.
+- **Waiting is not stalled.** A pending request count above zero is a worker waiting: the coordinator answers it as section 17 describes, and it counts as a stall only when it stays unanswered past a threshold. A worker waiting on an architectural decision or a split trio waits without expiry, because those waits are section 15's own.
+- **Silence is suspected, never proof.** A worker whose liveness is unknown, or whose thread could not be read, is not judged stalled.
+- **Recovery follows section 15's outcomes** (call), and a relaunch after a stall counts as a failure. `[workers.stall] action` is `wait` (the default) or `restart`. With `restart`, the engine stops a stalled local process, releases its slot only once termination is verified, and relaunches it, up to `max_restarts` (default 2) per issue. The stalled attempt is recorded as a failure, and `[workers] failure_limit` (default 2) failures on an issue park it.
+- **A T3 thread is not restarted.** A stalled worker launched through T3 is treated as `wait` even when `restart` is configured, because the `t3` CLI has no cancel or interrupt (section 13). It stays a suspected stall until the owner approves a cancellation mechanism (section 19).
+- **The judgement is pure.** `worker_health.stall` (Use Cases) sits beside `worker_health.silence`, the stall judgement already there, and is fed the worker's evidence as plain facts (liveness, last activity, pending requests and since when, a decision wait). The engine gathers the facts, acts on the verdict, and the page server displays it (architect, by section 1: one stall judgement, not two).
 
 ```
 Ic := the item count and update time have stopped moving past the threshold      Gp := the startup grace period has passed
 Pr := the pending request count is above zero      Pu := a pending request stayed unanswered past its threshold
+Dw := the worker waits on an architectural decision or a split trio      Uk := the worker's liveness or thread state is unknown
 St := the worker is stalled      Wt := the worker is waiting      Rc := recovery follows section 15
+Rs := [workers.stall] action is restart      T3 := the worker was launched through T3      Rl := the engine stops and relaunches it
+Mx := the issue reached max_restarts      Fl := the stall counts as a failure
 
-1.  Gp ∧ Ic ∧ ¬Pr → St      [call, T3 design §10]
-2.  Pr ∧ ¬Pu → Wt ∧ ¬St     [call, T3 design §10: waiting is not stalled]
-3.  Pr ∧ Pu → St            [call, T3 design §10]
-4.  St → Rc                 [call, T3 design §10]
-∴   every stall is detected without a model turn and recovered by the unattended outcomes, and a waiting worker is answered, not relaunched
+1.  Gp ∧ Ic ∧ ¬Pr ∧ ¬Dw ∧ ¬Uk → St      [call, T3 design §10; worker_health.stall]
+2.  Pr ∧ ¬Pu → Wt ∧ ¬St                 [call, T3 design §10: waiting is not stalled]
+3.  Pr ∧ Pu → St                        [call, T3 design §10]
+4.  Dw → Wt ∧ ¬St                       [section 15: an architectural or split-trio wait is not a stall]
+5.  Uk → ¬St                            [#1163: silence is suspected, never proof]
+6.  St → Rc                             [call, T3 design §10]
+7.  St ∧ Rs ∧ ¬T3 ∧ ¬Mx → Rl ∧ Fl       [#1163: bounded local recovery; section 15: a stall relaunch is a failure]
+8.  St ∧ T3 → ¬Rl                       [#1163: the t3 CLI has no cancel; section 13]
+∴   every stall is detected without a model turn and recovered by the unattended outcomes; a waiting worker is answered, not relaunched; and a T3 worker is held as waiting until a cancel exists (8)
 ```
 
-An unattended run ends with a report to the owner: done, done on assumptions, and parked (architectural, or failed twice, with what was tried). An append-only action log backs it, and the engine's store is its natural home; where it lives is the builder's. The mockup `design/since-you-last-looked-laptop.html` appears to be its surface, and the builder confirms it.
+An unattended run ends with a report to the owner: done, done on assumptions, and parked (architectural, failed twice, or a split trio, with what was tried). `/report` is that report's page. An append-only action log backs it, and the engine's store is its natural home; where it lives is the builder's. The mockup `design/since-you-last-looked-laptop.html` appears to be its surface, and the builder confirms it. The engine records no marker today for an architectural park, a split trio, or an assumption the trio made, so the heartbeat infers each from other records (`compliance.md` row C32).
 
 ```
 H := the owner returns after being away      P := significant progress was made      S := the owner learns of a stall late or never
@@ -628,6 +700,7 @@ These are unsettled. Nothing in this document settles them, and work that depend
 - Interrupting and renaming a thread from outside T3. The `t3` CLI has neither; both are MCP tools that need an outside-agent login and an MCP client in the engine (section 18, heartbeat A; and cancel, section 13). That client is a new dependency, so it is adopted only on the owner's approval.
 - A cross-project meta dashboard, deferred (section 12).
 - Dependencies between issues in different projects, which section 12 leaves uncovered (`compliance.md` row C29).
+- Whether the worker guard should deny destructive and credential commands it allows today. On main at 11c445c5, `guard_commands.denial_reason` gives no reason for `git reset --hard`, `git clean -fdx`, `rm -rf /` or reading `~/.ssh/id_rsa`, so a Claude worker may run each. Section 15 keeps the guard as automation that confines merges, protected pushes and stage writes to the engine, and removes every guard rule whose job is a hard stop. Neither settles whether denying a destructive or credential command is a hard stop or a safety check, so this is the owner's question, not a decision (sections 13 and 15).
 
 Answered by the spike notes of pull request 1188 (#1178, T3 0.1.3) and now stated in section 13: named-agent launch parity (the agent's prompt and tools apply, the rotation entry's model wins); how a T3 worker reaches the engine's report and ask server and which runtime mode it runs under (in-tree `.mcp.json`, T3's default `auto` mode); and how T3's worktrees and the engine's reconcile (each engine worktree is registered as a T3 project). Two spike points stay untested: a plugin-qualified agent name in the tree's `agent` setting, and an agent whose `tools:` list must also admit the engine's MCP tools.
 
@@ -635,9 +708,11 @@ Decided but not built yet, after #1178. Each is required by the section named, a
 - Live messages to a T3 worker: `worker.deliver_messages` fails them as "started without live messaging"; `t3 thread send` would carry them (section 13).
 - Thread links on the issue pages and the workers page; only the board links the thread (sections 13 and 18).
 - Mapping the engine's `[workers] claude_as_profile` to a T3 provider instance; every T3 worker runs under T3's default `claudeAgent` (sections 10 and 13).
-- Liveness and stalls from the thread's state; they still come from the runner process (sections 13 and 18).
 - Codex, Cursor and Antigravity under T3; only Claude entries launch through it, since each other runtime needs its own channel file there (section 13, call).
-- Cancelling the thread itself; cancel stops the runner, not the thread, until the MCP client above is approved (section 13).
+- Cancelling the thread itself; cancel stops the runner, not the thread, until the MCP client above is approved (section 13). A stalled T3 worker is therefore held as a wait (section 18; `compliance.md` row C33).
+- The heartbeat's thread-title and pinned-board sinks (section 18; `compliance.md` row C35).
+
+Built since: a T3 worker's liveness and stall evidence come from its thread (`t3_adapter.observe` reads the thread's status, update time and pending request count), not from the runner process. A thread that cannot be read is unknown evidence, never a stall (sections 13 and 18).
 
 ```
 Mc := an MCP client is added to the engine      Ap := the owner approved it as a new dependency
@@ -645,4 +720,14 @@ In := a thread can be interrupted from the engine      Rn := a thread can be ren
 1.  Mc → Ap          [the owner's rule: every new library, package or tool is confirmed before adoption]
 2.  In ∨ Rn → Mc     [#1178: the t3 CLI has no interrupt or rename; both are MCP tools]
 ∴   In ∨ Rn → Ap: neither the thread cancel nor heartbeat A's rename is built before the owner approves the client
+```
+
+```
+Dc := the command is destructive or reads a credential (git reset --hard, git clean -fdx, rm -rf /, reading ~/.ssh/id_rsa)
+Gd := the worker guard denies it      Hs := denying it is a hard stop      Ow := the owner has answered
+1.  ¬Gd for each Dc today        [guard_commands.denial_reason on main at 11c445c5]
+2.  Hs → ¬Gd                     [section 15: guard rules whose job is a hard stop are removed]
+3.  ¬Hs → Gd is permitted        [section 15: the guard stays as automation]
+4.  neither Hs nor ¬Hs is stated [sections 13 and 15]
+∴   whether Gd should hold for Dc waits on Ow; until then the guard stays as built (1)
 ```
