@@ -7,7 +7,7 @@
 The user, 2026-09-26 (#104): "I also want to be able to leave review comments in PRs and have them get
 addressed and picked up." A thread counts when `[workflow] approver`, the user's forge username, wrote in
 it and it is unresolved. It needs work while the user has the last word, and awaits the user once someone
-answers. A reply never resolves a thread: resolving is the user's. REF is `#12/<comment id>` on GitHub and
+answers. A reply never resolves a thread; the coordinator verifies fixes and resolves addressed threads without an owner wait. REF is `#12/<comment id>` on GitHub and
 `!5/<discussion id>` on GitLab, as the listing prints it.
 """
 
