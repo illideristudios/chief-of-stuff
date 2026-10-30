@@ -56,7 +56,7 @@ COMMANDS = {
     "architect-signals": "scripts/architect_signals_cli.py",
 }
 # Commands whose scripts import store (SQLAlchemy/Alembic).
-STORE_BACKED = frozenset({"adopt", "board", "decision", "decisions", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
+STORE_BACKED = frozenset({"adopt", "board", "decisions", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
 
 
 def wrapper_text(current: Path) -> str:
