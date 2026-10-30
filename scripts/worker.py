@@ -1025,13 +1025,13 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
+            # Durable exit evidence or confirmed death releases the workspace stack, even if completion waits.
+            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
+            data = _resume(store, key)  # Later quota/suite writes must retain the teardown marker.
             missing_exit = not (run_dir / "exit.json").exists()
             if missing_exit and not via_t3 and not any((run_dir / name).exists() for name in ("stdout", "stderr")) and not (
                     store.segment_reports(key, segment.stage, segment.attempt)):
                 continue  # no adapter output or report to classify yet; the planner still sees the abandoned run
-            # Durable exit evidence or confirmed death releases the workspace stack, even if completion waits.
-            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
-            data = _resume(store, key)  # Later quota/suite writes must retain the teardown marker.
             code, exited_at = (((t3_adapter.outcome(remote) if via_t3 and remote is not None else 1), None)
                                if missing_exit else _exit_record(run_dir))
             runtime = record.get("runtime", "claude")

@@ -1906,6 +1906,7 @@ class RecoveryTest(unittest.TestCase):
         mock.patch.object(engine.notify, "sync_workspace").start()
         self.identity = mock.patch.object(worker.process_status, "identity", return_value="birth").start()
         mock.patch.object(worker.process_status, "carriers", return_value=[]).start()
+        mock.patch.object(worker.claude_adapter, "require_worker_clock").start()  # the worker clock check is #636's
         self.started = []
         self.start = mock.patch.object(worker.claude_adapter, "start", side_effect=self.fake_start).start()
 

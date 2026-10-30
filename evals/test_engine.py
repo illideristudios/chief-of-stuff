@@ -142,7 +142,7 @@ class EngineTest(unittest.TestCase):
         model = mock.Mock()
         actions = self.run_pass(model=model)
         model.assert_not_called()
-        self.assertEqual(actions, [reconcile.Escalate(KEY, "park: two failures on this issue")])
+        self.assertEqual(actions, [reconcile.Escalate(KEY, "park: two failures on this issue", "implement")])
         self.assertEqual(self.db.decisions(KEY), [])
 
     def test_recovery_candidates_skip_an_active_stall_stop(self):
