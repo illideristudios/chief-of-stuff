@@ -376,6 +376,14 @@ class SharedReportPageTest(unittest.TestCase):
         self.assertIn(expected, html)
         self.assertIn("order: #12 #13", html)
 
+    def test_merge_order_panel_links_the_route_not_the_file(self) -> None:
+        import board_sources as bs
+        import render_board as rb
+
+        sources = bs.Sources({}, {}, {}, (), {}, home=bs.backlog.GitHubBacklog("o/app"))
+        panel = rb.merge_order(sources)
+        self.assertEqual(panel.href, "/merge-order")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,10 +4,12 @@
 The pages are routes: `/` the board, `/workers` the running workers and today's ends, `/decisions` the list,
 `/decisions/<slug>` an authored decision page, `/decisions/<id>` (digits only) a store decision's page rendered
 from the store (#945), `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
-and diff. `/workers/` and `/decisions/` are the same pages as the bare routes (#988); other directory URLs stay 404
-(#340). A missing `/favicon.ico` answers 204 so the browser console stays clean; a real icon in the pages dir is
-served. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
-`issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the file's own name is a 404.
+and diff, `/report` the heartbeat report, `/merge-order` the shared merge-order report (#75). `/workers/` and
+`/decisions/` are the same pages as the bare routes (#988); other directory URLs stay 404 (#340). A missing
+`/favicon.ico` answers 204 so the browser console stays clean; a real icon in the pages dir is served. Each is
+rendered into its file (`<day>-board.html`, `workers.html`, `report.html`, `merge-order.html`, `decisions.html`,
+`decision-<slug>.html`, `issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the
+file's own name is a 404.
 A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the settings TOML, the decision JSON,
 `.sources.json`) is newer than its last render, or differs in bytes from what that render read, and `/workers` on every GET (it reads the session logs too), and a thread refreshes `.sources.json` from the forge every minute. An open tab
 reloads itself when the file changes.
@@ -77,7 +79,7 @@ REFRESH = 60  # seconds between forge reads
 POLL = 5  # seconds between healthy server checks
 RETRY_MIN = 1
 RETRY_MAX = 60
-RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|report\.html|decisions\.html|decisions-graph(?:-[1-9][0-9]{0,18})?\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
+RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|report\.html|merge-order\.html|decisions\.html|decisions-graph(?:-[1-9][0-9]{0,18})?\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
 GRAPH_NODE_ROUTE = re.compile(r"/decisions/graph/([1-9][0-9]{0,18})")
 WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
@@ -504,7 +506,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                 return ""
             days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
             day = today if (root / "store.db").is_file() or today in days or not days else days[-1]
-        elif store_decision or decision_graph or name.startswith("issue-") or name in ("workers.html", "report.html"):
+        elif store_decision or decision_graph or name.startswith("issue-") or name in ("workers.html", "report.html", "merge-order.html"):
             day = today
         elif name == "decisions.html":
             days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
@@ -540,6 +542,8 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                 data = _page_data(root)
                 if name == "report.html":
                     heartbeat_page.write(root, pages_dir)
+                elif name == "merge-order.html":
+                    render_board.write_merge_order(root, pages_dir)
                 elif decision_graph:
                     navigation = _navigation(root, pages_dir, data)
                     if name == "decisions-graph.html":
@@ -691,7 +695,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return False
-        elif path in ("/workers", "/decisions", "/report"):
+        elif path in ("/workers", "/decisions", "/report", "/merge-order"):
             self.path = f"{path}.html"
         elif path == "/decisions/graph":
             self.path = "/decisions-graph.html"
@@ -811,7 +815,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _serve(self, body: bool):
         # Classify before _allowed, which may render and publish dynamic pages.
         path = unquote(urlsplit(self.path).path)
-        dynamic = (path in ("/", "/all", "/workers", "/workers/", "/decisions", "/decisions/", "/report")
+        dynamic = (path in ("/", "/all", "/workers", "/workers/", "/decisions", "/decisions/", "/report", "/merge-order")
                    or path.startswith(("/workers/sessions/", "/decisions/", "/issues/"))
                    or path.lower().endswith(".html"))
 
