@@ -483,6 +483,13 @@ class OwnershipTest(unittest.TestCase):
                                      worktrees=[{"name": "wt", "branch": "feature"}])
         self.assertIn("blob/HEAD/src/app.py#L1", refs("src/app.py:warm", GH, workspace / "trees" / "wt"))
 
+    def test_a_symlink_loop_leaves_file_references_as_text(self):
+        root = self.repo({"src/app.py": "x = 1\n"})
+        (root / "loop").symlink_to("loop")
+        html = refs("loop/app.py:1", GH, root)
+        self.assertNotIn("<a", html)
+        self.assertIn("loop/app.py:1", html)
+
     def test_one_render_looks_up_a_path_once_and_the_next_render_sees_a_new_origin(self):
         import git_trees
         root = self.repo({"src/app.py": "x = 1\n", "docs/note.md": "note\n"})
