@@ -18,7 +18,7 @@ import tempfile
 import threading
 import unittest
 from dataclasses import replace
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from html import unescape
 from pathlib import Path
 from unittest import mock
@@ -109,7 +109,8 @@ OTHER = bs.Change("!50", "https://forge.example/grp/app/-/merge_requests/50", "W
 
 
 def sources(*changes: bs.Change, issue: bs.Issue = ISSUE) -> bs.Sources:
-    return bs.Sources({}, {"#109": issue}, {c.ref: c for c in changes}, (), {})
+    return bs.Sources({}, {"#109": issue}, {c.ref: c for c in changes}, (), {},
+                      bs.backlog.Backlog('https://forge.example', 'grp/app'))
 
 
 def page(number: int = 109, src: bs.Sources | None = None, today: str | None = None,
@@ -117,7 +118,7 @@ def page(number: int = 109, src: bs.Sources | None = None, today: str | None = N
     if ip is None:
         raise AssertionError("scripts/issue_page.py does not exist yet")
     trackers = trackers or [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, today if today is not None else today_tracker())]
-    return ip.render(number, trackers, src if src is not None else sources(MR, OTHER), NOW, LANES)
+    return ip.render(number, trackers, src if src is not None else sources(MR, OTHER), NOW, LANES, BoardTest().cfg())
 
 
 def text(html: str) -> str:
@@ -151,6 +152,22 @@ class RenderTest(unittest.TestCase):
         self.assertIn('href="/"', header[0])
         self.assertIn("Upload size limit", text(re.search(r"<h1\b.*?</h1>", header[0], re.S)[0]))
         self.assertRegex(text(header[0]), r"(?i)\bneeds input\b")
+
+    def test_a_historical_running_row_does_not_add_a_running_header_chip(self):
+        header = re.search(r"<header\b.*?</header>", page(today=TODAY_START), re.S)[0]
+        self.assertIn('class="chip needs-input">NEEDS INPUT', header)
+        self.assertNotIn('class="chip running"', header)
+
+    def test_a_live_cached_worker_remains_visible_when_the_task_waits(self):
+        src = replace(sources(), workers=(bs.Worker("impl-a", "one-shot", "codex", "", "Upload size limit", "impl-a", NOW, None),))
+        header = re.search(r"<header\b.*?</header>", page(src=src, today=TODAY_START), re.S)[0]
+        self.assertIn('class="chip needs-input">NEEDS INPUT', header)
+        self.assertIn('class="chip running">RUNNING', header)
+        cfg = parse_coordinator("# W\n\n## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n"
+                                "- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n", TODAY)
+        board = rb.render(TODAY_START, cfg, NOW, LANES, tracker_day=TODAY, sources=src)
+        card = re.search(r'<div class="columns-card columns-flagged"[^>]*>.*?Upload size limit.*?NEEDS INPUT</div></div>', board, re.S)[0]
+        self.assertIn('data-cat="running">running', card)
 
     def test_flow_is_one_row_of_every_task_on_the_issue(self):
         # FLOW: one row, the issue's tasks merged by flow_chart.build; no other issue's row.
@@ -390,6 +407,25 @@ class ReviewTest(unittest.TestCase):
         got = text(section(page(src=sources(replace(MR, threads=()), OTHER)), "Review"))
         self.assertRegex(got, r"(?i)\bno review threads\b")
 
+    def test_a_hidden_html_comment_is_dropped_and_other_html_stays_text(self):
+        body = (
+            "Useful? React with 👍 / 👎.\n\n"
+            "<!-- codex-code-review-finding:v1 -->\n\n"
+            "<script>alert(1)</script>\n\n"
+            "<!-- spans\nlines -->\n\n"
+            "See `<!-- inline -->` and ``<!-- ticks -->``.\n\n"
+            "```suggestion\n<!-- keep -->\n```\n\n"
+            "~~~\n<!-- tide -->\n~~~\n"
+        )
+        review = section(page(src=sources(replace(MR, threads=(thread(True, "02:10", body),)), OTHER)), "Review")
+        self.assertIn("Useful? React with 👍 / 👎.", review)
+        self.assertIn("&lt;script&gt;", review)
+        self.assertNotIn("codex-code-review-finding", review)
+        self.assertNotIn("<script>", review)
+        self.assertNotIn("spans", review)
+        for kept in ("keep", "inline", "ticks", "tide"):
+            self.assertRegex(review, rf"<code[^>]*>[^<]*&lt;!-- {kept} --&gt;")
+
 
 BODY = """## Context
 
@@ -420,6 +456,210 @@ class AcceptanceTest(unittest.TestCase):
                 for bullet in ("Uploads over 25 MB are refused", "The limit is configurable", "The error names the limit"):
                     self.assertIn(bullet, text(got))
                 self.assertNotIn("not a criterion", text(got))
+
+    def test_hidden_comments_and_code_examples_are_not_criteria_or_headings(self):
+        body = """<!--
+## Acceptance
+- [x] hidden heading and criterion
+-->
+```md
+## Acceptance
+- [x] example heading and criterion
+```
+## Acceptance
+- [x] Real criterion
+<!--
+## Other
+- [ ] hidden criterion
+-->
+~~~markdown
+## Other
+- [ ] example criterion
+~~~
+- [ ] Another real criterion
+## Other
+- [ ] outside section
+"""
+        got = text(page_section(page(src=sources(issue=replace(ISSUE, body=body))), "Acceptance"))
+        self.assertIn("1 of 2 met", got)
+        self.assertIn("Real criterion", got)
+        self.assertIn("Another real criterion", got)
+        for unwanted in ("hidden", "example", "outside"):
+            self.assertNotIn(unwanted, got)
+
+    def test_quoted_headings_and_bullets_do_not_replace_or_truncate_criteria(self):
+        body = """> ## Acceptance
+> - [x] Quoted example
+
+## Acceptance
+- [ ] Actual requirement
+
+> ## Other heading
+> - [x] Quoted item
+> > - [x] Nested quoted item
+
+- [x] Another requirement
+
+## Other
+- [ ] Outside criterion
+"""
+        got = text(page_section(page(src=sources(issue=replace(ISSUE, body=body))), "Acceptance"))
+        self.assertIn("1 of 2 met", got)
+        self.assertIn("Actual requirement", got)
+        self.assertIn("Another requirement", got)
+        for unwanted in ("Quoted example", "Quoted item", "Nested quoted item", "Outside criterion"):
+            self.assertNotIn(unwanted, got)
+
+    def test_only_a_quoted_acceptance_heading_does_not_create_a_section(self):
+        issue = replace(ISSUE, body="> ## Acceptance\n> - [x] Quoted example\n")
+        got = text(page_section(page(src=sources(issue=issue)), "Acceptance"))
+        self.assertIn("No acceptance criteria", got)
+        self.assertNotIn("Quoted example", got)
+
+    def test_tracker_issue_references_set_body_and_acceptance_link_context(self):
+        cases = (
+            ("GitHub issues; repo example/repo", "other/repo#109", "https://github.com/other/repo/issues/109", "https://github.com/other/repo"),
+            ("GitHub issues; repo example/repo", "[issue](https://github.com/other/repo/issues/109)", "https://github.com/other/repo/issues/109", "https://github.com/other/repo"),
+            ("GitLab issues; host https://labs.example.test; project team/app", "https://labs.example.test/team/other/-/issues/109", "https://labs.example.test/team/other/-/issues/109", "https://labs.example.test/team/other/-"),
+        )
+        for spec, ref, url, base in cases:
+            with self.subTest(ref=ref):
+                cfg = parse_coordinator("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n- Backlog: " + spec + "\n", TODAY)
+                tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | {ref} | |\n"
+                issue = replace(ISSUE, url=url, body="## Context\nSee #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4\n")
+                key = bs.backlog.issue_ref(ref, cfg.backlog).label(cfg.backlog)
+                src = bs.Sources({"kanban": NOW}, {key: issue}, {}, (), {}, home=cfg.backlog)
+                html = ip.render(109, [(TODAY, tracker)], src, NOW, LANES, cfg=cfg)
+                for section_name in ("Issue", "Acceptance"):
+                    part = page_section(html, section_name)
+                    self.assertIn(f'href="{base}/issues/10"', part)
+                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+
+    def test_multiline_comments_in_complete_items_do_not_leak_or_count(self):
+        body = """## Acceptance
+- [x] Visible before <!-- secret
+  hidden continuation --> and after
+- [ ] <!-- hidden only
+  secret detail -->
+- [ ] <!-- secret starts
+  hidden --> Visible on continuation
+- [x] Visible criterion
+  continues here <!-- concealed -->
+"""
+        got = page_section(page(src=sources(issue=replace(ISSUE, body=body))), "Acceptance")
+        self.assertIn("2 of 3 met", text(got))
+        for visible in ("Visible before", "and after", "Visible on continuation", "continues here"):
+            self.assertIn(visible, text(got))
+        for hidden in ("secret", "hidden", "concealed"):
+            self.assertNotIn(hidden, got)
+
+    def test_unmatched_backticks_in_separate_blocks_do_not_hide_comments(self):
+        body = """## Acceptance
+- [ ] First has an unmatched ` tick
+- [x] <!-- secret list criterion -->
+- [ ] Last has an unmatched ` tick
+
+A paragraph with ` unmatched.
+
+<!-- secret paragraph -->
+
+Another paragraph with ` unmatched.
+
+Real `<!-- inline example -->` stays.
+
+```md
+<!-- fenced example -->
+```
+"""
+        issue = replace(ISSUE, body=body)
+        issue_html = ip._issue_section(issue, ip.Linker())
+        acceptance = ip._acceptance(issue)
+        for result in (issue_html, acceptance):
+            self.assertNotIn("secret list criterion", result)
+            self.assertNotIn("secret paragraph", result)
+        self.assertIn("0 of 2 met", text(acceptance))
+        self.assertIn("inline example", issue_html)
+        self.assertIn("fenced example", issue_html)
+
+    def test_comment_only_items_are_not_criteria(self):
+        body = "## Acceptance\n- [x] <!-- hidden\n  details -->\n- <!-- second -->\n"
+        got = text(page_section(page(src=sources(issue=replace(ISSUE, body=body))), "Acceptance"))
+        self.assertIn("No acceptance criteria", got)
+        self.assertNotIn("hidden", got)
+
+    def test_distinct_same_number_refs_do_not_resolve_to_a_numeric_page(self):
+        cases = (
+            ("GitHub issues; repo example/repo", "other/repo#109", "https://github.com/example/repo/issues/109"),
+            ("GitLab issues; host https://labs.example.test; project team/app", "https://labs.example.test/team/other/-/issues/109", "https://elsewhere.example.test/team/other/-/issues/109"),
+        )
+        for spec, first, second in cases:
+            with self.subTest(spec=spec):
+                cfg = parse_coordinator("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n- Backlog: " + spec + "\n", TODAY)
+                tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| One | Item one | Robin | open | {TODAY} | | M | build | implement | {first} | |\n| Two | Item two | Robin | open | {TODAY} | | M | build | implement | {second} | |\n"
+                self.assertIsNone(ip.render(109, [(TODAY, tracker)], bs.Sources({}, {}, {}, (), {}, home=cfg.backlog), NOW, LANES, cfg=cfg))
+
+    def test_equivalent_tracker_refs_choose_the_issue_repository_for_links(self):
+        cases = (
+            ("GitHub issues; repo example/repo", "other/repo#109", "https://github.com/other/repo/issues/109", "https://github.com/other/repo"),
+            ("GitLab issues; host https://labs.example.test; project team/app", "gitlab:labs.example.test/team/other#109", "https://labs.example.test/team/other/-/issues/109", "https://labs.example.test/team/other/-"),
+        )
+        for spec, first, second, base in cases:
+            with self.subTest(spec=spec):
+                cfg = parse_coordinator("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n- Backlog: " + spec + "\n", TODAY)
+                tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | {first} | |\n| Task two | Item two | Robin | open | {TODAY} | | M | build | implement | {second} | |\n"
+                issue = replace(ISSUE, url=second, body="See #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4")
+                key = task_forge.source_key(first, cfg.backlog)
+                src = bs.Sources({"kanban": NOW}, {key: issue}, {}, (), {}, home=cfg.backlog)
+                html = ip.render(109, [(TODAY, tracker)], src, NOW, LANES, cfg=cfg)
+                self.assertIsNotNone(html)
+                for name in ("Issue", "Acceptance"):
+                    part = page_section(html, name)
+                    self.assertIn(f'href="{base}/issues/10"', part)
+                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+
+    def test_issue_body_hides_comments_but_preserves_fenced_examples_even_when_stale(self):
+        body = """Before <!-- hidden inline
+secret --> after.
+
+````markdown
+<!-- literal four ticks -->
+```
+<!-- still literal -->
+````
+
+~~~md
+<!-- literal tilde -->
+~~~
+
+`<!-- literal inline -->`
+
+<!-- hidden block -->
+
+Before <!-- hidden fake fence
+```
+secret in fake fence
+```
+--> after.
+
+    <!-- literal indented -->
+
+<script>unsafe</script>
+"""
+        for stale in ("", "cached read failed"):
+            with self.subTest(stale=stale):
+                got = ip._issue_section(replace(ISSUE, body=body), ip.Linker(), stale=stale)
+                for hidden in ("hidden inline", "secret", "hidden block"):
+                    self.assertNotIn(hidden, got)
+                for kept in ("literal four ticks", "still literal", "literal tilde", "literal inline", "literal indented"):
+                    self.assertIn(kept, got)
+                self.assertIn("&lt;script&gt;", got)
+                self.assertNotIn("<script>", got)
+
+    def test_escaped_comment_opener_is_literal_in_issue_body(self):
+        issue = replace(ISSUE, body=r"See \<!-- literal escaped marker --> and <!-- hidden --> done.")
+        got = ip._issue_section(issue, ip.Linker())
+        self.assertIn("literal escaped marker", got)
+        self.assertNotIn("hidden", got)
 
     def test_no_acceptance_heading_says_the_issue_states_none(self):
         issue = replace(ISSUE, body="## Context\n\n- [ ] something\n")
@@ -746,6 +986,17 @@ class RouteTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(get(self.port, path).status, 404)
 
+    def test_encoded_foreign_gitlab_identity_and_source_routes(self):
+        from urllib.parse import quote
+        key = "gitlab:foreign.example:8443/team/nested/other#109"
+        tracker = next((self.root / "daily").glob("*-tracker.md"))
+        tracker.write_text(tracker.read_text().replace("#109", key))
+        path = "/issues/" + quote(key, safe="")
+        response = get(self.port, path)
+        self.assertEqual(response.status, 200)
+        self.assertIn(b"Upload size limit", response.body)
+        self.assertEqual(get(self.port, path + "/source").status, 200)
+
     def test_the_rendered_file_is_not_served_by_name(self):
         # Route: pages are routes only (as /decisions/<slug>); an `.html` name is a 404.
         self.assertEqual(get(self.port, "/issues/109").status, 200)
@@ -766,7 +1017,7 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
     NOW2 = datetime.combine(TODAY, time(20, 0), CT)
 
     def task_page(self, today: str, changes: tuple = (), now: datetime = NOW2) -> str:
-        return ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, today)], sources(*changes), now, LANES)
+        return ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, today)], sources(*changes), now, LANES, BoardTest().cfg())
 
     @staticmethod
     def flow_rows(render_call) -> dict[str, tuple]:
@@ -801,7 +1052,7 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
         # Acceptance 3: "Its elapsed and waiting totals stop at the merge time" — not keep counting past it. In
         # work_trackers() (#200's fixture from CompactWorkersTest), rev-w2 is still open at NOW (02:10); merged at
         # 01:40 it caps to "Worked 4h25m of 5h35m elapsed · 1h10m waiting", not the uncapped "4h55m of 6h05m".
-        html = ip.render(109, work_trackers(), sources(merged("#109", "01:40", 48)), NOW, LANES)
+        html = ip.render(109, work_trackers(), sources(merged("#109", "01:40", 48)), NOW, LANES, BoardTest().cfg())
         start = re.search(r"<h2[^>]*>\s*Flow\b", html)
         self.assertIsNotNone(start, "no Flow section")
         after = next((m.start() for m in re.finditer(r"<h2[^>]*>\s*(?!Flow\b)", html[start.end():])), None)
@@ -826,7 +1077,7 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
                                                        kanban=KANBAN, stage_log=[(YESTERDAY, YESTERDAY_TRACKER)],
                                                        sources=src))
         task_rows = self.flow_rows(lambda: ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, TODAY_START)],
-                                                     src, self.NOW2, LANES))
+                                                     src, self.NOW2, LANES, cfg))
         self.assertIn("Upload size limit", board_rows)
         self.assertIn("Upload size limit", task_rows)
         self.assertEqual(board_rows["Upload size limit"][1].note, task_rows["Upload size limit"][1].note)
@@ -844,7 +1095,7 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
                                                          kanban=kanban, stage_log=[(YESTERDAY, YESTERDAY_TRACKER)],
                                                          sources=src, pending_refs=refs))
                 task = self.flow_rows(lambda: ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, TODAY_START)],
-                                                        src, self.NOW2, LANES, kanban=kanban, pending_refs=refs))
+                                                        src, self.NOW2, LANES, cfg, kanban=kanban, pending_refs=refs))
                 self.assertEqual(board["Upload size limit"][1].note, f"needs input · {cause}")
                 self.assertEqual(task["Upload size limit"][1].note, f"needs input · {cause}")
 
@@ -877,7 +1128,7 @@ def midnight_page(clock: str, now: datetime) -> str:
         one_shot.update_tracker(path, "Cap uploads", "impl-1", "Robin", "done", "implemented the limit",
                                  "src/upload/limits.py", "22:15")
         closed = path.read_text().replace("| Robin | waiting |", f"| Robin | done {clock} |")
-    return ip.render(109, [(YESTERDAY, closed)], sources(), now, LANES)
+    return ip.render(109, [(YESTERDAY, closed)], sources(), now, LANES, BoardTest().cfg())
 
 
 def flow_section(html: str) -> str:
@@ -893,6 +1144,10 @@ class ClosedIssueHeaderTest(unittest.TestCase):
     HOME = Backlog("https://labs.example.test", "team/app")
     URL = "https://labs.example.test/team/app/-/issues/109"
 
+    def cfg(self):
+        # render() scopes forge facts through for_home(cfg.backlog); keep it on the closed issue's home.
+        return replace(BoardTest().cfg(), backlog=self.HOME)
+
     def closed_sources(self) -> tuple[bs.Sources, bs.Issue]:
         from datetime import timezone
 
@@ -905,27 +1160,30 @@ class ClosedIssueHeaderTest(unittest.TestCase):
         header = re.search(r"<header\b.*?</header>", html, re.S)[0]
         return re.search(r'<span class="chip[^"]*">([^<]+)</span>', header)[1]
 
+    def render_page(self, src: bs.Sources, trackers: list) -> str:
+        return ip.render(109, trackers, src, NOW, LANES, self.cfg())
+
     def test_done_tracker_and_closed_issue_show_done_or_closed_not_open(self):
         src, _ = self.closed_sources()
         tracker = DONE_TRACKER.replace("#109", self.URL)
-        chip = self.header_chip(page(109, src=src, trackers=[(TODAY, tracker)]))
-        self.assertNotRegex(chip, r"(?i)^(open|waiting|running)$")
+        chip = self.header_chip(self.render_page(src, [(TODAY, tracker)]))
+        self.assertNotRegex(chip, r"(?i)^(open|waiting|running|needs input)$")
         self.assertRegex(chip, r"(?i)^(done|closed)$")
 
     def test_render_passes_sources_home_to_flow_chart_build(self):
         src, _ = self.closed_sources()
         with mock.patch.object(fc, "build", wraps=fc.build) as build:
-            page(109, src=src, trackers=[(TODAY, DONE_TRACKER)])
-        self.assertIs(build.call_args.kwargs.get("home"), src.home)
+            self.render_page(src, [(TODAY, DONE_TRACKER)])
+        self.assertIs(build.call_args.kwargs.get("home"), self.HOME)
 
     def test_the_board_and_task_page_agree_on_a_closed_issues_flow_status(self):
         src, issue = self.closed_sources()
         tracker = DONE_TRACKER.replace("#109", self.URL)
-        cfg = BoardTest().cfg()
+        cfg = self.cfg()
         board_rows = ForgeMergedTaskPageTest.flow_rows(
             lambda: rb.render(tracker, cfg, NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
                                stage_log=[(YESTERDAY, YESTERDAY_TRACKER)], sources=src))
-        task_html = ip.render(109, [(TODAY, tracker)], src, NOW, LANES)
+        task_html = self.render_page(src, [(TODAY, tracker)])
         task_chip = re.search(r'<span class="chip (\w+)">', re.search(r"<header\b.*?</header>", task_html, re.S)[0])[1]
         status, row = board_rows["Upload size limit"]
         self.assertEqual((status, row.note), ("closed", f"closed {at(TODAY, '01:00'):%H:%M}"))
@@ -950,6 +1208,645 @@ class DoneClockAfterMidnightTest(unittest.TestCase):
         html = midnight_page("00:03", at(TODAY, "00:05"))
         flow = flow_section(html)
         self.assertRegex(flow, r"(?i)\bWorked\s+2h10m\s+of\s+3h58m\s+elapsed\s*·\s*1h48m\s+waiting\b", flow)
+
+
+def history_whens(html: str) -> list[str]:
+    """Clock texts in How it got here. Workers reuse `when` for durations in another section."""
+    return re.findall(r'<span class="when">([^<]*)</span>', section(html, "How it got here"))
+
+
+class HistoryDayTest(unittest.TestCase):
+    """A step that falls today still names its weekday, so it is not read as the previous step's day (#998)."""
+
+    def test_tracker_history_names_the_weekday_on_todays_steps(self):
+        whens = history_whens(page())
+        self.assertEqual(whens, ["Fri 22:00", *(f"Sat {t}" for t in TIMELINE[1:])])
+        self.assertTrue(all(re.fullmatch(r"[A-Z][a-z]{2} \d{2}:\d{2}", w) for w in whens))
+
+    def test_store_history_names_the_local_weekday_across_midnight(self):
+        # 04:51Z is Monday 23:51 in Chicago; 06:10Z and 07:51Z are Tuesday there. Formatting the UTC date would say Tuesday for the first.
+        import shutil
+        from test_m6_store_board import KEY, make_store_workspace
+
+        now = datetime(2026, 10, 20, 2, 51, tzinfo=CT)
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        db.upsert_item(KEY, title="First repository", stage="review")
+        db.add_log(KEY, "monday night", "2026-10-20T04:51:00+00:00")
+        db.add_log(KEY, "tuesday early", "2026-10-20T06:10:00+00:00")
+        db.add_log(KEY, "tuesday now", "2026-10-20T07:51:00+00:00")
+        html = ip.render(12, [], bs.EMPTY, now, db=task_forge.page_data(db))
+        self.assertEqual(history_whens(html), ["Mon 23:51", "Tue 01:10", "Tue 02:51"])
+
+
+class TaskPageLinksAndSafetyTest(unittest.TestCase):
+    """#996: task pages link to their verified forge issue, available change requests, reliable branches,
+    and source view; never fabricate links or infer cross-repo relationships; escape hostile inputs."""
+
+    def make_db(self):
+        import shutil
+        from test_m6_store_board import make_store_workspace
+
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        return db
+
+    def test_github_and_gitlab_store_pages_link_verified_issue_changes_live_branch_and_source(self):
+        from test_external_links import check_links
+
+        cases = (
+            (
+                "github",
+                bs.backlog.GitHubBacklog("o/app"),
+                "github:o/app#92",
+                "github:o/app#5",
+                "github:o/app#77",
+                "https://github.com/o/app/issues/92",
+                "https://github.com/o/app/issues/5",
+                "https://github.com/o/app/issues/77",
+                "#140",
+                "https://github.com/o/app/pull/140",
+                "feat/upload-limit",
+                "https://github.com/o/app/tree/feat/upload-limit",
+                "#33",
+                "https://github.com/o/app/pull/33",
+                "feat/deleted-five",
+            ),
+            (
+                "gitlab",
+                bs.backlog.Backlog("https://labs.example.test", "team/app"),
+                "gitlab:labs.example.test/team/app#92",
+                "gitlab:labs.example.test/team/app#5",
+                "gitlab:labs.example.test/team/app#77",
+                "https://labs.example.test/team/app/-/issues/92",
+                "https://labs.example.test/team/app/-/issues/5",
+                "https://labs.example.test/team/app/-/issues/77",
+                "!88",
+                "https://labs.example.test/team/app/-/merge_requests/88",
+                "feat/gl-limit",
+                "https://labs.example.test/team/app/-/tree/feat/gl-limit",
+                "!12",
+                "https://labs.example.test/team/app/-/merge_requests/12",
+                "feat/gl-deleted",
+            ),
+        )
+        for (
+            forge_name,
+            home,
+            open_key,
+            merged_key,
+            early_key,
+            open_issue_url,
+            merged_issue_url,
+            early_issue_url,
+            open_ref,
+            open_change_url,
+            live_branch,
+            live_branch_url,
+            merged_ref,
+            merged_change_url,
+            deleted_branch,
+        ) in cases:
+            with self.subTest(forge=forge_name):
+                db = self.make_db()
+                db.upsert_item(open_key, title="Open task", stage="review")
+                db.upsert_item(merged_key, title="Merged task", stage="merge", forge_state="closed")
+                db.upsert_item(early_key, title="In-flight task", stage="implement")
+                db.set_resume(early_key, {"work_branch": "work/77"})
+
+                src = bs.Sources(
+                    {},
+                    {
+                        "#92": bs.Issue("#92", open_issue_url, "Open task", "open", (), "### Acceptance\n- [x] linked\n"),
+                        "#5": bs.Issue("#5", merged_issue_url, "Merged task", "closed", ()),
+                        "#77": bs.Issue("#77", early_issue_url, "In-flight task", "open", ()),
+                    },
+                    {
+                        open_ref: bs.Change(
+                            open_ref, open_change_url, "Open change", "open", False, "passed", True, 1, None, "main",
+                            ("src/app.py",), ("#92",), head="a7f03d1" + "0" * 33, branch=live_branch, branch_url=live_branch_url,
+                        ),
+                        merged_ref: bs.Change(
+                            merged_ref, merged_change_url, "Merged change", "merged", False, "passed", True, 1, NOW, "main",
+                            (), ("#5",), head="b8e14c2" + "0" * 33, branch=deleted_branch, branch_url="",
+                        ),
+                    },
+                    (),
+                    {},
+                    home=home,
+                )
+                pdata = task_forge.page_data(db)
+
+                # 1. Open task with open change and verified live branch:
+                open_html = ip.render(open_key, [], src, NOW, LANES, replace(BoardTest().cfg(), backlog=home), db=pdata)
+                check_links(self, open_html)
+                open_source = f"{ip.issue_href(open_key)}/source"
+                self.assertIn(f'href="{open_issue_url}"', re.search(r"<header\b.*?</header>", open_html, re.S)[0])
+                self.assertIn(f'href="{open_source}"', re.search(r"<header\b.*?</header>", open_html, re.S)[0])
+                self.assertIn(f'href="{open_change_url}"', card(open_html))
+                self.assertIn(f'href="{live_branch_url}"', card(open_html))
+                open_refs = section(open_html, "References")
+                self.assertIn(f'href="{open_issue_url}"', open_refs)
+                self.assertIn(f'href="{open_change_url}"', open_refs)
+                self.assertIn(f'href="{live_branch_url}"', open_refs)
+                self.assertIn("@ a7f03d1", text(open_refs))
+                self.assertIn(f'href="{open_source}"', open_refs)
+
+                # 2. Merged task with merged change, no changed-file list, and deleted branch:
+                merged_html = ip.render(merged_key, [], src, NOW, LANES, replace(BoardTest().cfg(), backlog=home), db=pdata)
+                check_links(self, merged_html)
+                merged_source = f"{ip.issue_href(merged_key)}/source"
+                self.assertNotIn("No change names #5 yet", merged_html)
+                self.assertIn(f'href="{merged_issue_url}"', merged_html)
+                self.assertIn(f'href="{merged_change_url}"', card(merged_html))
+                merged_refs = section(merged_html, "References")
+                self.assertIn(f'href="{merged_change_url}"', merged_refs)
+                self.assertIn(deleted_branch, text(merged_refs))
+                self.assertNotIn("/tree/", merged_html)
+                self.assertIn(f'href="{merged_source}"', merged_refs)
+
+                # 3. Task with no change yet, only a local worktree branch in resume:
+                early_html = ip.render(early_key, [], src, NOW, LANES, replace(BoardTest().cfg(), backlog=home), db=pdata)
+                check_links(self, early_html)
+                early_source = f"{ip.issue_href(early_key)}/source"
+                early_refs = section(early_html, "References")
+                self.assertIn(f'href="{early_issue_url}"', early_refs)
+                self.assertIn(f'href="{early_source}"', early_refs)
+                self.assertIn("work/77", text(early_refs))
+                self.assertIn("worktree", text(early_refs))
+                self.assertNotIn("/tree/", early_html)
+
+    def test_missing_forge_data_never_fabricates_issue_change_or_branch_links(self):
+        db = self.make_db()
+        key = "github:o/app#92"
+        db.upsert_item(key, title="Offline task", stage="implement")
+        html = ip.render(key, [], bs.EMPTY, NOW, LANES, db=task_forge.page_data(db))
+        self.assertIsNotNone(html)
+        self.assertNotIn("https://github.com/", html)
+        self.assertNotIn("http://", html)
+        # Only the stylesheet font link in HEAD is https://; main body has zero external hrefs.
+        main = re.search(r"<main\b.*?</main>", html, re.S)[0]
+        self.assertEqual(re.findall(r'href="https?://[^"]*"', main), [])
+        self.assertIn("#92", text(main))
+        self.assertIn(f'href="{ip.issue_href(key)}/source"', main)
+
+    def test_numeric_route_does_not_infer_home_repo_issue_or_change_for_cross_repo_task(self):
+        db = self.make_db()
+        db.upsert_item("github:example/other#12", title="Right other-repo task", stage="implement")
+        src = bs.Sources(
+            {},
+            {"#12": bs.Issue("#12", "https://github.com/example/repo/issues/12", "Wrong home issue", "open", ())},
+            {"#55": bs.Change("#55", "https://github.com/example/repo/pull/55", "Wrong home PR", "open", False,
+                              "passed", True, 1, None, "main", ("src/a.py",), ("#12",),
+                              branch="feat/wrong", branch_url="https://github.com/example/repo/tree/feat/wrong")},
+            (),
+            {},
+            home=bs.backlog.GitHubBacklog("example/repo"),
+        )
+        html = ip.render(12, [], src, NOW, LANES, db=task_forge.page_data(db))
+        self.assertIsNotNone(html)
+        self.assertIn("Right other-repo task", text(html))
+        for wrong in ("example/repo/issues/12", "example/repo/pull/55", "example/repo/tree/feat/wrong",
+                      "Wrong home issue", "Wrong home PR", "#55"):
+            self.assertNotIn(wrong, html)
+
+        # Same non-inference for a tracker task naming `example/other#12` on numeric route `/issues/12`:
+        cross_tracker = ROUTE_TRACKER.format(day=TODAY.isoformat()).replace("| #109 |", "| example/other#12 |").replace(
+            "Upload size limit", "Cross tracker task"
+        )
+        tracker_html = ip.render(12, [(TODAY, cross_tracker)], src, NOW, LANES)
+        self.assertIsNotNone(tracker_html)
+        for wrong in ("example/repo/issues/12", "example/repo/pull/55", "Wrong home issue", "Wrong home PR"):
+            self.assertNotIn(wrong, tracker_html)
+
+    def test_escaping_and_unsafe_url_schemes_are_neutralized(self):
+        hostile_issue = bs.Issue(
+            "#109",
+            "javascript:alert('issue')",
+            '<img src=x onerror=alert(1)> & "quote"',
+            "open",
+            (),
+        )
+        hostile_thread = bs.ReviewThread(
+            resolved=False,
+            author='<b>mallory</b>',
+            body="check",
+            at=NOW,
+            url="data:text/html,<script>alert(1)</script>",
+        )
+        hostile_change = bs.Change(
+            "!48",
+            "javascript:alert('mr')",
+            '<script>alert("title")</script>',
+            "open",
+            False,
+            "passed",
+            False,
+            0,
+            None,
+            'main"><script>alert(2)</script>',
+            ('src/"evil"<1>.py',),
+            ("#109",),
+            head="deadbeef",
+            threads=(hostile_thread,),
+            branch='feat/"xss"<branch>',
+            branch_url="javascript:alert('branch')",
+        )
+        html = page(src=sources(hostile_change, issue=hostile_issue))
+        self.assertNotIn("<script>alert", html)
+        self.assertNotIn("<img src=x", html)
+        self.assertNotIn("<b>mallory</b>", html)
+        self.assertNotRegex(html, r'(?i)href="\s*(?:javascript:|data:)')
+        self.assertNotIn('href=""', html)
+        self.assertIn("&lt;script&gt;alert(&quot;title&quot;)&lt;/script&gt;", html)
+        self.assertIn("feat/&quot;xss&quot;&lt;branch&gt;", html)
+
+
+def page_section(html: str, heading: str) -> str:
+    """The top-level `<section>` whose own `<h2>` heading starts with `heading` (ignoring `<h2>` inside `.prose`)."""
+    for block in re.findall(r"<section\b.*?</section>", html, re.S):
+        if re.match(rf"<section\b[^>]*>\s*<h2[^>]*>\s*{heading}\b", block, re.I):
+            return block
+    raise AssertionError(f"no {heading!r} section")
+
+
+class StoreIssueBodyAndAcceptanceTest(unittest.TestCase):
+    """#919: store-backed task pages render the cached forge issue body and parse its Acceptance criteria."""
+
+    def setUp(self) -> None:
+        import shutil
+        from test_m6_store_board import CLAUDE_MD, KEY, make_store_workspace
+
+        self.key = KEY
+        self.root, self.db = make_store_workspace()
+        self.addCleanup(self.db.engine.dispose)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        (self.root / "CLAUDE.md").write_text(CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n", encoding="utf-8")
+        self.cfg = bs.read_config(self.root)
+        self.home = self.cfg.backlog
+        self.db.upsert_item(self.key, workflow="build", stage="implement", forge_state="open", title="Upload size limit")
+
+    def test_issue_and_workers_pages_link_the_t3_attempt_without_reading_claude_logs(self):
+        import workers_page
+        link = "t3code://threads/env-1/mcp:t-1"
+        self.db.record_segment(self.key, "implement", 1, started_at=NOW.isoformat(), runtime="claude", runner="builder")
+        self.db.update_resume(self.key, lambda data: data.update(runs={"implement-1": {"launcher": "t3", "thread_link": link, "runner": "builder",
+                            "started_at": NOW.isoformat(), "tree": str(self.root / "trees/builder"), "session_id": "s"}}))
+        data = task_forge.page_data(self.db)
+        src = bs.Sources({}, {}, {}, (), {}, home=self.home)
+        issue = ip.render(self.key, [], src, NOW, LANES, cfg=self.cfg, root=self.root, db=data)
+        (self.root / "trees/builder").mkdir(parents=True)
+        with mock.patch.object(workers_page, "activity", side_effect=AssertionError("T3 activity is not a transcript")), \
+             mock.patch.object(workers_page.session_logs, "read_claude", side_effect=AssertionError("T3 session is remote")):
+            workers = workers_page.render("", src, NOW, self.root / "trees", 4, db=data)
+            segment = data.segments()[0]
+            session = workers_page.render_session(data, segment.id, self.root / "trees", config_dir=self.root)
+            source_worker = bs.Worker("builder", "one-shot", "claude", "sonnet", "Upload size limit", "builder", NOW, None)
+            from_sources = workers_page.render("", replace(src, workers=(source_worker,)), NOW, self.root / "trees", 4, db=data)
+        for html in (issue, workers, session, from_sources):
+            self.assertIn(f'href="{link}"', html)
+            self.assertIn("T3 thread", html)
+
+    def test_store_task_renders_issue_body_and_acceptance_on_full_and_numeric_routes(self) -> None:
+        issue = bs.Issue(
+            "#12", "https://github.com/example/repo/issues/12", "Upload size limit", "open",
+            ("stage:2-implement",), body=BODY.format(heading="##"),
+        )
+        src = bs.Sources({"kanban": NOW}, {"#12": issue}, {}, (), {}, home=self.home)
+        data = task_forge.page_data(self.db)
+        for ident in (self.key, 12):
+            with self.subTest(ident=ident):
+                html = ip.render(ident, [], src, NOW, LANES, cfg=self.cfg, root=self.root, db=data)
+                self.assertIsNotNone(html)
+                issue_sec = text(page_section(html, "Issue"))
+                self.assertIn("Uploads have no cap.", issue_sec)
+                acc_sec = page_section(html, "Acceptance")
+                self.assertRegex(text(re.search(r"<h2\b.*?</h2>", acc_sec, re.S)[0]), r"\b1 of 3 met\b")
+                paired(text(acc_sec), {
+                    "Uploads over 25 MB are refused": r"met",
+                    "The limit is configurable": r"not met",
+                    "The error names the limit": r"not met",
+                })
+                self.assertNotIn("not a criterion", text(acc_sec))
+
+    def test_store_task_whose_fetched_issue_states_no_criteria_says_so_without_inferring_any(self) -> None:
+        self.db.upsert_item(self.key, workflow="build", stage="implement", forge_state="open",
+                            title="Acceptance: - [ ] should never be inferred from title")
+        issue = bs.Issue(
+            "#12", "https://github.com/example/repo/issues/12", "Upload size limit", "open",
+            (), body="## Context\n\nPlain prose without criteria.\n",
+        )
+        src = bs.Sources({"kanban": NOW}, {"#12": issue}, {}, (), {}, home=self.home)
+        html = ip.render(self.key, [], src, NOW, LANES, cfg=self.cfg, root=self.root, db=task_forge.page_data(self.db))
+        self.assertIn("Plain prose without criteria.", text(page_section(html, "Issue")))
+        acc = text(page_section(html, "Acceptance"))
+        self.assertRegex(acc, r"(?i)\bno acceptance criteria in the issue\b")
+        self.assertNotIn("should never be inferred", acc)
+
+
+class UnavailableAndStaleIssueTest(unittest.TestCase):
+    """#919: unavailable or stale issue facts are stated truthfully; criteria are never inferred from missing data."""
+
+    def setUp(self) -> None:
+        import shutil
+        from test_m6_store_board import CLAUDE_MD, KEY, make_store_workspace
+
+        self.key = KEY
+        self.root, self.db = make_store_workspace()
+        self.addCleanup(self.db.engine.dispose)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        (self.root / "CLAUDE.md").write_text(CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n", encoding="utf-8")
+        self.cfg = bs.read_config(self.root)
+        self.home = self.cfg.backlog
+        # Deliberately plant checklist-like text in the title so any inference bug would leak into Acceptance.
+        self.db.upsert_item(
+            self.key, workflow="build", stage="implement", forge_state="open",
+            title="Cap uploads - [ ] inferred criterion from title",
+        )
+
+    def assert_never_infers_or_claims_none(self, html: str) -> tuple[str, str]:
+        issue_sec = text(page_section(html, "Issue"))
+        acc_sec = text(page_section(html, "Acceptance"))
+        self.assertNotRegex(acc_sec, r"(?i)\bno acceptance criteria in the issue\b")
+        self.assertNotIn("inferred criterion", acc_sec)
+        self.assertNotRegex(acc_sec, r"\bof\s+\d+\s+met\b")
+        return issue_sec, acc_sec
+
+    def test_unloaded_cache_explains_issue_has_not_been_read_instead_of_claiming_no_criteria(self) -> None:
+        html = ip.render(self.key, [], bs.EMPTY, NOW, LANES, cfg=self.cfg, root=self.root, db=task_forge.page_data(self.db))
+        issue_sec, acc_sec = self.assert_never_infers_or_claims_none(html)
+        self.assertRegex(issue_sec, r"(?i)not been read|not read")
+        self.assertRegex(acc_sec, r"(?i)not been read|not read")
+
+    def test_forge_error_is_reported_truthfully_when_issue_cannot_be_read(self) -> None:
+        failed = bs.Sources({}, {}, {}, (), {"kanban": "gh: HTTP 503 Service Unavailable"}, home=self.home)
+        html = ip.render(self.key, [], failed, NOW, LANES, cfg=self.cfg, root=self.root, db=task_forge.page_data(self.db))
+        issue_sec, acc_sec = self.assert_never_infers_or_claims_none(html)
+        self.assertIn("HTTP 503 Service Unavailable", issue_sec)
+        self.assertIn("HTTP 503 Service Unavailable", acc_sec)
+
+    def test_no_backlog_and_foreign_forge_and_cache_miss_each_state_why(self) -> None:
+        data = task_forge.page_data(self.db)
+        no_backlog_cfg = replace(self.cfg, backlog=None)
+        html_no_backlog = ip.render(self.key, [], bs.EMPTY, NOW, LANES, cfg=no_backlog_cfg, root=self.root, db=data)
+        issue_nb, acc_nb = self.assert_never_infers_or_claims_none(html_no_backlog)
+        self.assertRegex(issue_nb, r"(?i)no backlog")
+        self.assertRegex(acc_nb, r"(?i)no backlog")
+
+        foreign_key = "gitlab:labs.example.test/team/app#88"
+        self.db.upsert_item(foreign_key, workflow="build", stage="implement", forge_state="open", title="Foreign item")
+        fetched = bs.Sources({"kanban": NOW}, {}, {}, (), {}, home=self.home)
+        html_foreign = ip.render(foreign_key, [], fetched, NOW, LANES, cfg=self.cfg, root=self.root,
+                                 db=task_forge.page_data(self.db))
+        issue_fg, acc_fg = self.assert_never_infers_or_claims_none(html_foreign)
+        self.assertRegex(issue_fg, r"(?i)forge|backlog")
+        self.assertRegex(acc_fg, r"(?i)forge|backlog")
+
+        earlier = NOW - timedelta(minutes=12)
+        missed = bs.Sources({"kanban": earlier}, {}, {}, (), {}, home=self.home)
+        html_missed = ip.render(self.key, [], missed, NOW, LANES, cfg=self.cfg, root=self.root,
+                                db=task_forge.page_data(self.db))
+        issue_ms, acc_ms = self.assert_never_infers_or_claims_none(html_missed)
+        self.assertIn(f"{earlier.astimezone(CT):%H:%M}", issue_ms)
+        self.assertIn(f"{earlier.astimezone(CT):%H:%M}", acc_ms)
+
+    def test_tracker_task_with_checklist_never_infers_acceptance_when_issue_is_missing(self) -> None:
+        tracker = (
+            f"# Tracker\n\n## Tasks\n\n{HEAD}"
+            f"| Upload size limit | Acceptance: - [ ] fake item criterion | Robin | open | {TODAY} |  | M | build | implement | #109 | - [ ] fake checklist criterion |\n"
+        )
+        failed = bs.Sources({}, {}, {}, (), {"kanban": "gh: not logged in"})
+        html = ip.render(109, [(TODAY, tracker)], failed, NOW, LANES)
+        issue_sec, acc_sec = self.assert_never_infers_or_claims_none(html)
+        self.assertIn("not logged in", issue_sec)
+        self.assertIn("not logged in", acc_sec)
+        self.assertNotIn("fake item criterion", acc_sec)
+        self.assertNotIn("fake checklist criterion", acc_sec)
+
+    def test_old_cache_is_hidden_after_backlog_change_and_links_keep_cached_identity(self) -> None:
+        cases = (
+            (bs.backlog.GitHubBacklog("old/repo"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://github.com/old/repo/issues/12", "https://github.com/old/repo", "#12"),
+            (bs.backlog.GitHubBacklog("Old/Repo"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://github.com/old/repo/issues/12", "https://github.com/Old/Repo", "#12"),
+            (bs.backlog.Backlog("https://labs.example.test", "team/old"), bs.backlog.Backlog("https://labs.example.test", "team/new"), "https://labs.example.test/team/other/-/issues/12", "https://labs.example.test/team/other/-/issues/12", "https://labs.example.test/team/other/-", "gitlab:labs.example.test/team/other#12"),
+            (bs.backlog.Backlog("https://labs.example.test", "team/old"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://labs.example.test/team/old/-/issues/12", "https://labs.example.test/team/old/-", "#12"),
+            (None, bs.backlog.GitHubBacklog("new/repo"), "https://github.com/old/repo/issues/12", "https://github.com/old/repo/issues/12", "https://github.com/old/repo", "old/repo#12"),
+        )
+        for home, current, ref, url, base, key in cases:
+            with self.subTest(ref=ref, home=home):
+                cfg = replace(self.cfg, backlog=current)
+                tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | {ref} | |\n"
+                issue = bs.Issue(ref, url, "Old issue", "open", (), body="See #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4\n")
+                src = bs.Sources({"kanban": NOW}, {key: issue}, {}, (), {"kanban": "read failed"}, home=home)
+                html = ip.render(12, [(TODAY, tracker)], src, NOW, LANES, cfg=cfg, root=self.root)
+                self.assertIsNotNone(html)
+                for name in ("Issue", "Acceptance"):
+                    part = page_section(html, name)
+                    self.assertIn("read failed", part)
+                    self.assertNotIn("Old issue", part)
+                    self.assertNotIn("Check #10", part)
+                    self.assertNotIn(f'href="{base}/', part)
+                    self.assertNotIn('href="https://github.com/new/repo/', part)
+                # If cached prose is used in its own namespace, its links must still
+                # resolve against that issue rather than the configured backlog.
+                linker = ip._issue_linker(issue, key, home, cfg, self.root)
+                for part in (ip._issue_section(issue, linker), ip._acceptance(issue, linker)):
+                    self.assertIn(f'href="{base}/issues/10"', part)
+                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+                    self.assertNotIn('href="https://github.com/new/repo/', part)
+
+    def test_conflicting_cached_key_and_url_never_link_to_either_namespace(self) -> None:
+        tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | #12 | |\n"
+        issue = bs.Issue("#12", "https://github.com/foreign/repo/issues/12", "Unknown", "open", (),
+                         body="See #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4\n")
+        src = bs.Sources({"kanban": NOW}, {"#12": issue}, {}, (), {"kanban": "read failed"}, home=self.home)
+        html = ip.render(12, [(TODAY, tracker)], src, NOW, LANES, cfg=self.cfg, root=self.root)
+        for name in ("Issue", "Acceptance"):
+            part = page_section(html, name)
+            self.assertNotIn('href="https://github.com/example/repo/', part)
+            self.assertNotIn('href="https://github.com/foreign/repo/', part)
+
+    def test_foreign_cached_issue_does_not_resolve_symbols_from_current_local_repo(self) -> None:
+        path = self.root / "src" / "lib.py"
+        path.parent.mkdir()
+        path.write_text("def target():\n    pass\n")
+        issue = bs.Issue("#12", "https://github.com/old/repo/issues/12", "Old", "open", (), body="See src/lib.py:target.")
+        linker = ip._issue_linker(issue, "#12", bs.backlog.GitHubBacklog("old/repo"), self.cfg, self.root)
+        part = ip._issue_section(issue, linker)
+        self.assertIn('href="https://github.com/old/repo/blob/HEAD/src/lib.py"', part)
+        self.assertNotIn("#L1", part)
+
+    def test_unknown_cached_identity_does_not_guess_current_backlog(self) -> None:
+        tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | #12 | |\n"
+        issue = bs.Issue("#12", "", "Unknown", "open", (), body="See #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4\n")
+        src = bs.Sources({"kanban": NOW}, {"#12": issue}, {}, (), {"kanban": "read failed"})
+        html = ip.render(12, [(TODAY, tracker)], src, NOW, LANES, cfg=self.cfg, root=self.root)
+        for name in ("Issue", "Acceptance"):
+            part = page_section(html, name)
+            self.assertNotIn('href="https://github.com/example/repo/', part)
+
+    def test_stale_cached_issue_renders_cached_body_and_criteria_marked_stale_with_fetch_time_and_error(self) -> None:
+        earlier_utc = (NOW - timedelta(minutes=25)).astimezone(ZoneInfo("UTC"))
+        local_clock = f"{earlier_utc.astimezone(CT):%H:%M}"
+        issue = bs.Issue(
+            "#12", "https://github.com/example/repo/issues/12", "Upload size limit", "open",
+            (), body=BODY.format(heading="##"),
+        )
+        stale_src = bs.Sources(
+            {"kanban": earlier_utc}, {"#12": issue}, {}, (),
+            {"kanban": "gh: HTTP 502 Bad Gateway"}, home=self.home,
+        )
+        html = ip.render(self.key, [], stale_src, NOW, LANES, cfg=self.cfg, root=self.root,
+                         db=task_forge.page_data(self.db))
+        issue_sec = text(page_section(html, "Issue"))
+        acc_sec = text(page_section(html, "Acceptance"))
+        for got in (issue_sec, acc_sec):
+            self.assertRegex(got, r"(?i)\bstale\b")
+            self.assertIn(local_clock, got)
+            self.assertIn("HTTP 502 Bad Gateway", got)
+        self.assertIn("Uploads have no cap.", issue_sec)
+        self.assertIn("Uploads over 25 MB are refused", acc_sec)
+        self.assertRegex(acc_sec, r"\b1 of 3 met\b")
+
+
+class NamespaceCollisionTest(unittest.TestCase):
+    """#919: colliding `#N` across repositories or projects never share titles, bodies, criteria, or changes."""
+
+    def setUp(self) -> None:
+        import shutil
+        from test_m6_store_board import CLAUDE_MD, make_store_workspace
+
+        self.root, self.db = make_store_workspace()
+        self.addCleanup(self.db.engine.dispose)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        (self.root / "CLAUDE.md").write_text(CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n", encoding="utf-8")
+        self.cfg = bs.read_config(self.root)
+        self.home = self.cfg.backlog
+
+    def test_two_repos_sharing_issue_number_keep_distinct_titles_bodies_criteria_and_changes(self) -> None:
+        home_key = "github:example/repo#12"
+        other_key = "github:other/repo#12"
+        # Leave titles empty in store so fallback title lookup is exercised too.
+        self.db.upsert_item(home_key, workflow="build", stage="implement", forge_state="open", title="")
+        self.db.upsert_item(other_key, workflow="build", stage="review", forge_state="open", title="")
+
+        home_issue = bs.Issue(
+            "#12", "https://github.com/example/repo/issues/12", "Home repo title", "open", (),
+            body="## Context\nHome prose referencing #10.\n\n## Acceptance\n- [x] Home criterion met\n",
+        )
+        other_issue = bs.Issue(
+            "other/repo#12", "https://github.com/other/repo/issues/12", "Other repo title", "open", (),
+            body="## Context\nOther prose referencing #10.\n\n## Acceptance\n- [ ] Other criterion pending (#10)\n",
+        )
+        home_pr = bs.Change(
+            "#21", "https://github.com/example/repo/pull/21", "Fix home 12", "open", False,
+            "passed", True, 1, None, "main", ("src/home.py",), ("#12",),
+        )
+        other_pr = bs.Change(
+            "other/repo#34", "https://github.com/other/repo/pull/34", "Fix other 12", "open", False,
+            "failed", False, 0, None, "main", ("src/other.py",), ("other/repo#12",),
+        )
+        src = bs.Sources(
+            {"kanban": NOW, "merge requests": NOW},
+            {"#12": home_issue, "other/repo#12": other_issue},
+            {"#21": home_pr, "other/repo#34": other_pr},
+            (), {}, home=self.home,
+        )
+        data = task_forge.page_data(self.db)
+
+        self.assertIsNone(ip.render(12, [], src, NOW, LANES, cfg=self.cfg, root=self.root, db=data))
+
+        home_html = ip.render(home_key, [], src, NOW, LANES, cfg=self.cfg, root=self.root, db=data)
+        other_html = ip.render(other_key, [], src, NOW, LANES, cfg=self.cfg, root=self.root, db=data)
+        self.assertIsNotNone(home_html)
+        self.assertIsNotNone(other_html)
+
+        self.assertIn("Home repo title", text(home_html))
+        self.assertIn("Home prose referencing #10", text(page_section(home_html, "Issue")))
+        self.assertIn('href="https://github.com/example/repo/issues/10"', page_section(home_html, "Issue"))
+        self.assertIn("Home criterion met", text(page_section(home_html, "Acceptance")))
+        self.assertIn("#21", text(card(home_html)))
+        for leaked in ("Other repo title", "Other prose", "Other criterion pending", "other/repo#34", "Fix other 12"):
+            self.assertNotIn(leaked, text(home_html))
+
+        self.assertIn("Other repo title", text(other_html))
+        self.assertIn("other/repo#12", text(other_html))
+        self.assertIn("Other prose referencing #10", text(page_section(other_html, "Issue")))
+        # Bare `#10` inside `other/repo#12` resolves against `other/repo`, never `example/repo`.
+        self.assertIn('href="https://github.com/other/repo/issues/10"', page_section(other_html, "Issue"))
+        self.assertIn('href="https://github.com/other/repo/issues/10"', page_section(other_html, "Acceptance"))
+        self.assertNotIn('href="https://github.com/example/repo/issues/10"', other_html)
+        self.assertIn("Other criterion pending", text(page_section(other_html, "Acceptance")))
+        self.assertIn("other/repo#34", text(card(other_html)))
+        for leaked in ("Home repo title", "Home prose", "Home criterion met", "#21", "Fix home 12"):
+            self.assertNotIn(leaked, text(other_html))
+
+    def test_single_foreign_repo_item_never_absorbs_home_repo_issue_or_pr_on_numeric_or_full_route(self) -> None:
+        other_key = "github:other/repo#12"
+        self.db.upsert_item(other_key, workflow="build", stage="implement", forge_state="open", title="")
+        home_issue = bs.Issue(
+            "#12", "https://github.com/example/repo/issues/12", "Unrelated home issue", "open", (),
+            body="## Context\nHome body.\n\n## Acceptance\n- [x] Home-only criterion\n",
+        )
+        home_pr = bs.Change(
+            "#21", "https://github.com/example/repo/pull/21", "Home PR 21", "open", False,
+            "passed", True, 1, None, "main", ("src/home.py",), ("#12",),
+        )
+        src = bs.Sources(
+            {"kanban": NOW, "merge requests": NOW},
+            {"#12": home_issue},
+            {"#21": home_pr},
+            (), {}, home=self.home,
+        )
+        data = task_forge.page_data(self.db)
+        for ident in (12, other_key):
+            with self.subTest(ident=ident):
+                html = ip.render(ident, [], src, NOW, LANES, cfg=self.cfg, root=self.root, db=data)
+                self.assertIsNotNone(html)
+                self.assertIn("other/repo#12", text(html))
+                for leaked in ("Unrelated home issue", "Home body.", "Home-only criterion", "Home PR 21", "#21"):
+                    self.assertNotIn(leaked, text(html))
+                self.assertNotRegex(text(page_section(html, "Acceptance")), r"(?i)\bno acceptance criteria in the issue\b")
+
+    def test_two_gitlab_projects_sharing_iid_keep_distinct_bodies_and_criteria(self) -> None:
+        from test_m6_store_board import CLAUDE_MD
+
+        (self.root / "CLAUDE.md").write_text(
+            CLAUDE_MD + "- Backlog: GitLab issues; host https://labs.example.test; project team/app\n",
+            encoding="utf-8",
+        )
+        gl_cfg = bs.read_config(self.root)
+        gl_home = gl_cfg.backlog
+        home_key = "gitlab:labs.example.test/team/app#15"
+        sib_key = "gitlab:labs.example.test/team/other#15"
+        self.db.upsert_item(home_key, workflow="build", stage="implement", forge_state="open", title="GL Home")
+        self.db.upsert_item(sib_key, workflow="build", stage="review", forge_state="open", title="GL Sibling")
+
+        home_issue = bs.Issue(
+            "#15", "https://labs.example.test/team/app/-/issues/15", "GL Home", "open", (),
+            body="## Context\nGitLab home body.\n\n## Acceptance\n- [x] GitLab home criterion\n",
+        )
+        sib_issue = bs.Issue(
+            "gitlab:labs.example.test/team/other#15", "https://labs.example.test/team/other/-/issues/15", "GL Sibling", "open", (),
+            body="## Context\nGitLab sibling body (#4).\n\n## Acceptance\n- [ ] GitLab sibling criterion\n",
+        )
+        src = bs.Sources(
+            {"kanban": NOW},
+            {"#15": home_issue, "gitlab:labs.example.test/team/other#15": sib_issue},
+            {}, (), {}, home=gl_home,
+        )
+        data = task_forge.page_data(self.db)
+        self.assertIsNone(ip.render(15, [], src, NOW, LANES, cfg=gl_cfg, root=self.root, db=data))
+        home_html = ip.render(home_key, [], src, NOW, LANES, cfg=gl_cfg, root=self.root, db=data)
+        sib_html = ip.render(sib_key, [], src, NOW, LANES, cfg=gl_cfg, root=self.root, db=data)
+        self.assertIn("GitLab home body.", text(page_section(home_html, "Issue")))
+        self.assertIn("GitLab home criterion", text(page_section(home_html, "Acceptance")))
+        self.assertNotIn("GitLab sibling", text(home_html))
+        self.assertIn("GitLab sibling body", text(page_section(sib_html, "Issue")))
+        self.assertIn('href="https://labs.example.test/team/other/-/issues/4"', page_section(sib_html, "Issue"))
+        self.assertIn("GitLab sibling criterion", text(page_section(sib_html, "Acceptance")))
+        self.assertNotIn("GitLab home", text(sib_html))
 
 
 if __name__ == "__main__":

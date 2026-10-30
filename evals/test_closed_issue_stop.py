@@ -95,12 +95,13 @@ class OlderCacheTest(unittest.TestCase):
         pages = Path(tempfile.mkdtemp())
         (pages / bs.CACHE).write_text(json.dumps({
             "fetched": {"kanban": tbs.NOW.isoformat()},
-            "issues": {"#109": {"ref": "#109", "url": "u", "title": "t", "state": "closed", "labels": []}},
+            "issues": {"#109": {"ref": "#109", "url": "https://forge.example/grp/app/-/issues/109", "title": "t", "state": "closed", "labels": []}},
             "changes": {}, "workers": [], "errors": {},
         }))
         got = bs.load(pages)
-        self.assertEqual(got.issues["#109"].state, "closed")
-        self.assertIsNone(got.issues["#109"].closed_at)
+        key = "gitlab:forge.example/grp/app#109"  # the URL proves the old cache's identity
+        self.assertEqual(got.issues[key].state, "closed")
+        self.assertIsNone(got.issues[key].closed_at)
 
 
 # --- point 2: render_board.forge_ends -------------------------------------------------------------------
@@ -111,26 +112,26 @@ class ForgeEndsTest(unittest.TestCase):
 
     def test_a_merged_change_gives_its_time_and_the_word_merged(self):
         change = merged("#109", "01:15")
-        src = bs.Sources({}, {}, {change.ref: change}, (), {})
+        src = bs.Sources({}, {}, {change.ref: change}, (), {}, tip.sources().home)
         self.assertEqual(rb.forge_ends(self.tasks(), src, CT), {"Upload size limit": (at(TODAY, "01:15"), "merged")})
 
     def test_a_closed_issue_with_no_merge_gives_its_close_time_and_the_word_closed(self):
         closed_at = at(TODAY, "00:55")
-        issue = bs.Issue("#109", "u", "t", "closed", (), closed_at=closed_at.astimezone(timezone.utc))
-        src = bs.Sources({}, {"#109": issue}, {}, (), {})
+        issue = bs.Issue("#109", "https://forge.example/grp/app/-/issues/109", "t", "closed", (), closed_at=closed_at.astimezone(timezone.utc))
+        src = bs.Sources({}, {"#109": issue}, {}, (), {}, tip.sources().home)
         self.assertEqual(rb.forge_ends(self.tasks(), src, CT), {"Upload size limit": (closed_at, "closed")})
 
     def test_an_open_issue_or_a_closed_one_with_no_close_time_gives_nothing(self):
-        for issue in (bs.Issue("#109", "u", "t", "open", ()), bs.Issue("#109", "u", "t", "closed", ())):
+        for issue in (bs.Issue("#109", "https://forge.example/grp/app/-/issues/109", "t", "open", ()), bs.Issue("#109", "https://forge.example/grp/app/-/issues/109", "t", "closed", ())):
             with self.subTest(state=issue.state, closed_at=issue.closed_at):
-                src = bs.Sources({}, {"#109": issue}, {}, (), {})
+                src = bs.Sources({}, {"#109": issue}, {}, (), {}, tip.sources().home)
                 self.assertEqual(rb.forge_ends(self.tasks(), src, CT), {})
 
     def test_a_merge_wins_over_a_close_time_for_the_same_task(self):
         closed_at = at(TODAY, "00:55")
-        issue = bs.Issue("#109", "u", "t", "closed", (), closed_at=closed_at.astimezone(timezone.utc))
+        issue = bs.Issue("#109", "https://forge.example/grp/app/-/issues/109", "t", "closed", (), closed_at=closed_at.astimezone(timezone.utc))
         change = merged("#109", "01:15")
-        src = bs.Sources({}, {"#109": issue}, {change.ref: change}, (), {})
+        src = bs.Sources({}, {"#109": issue}, {change.ref: change}, (), {}, tip.sources().home)
         self.assertEqual(rb.forge_ends(self.tasks(), src, CT), {"Upload size limit": (at(TODAY, "01:15"), "merged")})
 
 
@@ -206,16 +207,16 @@ class TaskPageEndedRowsTest(unittest.TestCase):
         # Same fixture and arithmetic as #200's merge test, but the row ends via a closed issue, no merge.
         closed_at = at(TODAY, "01:40").astimezone(timezone.utc)
         issue = replace(tip.ISSUE, state="closed", closed_at=closed_at)
-        html = ip.render(109, tip.work_trackers(), tip.sources(issue=issue), NOW, LANES)
+        html = ip.render(109, tip.work_trackers(), tip.sources(issue=issue), NOW, LANES, tip.BoardTest().cfg())
         self.assertRegex(tip.text(html), r"(?i)\bWorked\s+4h25m\s+of\s+5h35m\s+elapsed\s*·\s*1h10m\s+waiting\b")
 
     def test_a_closed_issue_header_is_not_open(self):
         closed_at = at(TODAY, "01:40").astimezone(timezone.utc)
         issue = replace(tip.ISSUE, state="closed", closed_at=closed_at)
-        html = ip.render(109, tip.work_trackers(), tip.sources(issue=issue), NOW, LANES)
+        html = ip.render(109, tip.work_trackers(), tip.sources(issue=issue), NOW, LANES, tip.BoardTest().cfg())
         header = re.search(r"<header\b.*?</header>", html, re.S)[0]
         chip = re.search(r'<span class="chip[^"]*">([^<]+)</span>', header)[1]
-        self.assertNotRegex(chip, r"(?i)^open$")
+        self.assertNotRegex(chip, r"(?i)^(open|needs input)$")
         self.assertRegex(chip, r"(?i)^(closed|done)$")
 
 
@@ -288,12 +289,13 @@ class SourcesWriterAndReaderAgreeTest(unittest.TestCase):
         def gh(args, input_text=None):
             query = args[args.index("-f") + 1]
             data = {}
-            for i, repo in enumerate(re.findall(r'repository\(owner: "([^"]+)", name: "([^"]+)"\)', query)):
-                name = "/".join(repo)
-                data[f"r{i}"] = {"n8": {"__typename": "Issue", "number": 8, "url": f"https://github.com/{name}/issues/8",
+            for alias, owner, repo in re.findall(r'(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\)', query):
+                name = f"{owner}/{repo}"
+                data[alias] = {"n8": {"__typename": "Issue", "number": 8, "url": f"https://github.com/{name}/issues/8",
                                         "title": name, "state": "CLOSED" if name == "o/app" else "OPEN",
-                                        "closedAt": CLOSED_AT if name == "o/app" else None, "labels": {"nodes": []}}}
-            return 0, json.dumps({"data": {**data, "merged": {"nodes": []}}}), ""
+                                        "closedAt": CLOSED_AT if name == "o/app" else None, "labels": {"nodes": []}, "body": "", "milestone": None}}
+            return 0, json.dumps({"data": {**data, "inventory": {"pullRequests": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}},
+                                           "rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000}}}), ""
 
         self.check("GitHub issues; repo o/app", "#8", "acme/web#8", gh=gh)
 
