@@ -189,6 +189,16 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaisesRegex(st.SettingsError, "worker_launcher"):
             st.load(self.root, self.write('[workers]\nworker_launcher = "tmux"\n'))
 
+    def test_t3_providers_map_claude_as_profiles_to_t3_provider_instances(self):
+        self.assertEqual(st.load(self.root, None).workers.t3_providers, {})
+        got = st.load(self.root, self.write('[workers.t3_providers]\nsecondary = "cl2"\nmain = "claudeAgent"\n')).workers
+        self.assertEqual(got.t3_providers, {"secondary": "cl2", "main": "claudeAgent"})
+        for bad in ('"-x" = "cl2"', 'secondary = ""', 'secondary = 2', 'secondary = "two words"', 'secondary = "--model"'):
+            with self.subTest(bad=bad), self.assertRaisesRegex(st.SettingsError, "t3_providers"):
+                st.load(self.root, self.write(f"[workers.t3_providers]\n{bad}\n"))
+        with self.assertRaisesRegex(st.SettingsError, "t3_providers"):
+            st.load(self.root, self.write('[workers]\nt3_providers = "cl2"\n'))
+
     def test_green_test_requirement_is_opt_in_and_strictly_boolean(self):
         self.assertFalse(st.load(self.root, None).workers.require_green_tests)
         for value, expected in (("true", True), ("false", False)):

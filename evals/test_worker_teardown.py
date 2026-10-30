@@ -263,12 +263,15 @@ class WorkerTeardownTest(unittest.TestCase):
                 return None
 
         child = Child()
+        pending = []
         with mock.patch.object(shell_setup.subprocess, "Popen", return_value=child), \
+             mock.patch.object(shell_setup, "_unreaped_children", pending, create=True), \
              mock.patch.object(shell_setup.os, "killpg") as kill:
             warnings = shell_setup.teardown(self.root, self.tree, "worker01", "exit 0")
         kill.assert_called_once()
-        self.assertEqual(child.waits, [120, 5])
-        self.assertIsNotNone(child.returncode)
+        self.assertEqual(child.waits, [120, 1])
+        self.assertIsNone(child.returncode)
+        self.assertEqual(pending, [child])
         self.assertTrue(warnings)
         self.assertIn("timed out", warnings[0])
 

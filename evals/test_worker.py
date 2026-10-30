@@ -428,6 +428,31 @@ class WorkerTest(unittest.TestCase):
                               policies=self.p, forge=self.forge, clock=lambda: NOW, launcher="t3", claude_as_profile="alternate")
         start.assert_not_called()
 
+    def test_t3_starts_the_thread_on_the_provider_instance_mapped_from_the_account_profile(self):
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.dict(os.environ, {"T3CODE_HOME": str(self.root / "no-t3")}), \
+             mock.patch.object(worker, "_model", return_value=worker.ModelEntry("claude", "sonnet")), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.t3_adapter, "start", side_effect=lambda request, run_dir, **kw: self.start(request, run_dir)) as start:
+            worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees, policies=self.p,
+                          forge=self.forge, clock=lambda: NOW, launcher="t3", claude_as_profile="alternate",
+                          t3_providers={"alternate": "cl2"})
+        self.assertEqual(start.call_args.kwargs["provider"], "cl2")
+
+    def test_a_missing_provider_instance_refuses_the_t3_launch_before_any_thread_start(self):
+        self.forge.default_branch_protected = lambda: True
+        (self.root / "no-t3" / "userdata").mkdir(parents=True)
+        (self.root / "no-t3" / "userdata" / "settings.json").write_text('{"providerInstances": {"claudeAgent": {}}}')
+        with mock.patch.dict(os.environ, {"T3CODE_HOME": str(self.root / "no-t3")}), \
+             mock.patch.object(worker, "_model", return_value=worker.ModelEntry("claude", "sonnet")), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.t3_adapter, "start") as start:
+            with self.assertRaisesRegex(RuntimeError, "provider instance 'cl2' does not exist"):
+                worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees, policies=self.p,
+                              forge=self.forge, clock=lambda: NOW, launcher="t3", claude_as_profile="alternate",
+                              t3_providers={"alternate": "cl2"})
+        start.assert_not_called()
+
     def test_a_t3_rotation_with_only_unsupported_hosts_does_not_invent_a_claude_entry(self):
         (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
         (self.root / "chief-of-stuff.toml").write_text('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high"]\n')
@@ -486,6 +511,51 @@ class WorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "T3.*live"):
                 worker._clear_tree(self.root, self.tree, self.db, KEY, NOW.isoformat())
         stop.assert_not_called()
+
+    def t3_message(self, body="also update the docs"):
+        self.t3_launched()
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        self.db.queue_worker_message(KEY, "implement", 1, record["session_id"], body, request_id="r1")
+        return Path(record["run_dir"])
+
+    def deliver_t3(self, *, send=None, alive=True, error=""):
+        evidence = worker.t3_adapter.Evidence(alive=alive, launcher="t3", error=error)
+        with mock.patch.object(worker.t3_adapter, "observe", return_value=evidence), \
+             mock.patch.object(worker.t3_adapter, "send", side_effect=send) as sent:
+            worker.deliver_messages(self.db, self.root)
+        return sent, self.db.worker_messages(KEY)[0]
+
+    def test_a_message_to_a_t3_worker_goes_through_thread_send_and_never_claims_the_worker_read_it(self):
+        run_dir = self.t3_message()
+        sent, message = self.deliver_t3()
+        sent.assert_called_once_with(run_dir, "mcp:t-1", "also update the docs")
+        self.assertEqual(message.status, "delivered")
+        self.assertRegex(message.evidence, r"^T3 accepted .*does not show the worker read it")
+
+    def test_a_t3_refusal_fails_the_message_with_the_clis_words(self):
+        self.t3_message()
+        _, message = self.deliver_t3(send=RuntimeError("t3 thread send failed: No T3 Code thread matches"))
+        self.assertEqual(message.status, "failed")
+        self.assertIn("No T3 Code thread matches", message.evidence)
+        self.assertIn(worker.NEVER_WRITTEN, message.evidence)
+
+    def test_an_ambiguous_t3_send_stays_unconfirmed_and_is_never_sent_twice(self):
+        self.t3_message()
+        _, message = self.deliver_t3(send=subprocess.TimeoutExpired("t3", 120))
+        self.assertEqual(message.status, "sending")
+        sent, message = self.deliver_t3()
+        sent.assert_not_called()
+        self.assertEqual(message.status, "sending")
+
+    def test_a_message_waits_while_the_thread_is_unreadable_and_fails_once_it_has_ended(self):
+        self.t3_message()
+        sent, message = self.deliver_t3(error="T3 evidence unavailable: down")
+        sent.assert_not_called()
+        self.assertEqual(message.status, "queued")
+        sent, message = self.deliver_t3(alive=False)
+        sent.assert_not_called()
+        self.assertEqual(message.status, "failed")
+        self.assertIn("thread has ended", message.evidence)
 
     def test_a_t3_run_is_classified_as_a_host_without_a_claude_envelope_and_checked_for_outside_merges(self):
         self.t3_launched()
