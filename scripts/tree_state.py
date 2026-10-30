@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 UNCOMMITTED_UNKNOWN = "uncommitted work unknown (status unreadable)"
 UNREADABLE_BRANCH = "unreadable tree"  # a space, so no branch is called this
+CURSOR_CHANNEL_EXCLUDE = "/.cursor/mcp.json"
 
 
 @dataclass(frozen=True)
@@ -47,3 +48,8 @@ def unsaved(porcelain: str) -> tuple[str, ...]:
     return tuple(line.split(maxsplit=1)[-1] for line in porcelain.splitlines() if line.strip()
                  and not (line.startswith("!! ") and line.endswith("/")
                           and (line[3:] == ".chief-of-stuff/" or line[3:-1].rsplit("/", 1)[-1] in BUILD_OUTPUT)))
+
+
+def cursor_channel_only(porcelain: str) -> bool:
+    """Whether `git status --porcelain --ignored --untracked-files=all -- .cursor` lists only the ignored channel file."""
+    return [line for line in porcelain.splitlines() if line.strip()] == [f"!! {CURSOR_CHANNEL_EXCLUDE.removeprefix('/')}"]
