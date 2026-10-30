@@ -14,6 +14,8 @@ import shlex
 
 OWNED = "The engine owns merges, protected branch pushes, stage labels, Project Status, issue closure, PR readiness and review verdicts; forge commands outside the worker allowlist are denied."
 UNPARSED = "The guard cannot safely parse this command. Use a plain command; " + OWNED
+HISTORY = ("Workers reach decision history only through the engine MCP decisions tool; "
+           "sqlite3, the decisions CLI and chief-of-stuff decisions are refused.")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 SEPARATORS = {";", "&&", "||", "|", "&", "\n"}
 REDIRECTIONS = {">", ">>", "<", "<>", ">|", ">&", "<&", "&>", "&>>"}
@@ -59,8 +61,21 @@ class Opaque(Unparsed):
     """A program the gate cannot read, such as an inline interpreter program: denied even when no guarded word shows."""
 
 
+class HistoryBypass(ValueError):
+    """A command that would let a worker read decision history outside the approved MCP tool (§17)."""
+
+
 class ImplicitPush(ValueError):
     pass
+
+
+def _history_bypass(name: str, args: list[str], tokens: list[str]) -> bool:
+    """True when the command reaches decision history without the engine MCP `decisions` tool."""
+    if name in {"sqlite3", "sqlite"}:
+        return True
+    if name in {"chief-of-stuff", "chief_of_stuff"}:
+        return "decisions" in args
+    return any(PurePosixPath(token).name == "decisions_cli.py" for token in tokens)
 
 
 def _tokens(command: str) -> list[tuple[str, bool]]:
@@ -410,6 +425,8 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     name, args = PurePosixPath(tokens[0]).name, tokens[1:]
     if name.startswith("git-"):
         name, args = "git", [name[4:], *args]
+    if _history_bypass(name, args, tokens):
+        raise HistoryBypass()
     if name == "hub":
         return True  # a git wrapper with forge verbs of its own: workers use git and gh
     # Plain clients bypass the forge CLI gates. Workers must use gh/glab for forge reads too.
@@ -653,7 +670,30 @@ def _tree_write(words: list[str]) -> bool:
     return False
 
 
-def judgement(command: str, protected_branches: tuple[str, ...], cwd: str | None) -> tuple[str, str]:
+def _accepted_commit(words: list[str]) -> bool:
+    if PurePosixPath(words[0]).name != "git":
+        return False
+    try:
+        args = _global_args(words[1:], set(), {"--no-pager"})
+    except Unparsed:
+        return False
+    return bool(args) and args[0] == "commit"
+
+
+def _commit_hooks(words: list[str], hooks_path: str | None, hooks_root: str | None) -> tuple[str, str] | None:
+    """#893: an auto-allowed commit runs hooks, so a core.hooksPath inside the worktree (or one this judge could not
+    read) is not auto-allowed. Unset stays a tree write. One commit segment sends the whole command to the trio."""
+    if hooks_path is None or not _tree_write(words) or not _accepted_commit(words):
+        return None
+    if not hooks_root:  # before inside: inside(absolute, "") is false, which would allow an unreadable root
+        return "trio", "core.hooksPath could not be resolved"
+    if inside(hooks_path, hooks_root):
+        return "trio", "core.hooksPath is inside the worktree"
+    return None
+
+
+def judgement(command: str, protected_branches: tuple[str, ...], cwd: str | None,
+              hooks_path: str | None = None, hooks_root: str | None = None) -> tuple[str, str]:
     """#874: a PermissionRequest's answer for a Bash command: ("deny", reason) for what the gate refuses, ("allow", "")
     for a fully parsed command of read-only programs whose paths and redirects stay in the worktree (/dev/null and file
     descriptors are not writes), else ("trio", why). This never overrules Claude's own layer for a write or a secret read."""
@@ -674,6 +714,10 @@ def judgement(command: str, protected_branches: tuple[str, ...], cwd: str | None
             return "trio", "a brace expansion can name a path outside the worktree"
         if words and not (_reads_only(words) or _tree_write(words)):
             return "trio", f"{PurePosixPath(words[0]).name} is not a known read-only command"
+        if words:
+            refused = _commit_hooks(words, hooks_path, hooks_root)
+            if refused:
+                return refused
         patterns = _patterns(words) if words else set()
         for i, arg in enumerate(words[1:], 1):
             if i in patterns:
@@ -705,7 +749,8 @@ def permission_judgement(event: dict, protected_branches: tuple[str, ...]) -> tu
     if not isinstance(given, dict):
         return "trio", "the permission request has no readable input"
     if tool == "Bash":
-        return judgement(given.get("command"), protected_branches, cwd)
+        # Missing and JSON null are the same: an ask stored before #893 has no hooks keys and stays an allow.
+        return judgement(given.get("command"), protected_branches, cwd, event.get("hooks_path"), event.get("hooks_root"))
     if tool in READ_TOOLS | WRITE_TOOLS:
         path = given.get("file_path") or given.get("notebook_path") or given.get("path") or ("." if tool in READ_TOOLS else "")
         if isinstance(path, str) and path and inside(path, cwd) and not (tool in WRITE_TOOLS and _in_git_dir(path)):
@@ -717,6 +762,8 @@ def permission_judgement(event: dict, protected_branches: tuple[str, ...]) -> tu
 def denial_reason(command: str, protected_branches: tuple[str, ...]) -> str | None:
     try:
         return OWNED if _denied(command, protected_branches, 0) else None
+    except HistoryBypass:
+        return HISTORY
     except ImplicitPush:
         return "Push with git first and pass --head (or -H) with an explicit branch to gh pr create. " + OWNED
     except Opaque:

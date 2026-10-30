@@ -1,0 +1,4 @@
+[
+ { "ref": "a1b2c3", "name": "reviewer", "state": "idle", "started_hours_ago": 3 },
+ { "ref": "d4e5f6", "name": "impl-uploads", "state": "idle", "started_hours_ago": 1 }
+]
