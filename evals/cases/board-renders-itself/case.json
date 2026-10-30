@@ -30,10 +30,9 @@
       "type": "board_published",
       "min": 1,
       "tasks": [
-        "Security audit",
         "Draft release notes"
       ],
-      "html_match": "<div class=\"columns-card-name\">Security audit</div>(<div class=\"columns-refs\">[^<]*</div>)?<div class=\"columns-who\"><span class=\"columns-owner\">[^<]*</span><span class=\"columns-tag columns-chip\" data-cat=\"done\">"
+      "html_match": "<figure class=\"columns\" aria-label=\"3 columns, 1 card\">[\\s\\S]*?<div class=\"columns-card-name\">Draft release notes</div>[\\s\\S]*?<section class=\"columns-col\" aria-label=\"review, 0\">"
     },
     {
       "name": "the served board matches the final tracker",

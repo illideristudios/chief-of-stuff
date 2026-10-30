@@ -865,6 +865,31 @@ class StageWriteBackTest(unittest.TestCase):
                          [("github:example/app#3", "closed", "review", "merged"),
                           ("github:example/app#4", "open", "doing", "")])
 
+    def test_snapshots_record_the_newest_main_merge_commit_as_landing_sha(self):
+        body = "Closes #3"
+        release = {"number": 40, "body": body, "baseRefName": "release", "headRefOid": "head",
+                   "mergeCommit": {"oid": "side"}}
+        older = {"number": 21, "body": body, "baseRefName": "main", "headRefOid": "head",
+                 "mergeCommit": {"oid": "older"}}
+        newer = {"number": 22, "body": body, "baseRefName": "main", "headRefOid": "head",
+                 "mergeCommit": {"oid": "newest"}}
+        gh = FakeGh(issues=[gh_issue(3, "Fix", ["stage: review"], state="CLOSED")], merged=[release, older, newer])
+        snap = forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()[0]
+        self.assertEqual(snap["landing_sha"], "newest")
+
+    def test_snapshots_gitlab_landing_sha_prefers_squash_then_merge_then_head(self):
+        adapter = forge.Forge(GL)
+        row = {"iid": 21, "description": "Closes #3", "target_branch": "main",
+               "squash_commit_sha": "squash", "merge_commit_sha": "merge", "sha": "head"}
+        with mock.patch.object(forge.Forge, "_merged_requests", return_value=[row]), \
+             mock.patch.object(forge.Forge, "requests", return_value=[]), \
+             mock.patch.object(forge.Forge, "issues", side_effect=[
+                 SimpleNamespace(ok=True, issues=[SimpleNamespace(iid=3, title="x", body="", state=backlog.CLOSED,
+                                                                labels=[])]),
+                 SimpleNamespace(ok=True, issues=[])]):
+            snap = adapter.snapshots()[0]
+        self.assertEqual(snap["landing_sha"], "squash")
+
     def test_a_closed_issue_stays_merged_when_an_open_follow_up_cites_it(self):
         gh = FakeGh(issues=[gh_issue(3, "Fix the parser", ["stage: review"], state="CLOSED")],
                     prs=[tma.pr(22, [])], merged=[tma.pr(21, [])], bodies={21: "Closes #3", 22: "Closes #3"})

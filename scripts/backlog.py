@@ -792,10 +792,18 @@ def main(argv: list[str] | None = None) -> int:
                              parent=args.parent, blocked_by=tuple(args.blocked_by)))
     if args.close is not None:
         ref = parse_issue_arg(args.close, cfg)
-        if ref is None or (ref.host, ref.repo) != home_of(cfg):
+        if ref is None:
             print(f"backlog: --close {args.close!r} is not an issue in this Backlog", file=sys.stderr)
             return 2
-        writes.append(close(cfg, ref.number, commit=args.commit, timeout=args.timeout))
+        home = home_of(cfg)
+        if (ref.host, ref.repo) == home:
+            target = cfg
+        elif isinstance(cfg, Backlog) and ref.host == home[0]:
+            target = cfg.sibling(ref.repo)
+        else:
+            print(f"backlog: --close {args.close!r} is not an issue in this Backlog", file=sys.stderr)
+            return 2
+        writes.append(close(target, ref.number, commit=args.commit, timeout=args.timeout))
     if args.comment:
         writes.append(comment(cfg, args.comment, args.body, commit=args.commit, timeout=args.timeout))
     if args.view is not None:

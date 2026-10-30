@@ -507,6 +507,56 @@ class EngineTest(unittest.TestCase):
         self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
         self.assertIn(OTHER, self.cleanup.call_args.kwargs["completed"])
 
+    def test_reopen_clears_verified_landing_and_keeps_other_resume_keys(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="main-sha")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        data = dict(self.db.resume(KEY) or {})
+        data.update({"verified_landing": "main-sha", "verified_landing_head": "head", "marker": 1})
+        self.db.set_resume(KEY, data)
+        self.forge.rows[0]["forge_state"] = "open"
+        self.forge.rows[0]["merge_state"] = ""
+        self.forge.rows[0].pop("landing_sha", None)
+        self.run_pass()
+        data = self.db.resume(KEY)
+        self.assertNotIn("verified_landing", data)
+        self.assertNotIn("verified_landing_head", data)
+        self.assertEqual(data.get("marker"), 1)
+
+    def test_a_new_main_merge_commit_reclear_memo_and_recalls_landings(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="new-sha")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        data = dict(self.db.resume(KEY) or {})
+        data["verified_landing"] = True
+        self.db.set_resume(KEY, data)
+        self.forge.branch_head = lambda ref: tf.forge.Pipeline(1, "main", "new-sha", "failed", "")
+        reads = []
+
+        def landings(pipeline, keys, **kwargs):
+            reads.append(tuple(keys))
+            return {key: (False, False) for key in keys}
+
+        self.forge.landings = landings
+        self.run_pass()
+        self.assertEqual(reads, [(KEY,)])
+        self.assertNotIn("verified_landing", self.db.resume(KEY) or {})
+        self.assertNotIn(KEY, self.cleanup.call_args.kwargs["completed"])
+
+    def test_a_proved_landing_is_stored_as_the_snapshot_commit_and_not_reread(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="new-sha")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        self.forge.branch_head = lambda ref: tf.forge.Pipeline(1, "main", "new-sha", "passed", "")
+        merged = {"number": 21, "headRefOid": "source-head", "body": "Closes #1",
+                  "baseRefName": "main", "mergeCommit": {"oid": "new-sha"}}
+        self.forge.landings = tf.forge.Forge(tf.backlog.GitHubBacklog("example/project"),
+                                             gh=tf.FakeGh(merged=[merged])).landings
+        self.run_pass()
+        self.assertEqual(self.db.resume(KEY)["verified_landing"], "new-sha")
+        self.assertEqual(self.db.resume(KEY)["verified_landing_head"], "source-head")
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+        self.forge.landings = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("reread"))
+        self.run_pass()
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+
     def test_landing_comparison_failures_reach_the_deduplicated_wait_log(self):
         self.forge.rows[0].update(forge_state="closed", merge_state="merged")
         self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")
@@ -998,6 +1048,14 @@ class EngineTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "partial read"):
                 self.run_pass()
         self.assertEqual(self.db.items()[0].forge_state, "open")
+
+    def test_a_repeated_dispatch_failure_is_logged_once(self):
+        self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
+        self.run_pass()
+        self.run_pass()
+        # A failed start also parks the issue for human review, which logs its own wait; only the failure repeats.
+        self.assertEqual([log.message for log in self.db.log(KEY) if log.message.startswith("dispatch failed")],
+                         ["dispatch failed: spawn failed"])
 
     def test_one_failed_action_does_not_stop_the_next(self):
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
@@ -3182,8 +3240,10 @@ class MainTest(unittest.TestCase):
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
         self.assertEqual(passed.call_args.kwargs["workers"].claude_as_profile, "secondary")
         self.assertEqual(passed.call_args.kwargs["teardown_command"], "exit 7")
-        self.assertEqual(passed.call_args.kwargs["launch"].keywords["teardown_command"], "exit 7")
+        self.assertEqual(passed.call_args.kwargs["launch"].keywords["config"].workers.teardown, "exit 7")
         self.assertEqual(passed.call_args.kwargs["launch"].keywords["launcher"], "t3")
+        launched = passed.call_args.kwargs["launch"].keywords
+        self.assertEqual(launched["t3_providers"], launched["config"].workers.t3_providers)
         sleep.assert_not_called()
 
     def test_the_production_pass_consults_the_trio_through_the_claude_adapter(self):
@@ -3201,7 +3261,38 @@ class MainTest(unittest.TestCase):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
-        self.assertEqual(passed.call_args.kwargs["launch"].keywords["rules"], ("Keep tests.",))
+        self.assertEqual(passed.call_args.kwargs["launch"].keywords["config"].workers.rules, ("Keep tests.",))
+
+    def test_each_pass_pins_rules_and_stage_defaults_and_refreshes_together(self):
+        path = self.root / "settings.toml"
+        original = path.read_text()
+
+        def write_settings(version):
+            path.write_text(original + f'rules = ["Rule {version}."]\n'
+                            f'[stages.implement]\nagent = "builder{version}"\nskills = ["skill{version}"]\n')
+
+        write_settings(1)
+        launches = []
+        worker_configs = []
+
+        def passed(**kwargs):
+            launches.append(kwargs["launch"])
+            worker_configs.append(kwargs["workers"])
+            write_settings(len(launches) + 1)
+
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass", side_effect=passed) as run, \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(run.call_count, 2)
+        # The engine passes one snapshot; test_worker exercises the launch after an on-disk edit.
+        for version, launch in enumerate(launches, 1):
+            config = launch.keywords["config"]
+            self.assertEqual(config.workers.rules, (f"Rule {version}.",))
+            self.assertEqual(config.stages["implement"].agent, f"builder{version}")
+            self.assertEqual(config.stages["implement"].skills, (f"skill{version}",))
+            self.assertIs(worker_configs[version - 1], config.workers)
+        self.assertIsNot(launches[0].keywords["config"], launches[1].keywords["config"])
 
     def test_loaded_suite_policy_reaches_collect_and_launch(self):
         with (self.root / "settings.toml").open("a") as config:
@@ -3210,7 +3301,7 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
         self.assertTrue(passed.call_args.kwargs["require_green"])
-        self.assertTrue(passed.call_args.kwargs["launch"].keywords["require_green"])
+        self.assertTrue(passed.call_args.kwargs["launch"].keywords["config"].workers.require_green_tests)
 
     def test_rules_that_exceed_a_stage_budget_refuse_before_the_engine_loop(self):
         from dataclasses import replace
@@ -3242,6 +3333,124 @@ class MainTest(unittest.TestCase):
                     self.assertIn("implement", errors.getvalue())
                 else:
                     passed.assert_called_once()
+
+    def test_bad_reload_keeps_the_last_good_snapshot_and_still_runs_the_pass(self):
+        path = self.root / "settings.toml"
+        original = path.read_text()
+        for problem in ("missing", "empty", "truncated", "unreadable"):
+            with self.subTest(problem=problem):
+                if problem == "unreadable" and os.geteuid() == 0:
+                    self.skipTest("root reads a mode-0 file, so the reload would succeed")
+                path.write_text(original + 'max_concurrency = 2\nrules = ["Keep tests."]\n'
+                                '[stages.implement]\nagent = "builder"\nskills = ["original-skill"]\n')
+                configs = []
+
+                def passed(**kwargs):
+                    config = kwargs["launch"].keywords["config"]
+                    configs.append(config)
+                    self.assertIs(kwargs["workers"], config.workers)
+                    self.assertEqual(kwargs["max_concurrency"], 2)
+                    if len(configs) != 1:
+                        return
+                    if problem == "missing":
+                        path.unlink()
+                    elif problem == "unreadable":
+                        path.chmod(0)
+                    else:
+                        path.write_text("" if problem == "empty" else "[workers")
+
+                errors = io.StringIO()
+                try:
+                    with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+                         mock.patch.object(engine, "run_pass", side_effect=passed) as run, \
+                         mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
+                         contextlib.redirect_stderr(errors):
+                        self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+                finally:
+                    if path.exists():
+                        path.chmod(0o600)
+                self.assertEqual(run.call_count, 2)
+                self.assertIs(configs[0], configs[1])
+                self.assertEqual(configs[1].workers.rules, ("Keep tests.",))
+                self.assertEqual(configs[1].stages["implement"].skills, ("original-skill",))
+                self.assertIn("settings reload failed", errors.getvalue())
+                if problem in ("missing", "empty"):
+                    self.assertIn("settings.toml", errors.getvalue())
+
+    def test_reload_failure_outside_settings_error_keeps_the_snapshot(self):
+        configs = []
+
+        def passed(**kwargs):
+            configs.append(kwargs["launch"].keywords["config"])
+
+        real = engine.settings.load
+        loads = []
+
+        def load(*args):
+            loads.append(1)
+            if len(loads) == 1:
+                return real(*args)
+            raise ValueError("invalid literal for int() with base 10: '²'")
+
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine.settings, "load", side_effect=load), \
+             mock.patch.object(engine, "run_pass", side_effect=passed), \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
+             contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(len(configs), 2)
+        self.assertIs(configs[0], configs[1])
+        self.assertIn("settings reload failed", errors.getvalue())
+
+    def test_reload_that_exceeds_a_stage_budget_keeps_the_last_good_snapshot(self):
+        configs = []
+        loaded = []
+        real = engine.settings.load
+
+        def load(*args):
+            config = real(*args)
+            # Startup keeps the real object; each reload is a distinct snapshot the validator can tell apart.
+            loaded.append(config if not loaded else replace(config))
+            return loaded[-1]
+
+        def validate(root, config, policies):
+            if len(loaded) > 2 and config is loaded[2]:
+                raise engine.dispatch_prompt.RefusedError("[workers] rules do not fit the implement assignment")
+
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine.settings, "load", side_effect=load), \
+             mock.patch.object(engine.dispatch_prompt, "validate_worker_rules", side_effect=validate), \
+             mock.patch.object(engine, "run_pass", side_effect=lambda **kw: configs.append(kw["launch"].keywords["config"])), \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, None, KeyboardInterrupt]), \
+             contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(len(loaded), 4)
+        self.assertEqual(len(configs), 3)
+        self.assertIs(configs[0], loaded[1])
+        self.assertIs(configs[1], loaded[1])
+        self.assertIs(configs[2], loaded[3])
+        self.assertEqual(errors.getvalue().count("settings reload failed"), 1)
+        self.assertIn("do not fit", errors.getvalue())
+
+    def test_once_bad_reload_runs_on_the_valid_startup_snapshot(self):
+        path = self.root / "settings.toml"
+        original = engine.startup.workspace_forge
+
+        def startup(root):
+            result = original(root)
+            path.write_text("[workers")
+            return result
+
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine.startup, "workspace_forge", side_effect=startup), \
+             mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        self.assertEqual(passed.call_count, 1)
+        self.assertEqual(passed.call_args.kwargs["workers"].claude_as_profile, "secondary")
+        self.assertIn("settings reload failed", errors.getvalue())
 
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):
         errors = io.StringIO()
