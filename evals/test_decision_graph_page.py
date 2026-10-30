@@ -317,7 +317,8 @@ class DecisionGraphHttpServerTest(unittest.TestCase):
         db = self._open_store()
         try:
             db.upsert_item("github:example/repo#42", title="Engine task", stage="implement", forge_state="open")
-            db.add_decision("github:example/repo#42", "scope", "Pending ask for nav badge")
+            db.add_decision("github:example/repo#42", "scope", "Pending ask for nav badge", decided_by="owner")
+            db.add_decision("github:example/repo#42", "scope", "Engine retry awaiting models")
             ancestor = db.add_graph_decision(
                 "Keep decision records in markdown files.",
                 "Bootstrapped before the SQLite store.",
@@ -357,11 +358,16 @@ class DecisionGraphHttpServerTest(unittest.TestCase):
             self.assertNotIn("Keep decision records in markdown files.", graph_html)
             # Carries shared navigation counts from the store.
             self.assertIn('title="1 pending">1', graph_html)
+            decisions_html = get(self.port, "/decisions").body.decode()
+            self.assertIn('title="1 pending">1', decisions_html)
+            self.assertIn("Pending ask for nav badge", decisions_html)
+            self.assertNotIn("Engine retry awaiting models", decisions_html)
 
             # Walk to the leaf, then up to its parent, then see the link back down to the child.
             leaf_resp = get(self.port, f"/decisions/graph/{leaf.id}")
             self.assertEqual(leaf_resp.status, 200)
             leaf_html = leaf_resp.body.decode()
+            self.assertIn('title="1 pending">1', leaf_html)
             self.assertIn(f'href="/decisions/graph/{ancestor.id}"', leaf_html)
             self.assertNotIn("Expose all rejected alternatives in every worker prompt", leaf_html)
 
@@ -372,6 +378,7 @@ class DecisionGraphHttpServerTest(unittest.TestCase):
             parent_resp = get(self.port, f"/decisions/graph/{ancestor.id}")
             self.assertEqual(parent_resp.status, 200)
             parent_html = parent_resp.body.decode()
+            self.assertIn('title="1 pending">1', parent_html)
             self.assertIn("Keep decision records in markdown files.", parent_html)
             self.assertIn("Bootstrapped before the SQLite store.", parent_html)
             self.assertIn(f'href="/decisions/graph/{leaf.id}"', parent_html)
