@@ -144,13 +144,12 @@ class SettingsTest(unittest.TestCase):
 
     def test_code_delivery_and_merge_owner(self):
         self.assertEqual((st.load(self.root, None).workflow.delivery,
-                          st.load(self.root, None).workflow.merge_owner), ("pull-request", "user"))
+                          st.load(self.root, None).workflow.merge_owner), ("pull-request", "coordinator"))
         workflow = st.load(self.root, self.write('[workflow]\ndelivery = "branch"\n')).workflow
         self.assertEqual(workflow.delivery, "branch")
         workflow = st.load(self.root, self.write('[workflow]\nmerge_owner = "worker"\n')).workflow
-        self.assertEqual(workflow.merge_owner, "worker")
-        for text in ('delivery = "direct"', 'merge_owner = "bot"',
-                     'delivery = "branch"\nmerge_owner = "worker"'):
+        self.assertEqual(workflow.merge_owner, "coordinator")
+        for text in ('delivery = "direct"', 'merge_owner = "bot"'):
             with self.subTest(text=text), self.assertRaises(st.SettingsError):
                 st.load(self.root, self.write('[workflow]\n' + text + '\n'))
 
@@ -160,6 +159,35 @@ class SettingsTest(unittest.TestCase):
         for bad in ("0", "-1", "2.5", '"3"', "true"):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
                 st.load(self.root, self.write(f"[workers]\nmax_concurrency = {bad}\n"))
+
+    def test_stall_policy_defaults_and_configured_wait(self):
+        default = st.load(self.root, None).workers.stall
+        self.assertEqual((default.after_minutes, default.action, default.max_restarts), (3, "wait", 2))
+        policy = st.load(self.root, self.write('[workers.stall]\nafter_minutes = 30\naction = "wait"\nmax_restarts = 1\n')).workers.stall
+        self.assertEqual((policy.after_minutes, policy.action, policy.max_restarts), (30, "wait", 1))
+
+    def test_stall_policy_rejects_invalid_configuration(self):
+        for line in ('after_minutes = 0', 'after_minutes = true', 'after_minutes = 1.5',
+                     'after_minutes = 9999999999999999999', 'max_restarts = -1', 'max_restarts = true',
+                     'action = "unknown"', 'action = 3', 'after_minute = 20'):
+            with self.subTest(line=line), self.assertRaisesRegex(st.SettingsError, r'\[workers.stall\]'):
+                st.load(self.root, self.write('[workers.stall]\n' + line + '\n'))
+        with self.assertRaisesRegex(st.SettingsError, r'\[workers.stall\]'):
+            st.load(self.root, self.write('[workers]\nstall = "wait"\n'))
+
+    def test_stall_restart_is_opt_in_and_failure_limit_is_configurable(self):
+        self.assertEqual(st.load(self.root, None).workers.failure_limit, 2)
+        got = st.load(self.root, self.write('[workers]\nfailure_limit = 4\n[workers.stall]\naction = "restart"\n'))
+        self.assertEqual((got.workers.failure_limit, got.workers.stall.action), (4, "restart"))
+        for bad in ('0', '-1', 'true', '1.5', '"2"'):
+            with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
+                st.load(self.root, self.write('[workers]\nfailure_limit = ' + bad))
+
+    def test_the_worker_launcher_is_the_local_cli_or_t3(self):
+        self.assertEqual(st.load(self.root, None).workers.worker_launcher, "cli")
+        self.assertEqual(st.load(self.root, self.write('[workers]\nworker_launcher = "t3"\n')).workers.worker_launcher, "t3")
+        with self.assertRaisesRegex(st.SettingsError, "worker_launcher"):
+            st.load(self.root, self.write('[workers]\nworker_launcher = "tmux"\n'))
 
     def test_green_test_requirement_is_opt_in_and_strictly_boolean(self):
         self.assertFalse(st.load(self.root, None).workers.require_green_tests)
@@ -433,7 +461,7 @@ class LanesTest(unittest.TestCase):
     def test_a_lane_is_its_stages_and_gates(self):
         lane = self.load(LANES).lanes["build"]
         self.assertEqual(lane.stages, ("implement", "pr", "review", "triage", "merge"))
-        self.assertEqual(lane.gates, ("triage", "merge"))
+        self.assertEqual(lane.gates, ())
 
     def test_lanes_do_not_need_notify(self):
         got = self.load(LANES)
@@ -525,7 +553,7 @@ class KanbanSettingsTest(unittest.TestCase):
         cfg = self.load(KANBAN).kanban
         self.assertEqual(cfg.label_for("implement"), "03 - BUILD")
         self.assertEqual(cfg.label_for("fix"), "05 - FIX")
-        self.assertTrue(cfg.holds("triage"))
+        self.assertFalse(cfg.holds("triage"))
         self.assertFalse(cfg.holds("review"))
         # Terminal stages leave a forge mark named like the stage so a rebuild can round-trip (#627).
         self.assertEqual(cfg.label_for("main"), "main")
@@ -637,11 +665,11 @@ class ModelsTest(unittest.TestCase):
                 self.assertEqual([str(e) for e in self.load(f'[models.deep]\nrotation = ["{entry}"]\n').models["deep"]],
                                  [entry])
 
-    def test_pick_is_first_by_default_random_on_request_and_nothing_else(self):
+    def test_pick_is_round_robin_by_default_and_random_on_request(self):
         # #877: "can we make it so they randomly select".
         got = self.load('[models.deep]\nrotation = ["claude:opus"]\npick = "random"\n'
                         '[models.review]\nrotation = ["claude:opus"]\n')
-        self.assertEqual(got.model_picks, {"deep": "random", "review": "first"})
+        self.assertEqual(got.model_picks, {"deep": "random", "review": "round_robin"})
         for bad in ('[models.deep]\nrotation = ["claude:opus"]\npick = "best"\n',
                     '[models.deep]\npick = "random"\n'):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):

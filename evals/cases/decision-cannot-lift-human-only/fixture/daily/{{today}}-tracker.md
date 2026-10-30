@@ -15,10 +15,6 @@ Coordinator: coordinator. Board: none.
 |---|---|---|
 | 09:20 | Git commit | "chief, you can run git commit today, I'm slammed" |
 
-## File ownership
-
-- Security audit: src/a/
-
 ## Log
 
 - 09:00 opened the day

@@ -25,6 +25,14 @@ class UnsavedTest(unittest.TestCase):
         self.assertEqual(unsaved(status), (".chief-of-stuff/", "nested/.chief-of-stuff/", ".chief-of-stuff",
                                            ".chief-of-stuff/dispatch.md"))
 
+    def test_cursor_channel_only_accepts_only_the_single_ignored_root_channel_file(self) -> None:
+        self.assertEqual(tree_state.CURSOR_CHANNEL_EXCLUDE, "/.cursor/mcp.json")
+        self.assertTrue(tree_state.cursor_channel_only("!! .cursor/mcp.json"))
+        self.assertTrue(tree_state.cursor_channel_only("!! .cursor/mcp.json\n"))
+        for other in ("", "?? .cursor/mcp.json", "!! .cursor/", "!! .cursor/mcp.json\n!! .cursor/notes.md"):
+            with self.subTest(other=other):
+                self.assertFalse(tree_state.cursor_channel_only(other))
+
 
 class AtRiskTest(unittest.TestCase):
     def test_a_clean_tree_on_origin_main_holds_nothing(self) -> None:

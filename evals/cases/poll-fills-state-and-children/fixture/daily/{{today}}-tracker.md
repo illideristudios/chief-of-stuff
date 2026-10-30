@@ -23,14 +23,6 @@ Coordinator: robin-desk. Board: none.
 | d4e5f6 | 7719-fixer |  |  |  |  |  |  | 09:20 |
 | 9f2a41 | 4821-notes |  |  |  |  |  |  | 09:30 |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Security audit of the upload handler | `src/a/` |
-| Draft release notes | `NOTES.md` |
-| Migrate the notes index | `index/` |
-
 ## Log
 
 - 09:00 opened the day
