@@ -16,6 +16,9 @@ KEEP = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TERM_PROGRAM", "TMP
         "LANG", "LC_ALL", "LC_CTYPE", "COLORTERM", "TZ", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME",
         "CHIEF_OF_STUFF_RELEASE", "CHIEF_OF_STUFF_WORKSPACE"}
 
+# Keep ownership until a later command can reap children that outlast bounded cleanup.
+_unreaped_children: list[subprocess.Popen] = []
+
 
 class ShellError(ValueError):
     pass
@@ -94,7 +97,10 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
 
     Teardown and stack discovery share this driver. Command text is workspace-authored shell source.
     The process cwd is that trusted tree; worker and worktree identity travel in the environment.
+    Cleanup waits at most one second after SIGKILL.
     """
+    # Popen.poll uses WNOHANG: a stuck child must not delay the next command either.
+    _unreaped_children[:] = [child for child in _unreaped_children if child.poll() is None]
     env = {**clean_env(), "CHIEF_OF_STUFF_WORKSPACE": str(workspace.resolve()),
            "CHIEF_OF_STUFF_WORKER": worker}
     if worktree:
@@ -114,9 +120,11 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
             source = f"exec 1>{quoted}; set +m\n{command}"
         argv = [shell, "-lic", source]
         errors = Path(directory) / "stderr"
-        with errors.open("w") as stderr_file, subprocess.Popen(
+        with errors.open("w") as stderr_file:
+            # Popen.__exit__ waits without a timeout, so manage the child explicitly.
+            child = subprocess.Popen(
                 argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=stderr_file, start_new_session=True) as child:
+                stderr=stderr_file, start_new_session=True)
             try:
                 child.wait(timeout=timeout)
             except BaseException as exc:
@@ -124,13 +132,20 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
                 if isinstance(exc, subprocess.TimeoutExpired) or child.poll() is None:
                     try:
                         os.killpg(child.pid, signal.SIGKILL)
-                    except ProcessLookupError:
+                    except OSError:
                         pass
                     try:
-                        child.wait(timeout=5)
+                        child.wait(timeout=1)
                     except subprocess.TimeoutExpired:
-                        # shortcut: a child stuck after SIGKILL is left after 5s; reap it if teardown must not leave one
-                        child.returncode = -signal.SIGKILL
+                        # SIGKILL may still be pending on an uninterruptible child. Retain it
+                        # explicitly; Popen's destructor has not run while the exception holds it.
+                        _unreaped_children.append(child)
+                        detail = f"child pid {child.pid} not reaped after SIGKILL"
+                        if isinstance(exc, subprocess.TimeoutExpired):
+                            # TimeoutExpired formats its message from cmd, not args.
+                            exc.cmd = f"({detail}) {exc.cmd}"
+                        else:
+                            exc.args = (*exc.args, detail)
                 raise
             stderr = errors.read_text(errors="replace")
             stdout = output.read_text(errors="replace") if output.exists() else ""

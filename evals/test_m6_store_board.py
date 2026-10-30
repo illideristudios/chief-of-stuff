@@ -33,7 +33,7 @@ import store  # noqa: E402
 import store_access  # noqa: E402
 import task_forge  # noqa: E402
 import workers_page  # noqa: E402
-from workspace import parse_coordinator  # noqa: E402
+from workspace import parse_coordinator, read_config  # noqa: E402
 
 ZONE = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 10, 9, 14, 0, tzinfo=ZONE)
@@ -264,7 +264,7 @@ class FailedAttemptBoardParityTest(unittest.TestCase):
 
     def _row(self, db: store.Store, key: str) -> tuple[str, gantt.Row]:
         quoted = urllib.parse.quote(key, safe="")
-        return next((status, row) for status, row in fc.build_from_store(db, NOW, include_hold_bars=True)
+        return next((status, row) for _key, status, row in fc.build_from_store(db, NOW, include_hold_bars=True)
                     if row.href.endswith(quoted))
 
     def _parity(self, root: Path, db: store.Store) -> None:
@@ -274,9 +274,9 @@ class FailedAttemptBoardParityTest(unittest.TestCase):
         cfg = st.load(root, "cos.toml")
         tasks, *_ = rb._tasks_from_store(data, cfg, cfg.lanes, cfg.kanban, NOW.date())
         running_tasks = [t for t in tasks if t.kind == "running"]
-        open_flow = sum(1 for status, _ in flow if status == "open")
+        open_flow = sum(1 for _, status, _ in flow if status == "open")
         self.assertEqual(counts["dispatch"], open_flow)
-        self.assertEqual(len(running_tasks), sum(1 for status, _ in flow if status == "running"))
+        self.assertEqual(len(running_tasks), sum(1 for _, status, _ in flow if status == "running"))
 
     def test_build_from_store_status_and_segment_kinds(self) -> None:
         root, db = make_store_workspace()
@@ -306,15 +306,15 @@ class FailedAttemptBoardParityTest(unittest.TestCase):
         data = task_forge.page_data(db)
         counts = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
         flow = fc.build_from_store(db, NOW)
-        self.assertEqual(sum(1 for status, _ in flow if status == "running"), 1)
-        self.assertEqual(counts["dispatch"], sum(1 for status, _ in flow if status == "open"))
+        self.assertEqual(sum(1 for _, status, _ in flow if status == "running"), 1)
+        self.assertEqual(counts["dispatch"], sum(1 for _, status, _ in flow if status == "open"))
 
     def test_flow_section_and_issue_page_show_open_not_running(self) -> None:
         root, db = make_store_workspace()
         self.addCleanup(db.engine.dispose)
         _seed_failed_attempt_fixtures(db, live_worker=False)
         rows = fc.build_from_store(db, NOW, include_hold_bars=True)
-        html = fc.section(rows, NOW)
+        html = fc.section([(s, r) for _, s, r in rows], NOW)
         self.assertIn("queued", html)
         self.assertNotRegex(html, r"\brunning\b")
         self.assertIn("gantt-failed", html)
@@ -786,7 +786,7 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         trio_gate.record(self.db, KEY, transition.update)
         transition = decision_actions.refuse(self.db.decisions(KEY)[-1], "conflict")
         trio_gate.record(self.db, KEY, transition.update)
-        row = next((status, row) for status, row in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+        row = next((status, row) for _k, status, row in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                    if row.href.endswith(urllib.parse.quote(KEY, safe="")))
         self.assertEqual(row[0], "needs input")
         self.assertIn("hold", [s.kind for s in row[1].segments])
@@ -939,7 +939,7 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
         evidence = data.exhaustion(KEY_A)
         self.assertIsNotNone(evidence)
         self.assertEqual(evidence.failure, failure)
-        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+        status, row = next((s, r) for _k, s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                            if r.href.endswith(urllib.parse.quote(KEY_A, safe="")))
         self.assertEqual(status, "needs input")
         self.assertIn(task_forge.EXHAUSTED_CHIP, row.note)
@@ -966,7 +966,7 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
                         failure="dispatch failed: worktree missing", live=True)
         data = task_forge.page_data(self.db)
         self.assertIsNone(data.exhaustion(KEY_B))
-        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+        status, row = next((s, r) for _k, s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                            if r.href.endswith(urllib.parse.quote(KEY_B, safe="")))
         self.assertEqual(status, "running")
         self.assertNotIn(task_forge.EXHAUSTED_CHIP, row.note)
@@ -1013,7 +1013,7 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
         data = task_forge.page_data(self.db)
         self.assertIsNone(data.exhaustion(KEY_C))
         self.assertTrue(any(e.message.startswith("exhausted:") for e in data.log(KEY_C)))
-        status, row = next((s, r) for s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+        status, row = next((s, r) for _k, s, r in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                            if r.href.endswith(urllib.parse.quote(KEY_C, safe="")))
         self.assertEqual(status, "open")
         self.assertNotIn(task_forge.EXHAUSTED_CHIP, row.note)
@@ -1023,6 +1023,73 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
         workers = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data)
         # The previous exhaustion no longer applies, and ended rows offer task links.
         self.assertNotIn(task_forge.EXHAUSTED_CHIP, workers)
+
+
+class TaskHistoryWorkerReportTest(unittest.TestCase):
+    """#920: store task history keeps worker reports in a collapsed block, not inline on the step line."""
+
+    def setUp(self) -> None:
+        self.root, self.db = make_store_workspace()
+        (self.root / "CLAUDE.md").write_text(
+            CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n", encoding="utf-8",
+        )
+        self.addCleanup(self.db.engine.dispose)
+        self.db.upsert_item(KEY, workflow="build", stage="plan", forge_state="open", title="Upload size limit")
+
+    def _history(self, page: str) -> str:
+        match = re.search(r'How it got here.*?<div class="card timeline">(.*?)</div>\s*</div>', page, re.S)
+        self.assertIsNotNone(match, page[:500])
+        return match.group(1)
+
+    def _render(self) -> str:
+        cfg = read_config(self.root)
+        return issue_page.render(KEY, [], bs.EMPTY, NOW, root=self.root,
+                                 db=task_forge.page_data(self.db), cfg=cfg)
+
+    def test_suite_not_green_collapses_markdown_worker_said_report(self) -> None:
+        from test_page_markdown import Structure
+
+        long_report = (
+            "## Implementation Plan\n\n### 1. Root Cause\n- **File**: `src/app.py`\n"
+            "1. First step\n2. Second step\n" + ("detail line\n" * 80)
+        )
+        msg = (
+            "worker plan attempt 2: human_review: suite is not green; "
+            "Suite: passed=missing or invalid, failed=0, skipped=0, xfailed=0; "
+            f"worker said: {long_report}"
+        )
+        self.db.add_log(KEY, msg, NOW.isoformat())
+        history = self._history(self._render())
+        self.assertIn("worker plan attempt 2: human_review: suite is not green", history)
+        self.assertNotIn("## Implementation Plan", history)
+        self.assertNotIn("### 1. Root Cause", history)
+        self.assertNotIn("**File**", history)
+        self.assertIn('<details class="step-report">', history)
+        self.assertNotIn('<details class="step-report" open', history)
+        self.assertIn('<h2>Implementation Plan</h2>', history)
+        self.assertIn('<h3>1. Root Cause</h3>', history)
+        self.assertIn("<b>File</b>", history)
+        self.assertFalse(Structure(history).blocks_in_p)
+
+    def test_blocked_multiline_report_collapses_with_rendered_markdown(self) -> None:
+        msg = (
+            'worker plan attempt 2: blocked: Blocked as stated in issue #12 ("Blocked on #10, #11").\n\n'
+            "### Why #12 Cannot Proceed Yet\n1. **Missing module**: `scripts/store.py`..."
+        )
+        self.db.add_log(KEY, msg, NOW.isoformat())
+        history = self._history(self._render())
+        self.assertIn("worker plan attempt 2: blocked: Blocked as stated in issue #12", history)
+        self.assertIn('<details class="step-report">', history)
+        self.assertRegex(history, r"<h3>Why .*#12.*Cannot Proceed Yet</h3>")
+        self.assertIn("<b>Missing module</b>", history)
+        self.assertIn('data-k="issue"', history)
+        self.assertIn("#10", history)
+
+    def test_short_worker_log_stays_one_line_without_details(self) -> None:
+        self.db.add_log(KEY, "worker plan attempt 1: human_review: no report call", NOW.isoformat())
+        history = self._history(self._render())
+        self.assertIn("worker plan attempt 1: human_review: no report call", history)
+        self.assertNotIn('class="step-report"', history)
 
 
 if __name__ == "__main__":

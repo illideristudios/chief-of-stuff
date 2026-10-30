@@ -983,6 +983,33 @@ class RenderOnRequestTest(unittest.TestCase):
         self.assertEqual(head.getheader("Content-Length"), str(len(got.body)))
         self.assertEqual(head.getheader("Last-Modified"), got.getheader("Last-Modified"))
 
+    def test_a_settings_file_reference_is_not_a_tracker_blob(self):
+        # #889: a workspace file that is not in the backlog repository stays text; an issue still links.
+        text = (self.root / "CLAUDE.md").read_text()
+        (self.root / "CLAUDE.md").write_text(
+            text + "- Backlog: GitLab; host https://forge.example; project team/tracker\n")
+        (self.root / "chief-of-stuff.toml").write_text("[workers]\nclaude_profile = \"default\"\n")
+        (self.pages / "decision-settings-profile.json").write_text(json.dumps({
+            "headline": "Which profile",
+            "ask": "See chief-of-stuff.toml:54 and `chief-of-stuff.toml:54`.",
+            "options": [{"key": "A", "title": "Keep", "text": "stay"},
+                        {"key": "B", "title": "Drop", "text": "change"}],
+            "recommended": "A", "why": "fine", "default": "A stays",
+            "references": [
+                {"kind": "code", "value": "chief-of-stuff.toml:54", "label": "the [workers] claude_profile line"},
+                {"kind": "issue", "value": "#12", "label": "the tracker"},
+            ],
+        }))
+        resp = get(self.port, "/decisions/settings-profile")
+        body = resp.body.decode()
+        self.assertEqual(resp.status, 200)
+        self.assertIn("chief-of-stuff.toml:54", body)
+        self.assertIn("the [workers] claude_profile line", body)
+        self.assertIn("<code>chief-of-stuff.toml:54</code>", body)
+        self.assertNotIn("/-/blob/", body)
+        self.assertNotRegex(body, r"<a\b[^>]*>[^<]*chief-of-stuff\.toml:54")
+        self.assertIn('href="https://forge.example/team/tracker/-/issues/12"', body)
+
     def test_pages_are_routes_and_their_files_are_not_served(self):
         # The user, 2026-09-26: "pages should be: / /decisions /decisions/id actually an app".
         (self.pages / "decision-cache-ttl.json").write_text(
@@ -1688,8 +1715,77 @@ class AnswerTest(unittest.TestCase):
         page = get(self.port, "/decisions/cache-ttl").body.decode()
         self.assertIn(">ANSWERED · B<", page)
         self.assertIn("answered, saved", page)
+        for absent in ("<form", 'type="radio"', 'name="words"', "<button"):
+            self.assertNotIn(absent, page)
         listing = get(self.port, "/decisions").body.decode()
         self.assertIn('<div class="row pend saved">', listing)
+
+    def test_an_answered_decision_refuses_a_second_answer(self):
+        first = post(self.port, "/decisions/cache-ttl", b"key=B&words=first", origin=self.origin)
+        self.assertEqual(first.status, 303)
+        get(self.port, "/decisions/cache-ttl")
+        before = self.json.read_bytes(), self.json.stat().st_mtime_ns, dict(pg.RENDERED_AT)
+        again = post(self.port, "/decisions/cache-ttl", b"key=A&words=second", origin=self.origin)
+        self.assertEqual(again.status, 409)
+        self.assertIn(b"already answered", again.body)
+        self.assertEqual((self.json.read_bytes(), self.json.stat().st_mtime_ns, dict(pg.RENDERED_AT)), before)
+        saved = self.answer()
+        self.assertEqual((saved["key"], saved["words"]), ("B", "first"))
+        d = json.loads(self.json.read_text())
+        d["answer"] = "A"
+        self.json.write_text(json.dumps(d))
+        refused = post(self.port, "/decisions/cache-ttl", b"key=B", origin=self.origin)
+        self.assertEqual(refused.status, 409)
+        self.assertEqual(json.loads(self.json.read_text())["answer"], "A")
+
+    def test_a_saved_write_in_refuses_a_second_answer(self):
+        first = post(self.port, "/decisions/cache-ttl", b"words=ask+the+owner", origin=self.origin)
+        self.assertEqual(first.status, 303)
+        before = self.json.read_bytes()
+        for body in (b"key=B", b"words=override"):
+            with self.subTest(body=body):
+                self.assertEqual(post(self.port, "/decisions/cache-ttl", body, origin=self.origin).status, 409)
+                self.assertEqual(self.json.read_bytes(), before)
+
+    def test_a_decision_answered_in_the_tracker_refuses_a_page_post(self):
+        self.tracker.write_text(self.tracker.read_text().replace(
+            "| time | item | Robin's words |\n|---|---|---|\n",
+            "| time | item | Robin's words |\n|---|---|---|\n"
+            "| 18:54 | decision-cache-ttl | let's go ahead and fix the toml issues preventing page rendering please |\n",
+            1))
+        page = get(self.port, "/decisions/cache-ttl").body.decode()
+        self.assertIn(">ANSWERED<", page)
+        self.assertIn('<div class="card answered">', page)
+        self.assertNotIn("<form", page)
+        self.assertNotIn('type="radio"', page)
+        before = self.json.read_text()
+        mtime, rendered = self.json.stat().st_mtime_ns, dict(pg.RENDERED_AT)
+        for body in (b"key=B", b"words=override"):
+            with self.subTest(body=body):
+                refused = post(self.port, "/decisions/cache-ttl", body, origin=self.origin)
+                self.assertEqual(refused.status, 409)
+        self.assertEqual((self.json.stat().st_mtime_ns, dict(pg.RENDERED_AT)), (mtime, rendered))
+        self.assertIsNone(self.answer())
+        self.assertEqual(self.json.read_text(), before)
+
+    def test_an_unreadable_tracker_refuses_the_post_instead_of_overwriting(self):
+        self.tracker.write_bytes(b"\xff\xfe not utf-8")
+        before = self.json.read_text()
+        refused = post(self.port, "/decisions/cache-ttl", b"key=B", origin=self.origin)
+        self.assertEqual(refused.status, 503)
+        self.assertEqual(self.json.read_text(), before)
+
+    def test_an_unreadable_workspace_refuses_the_post_instead_of_overwriting(self):
+        config = self.root / "CLAUDE.md"
+        config.unlink()
+        before = self.json.read_bytes()
+        for contents in (None, "no coordinator block"):
+            with self.subTest(contents=contents):
+                if contents is not None:
+                    config.write_text(contents)
+                refused = post(self.port, "/decisions/cache-ttl", b"key=B", origin=self.origin)
+                self.assertEqual(refused.status, 503)
+                self.assertEqual(self.json.read_bytes(), before)
 
     def test_a_write_in_is_saved_with_the_words_and_goes_back_to_the_list(self):
         resp = post(self.port, "/decisions/cache-ttl", "words=neither — ask the owner&back=/decisions".encode(),
