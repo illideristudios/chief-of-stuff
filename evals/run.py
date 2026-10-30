@@ -88,7 +88,7 @@ def allowed_tools(root: Path) -> list[str]:
 
 
 ALLOWED = allowed_tools(PLUGIN_ROOT)
-DISALLOWED = ["Bash(git commit:*)", "Bash(git add:*)", "Bash(git push:*)"]
+DISALLOWED = []  # No coordinator human-only command list. Workspace and host rules still apply.
 # These reach real Claude sessions on this machine. No eval run may expose them.
 PEER_TOOLS = ("ListAgents", "SendMessage")
 MOCK_CALENDAR = EVALS / "mock_calendar.py"
@@ -875,7 +875,7 @@ class Case:
     spec: dict[str, Any]
 
 
-def load_cases(patterns: list[str], golden_only: bool = False) -> list[Case]:
+def load_cases(patterns: list[str], golden_only: bool = False, *, include_superseded: bool = False) -> list[Case]:
     """The cases to run. `golden_only` keeps just the ones their spec marks `"golden": true`.
 
     Zach, 2026-09-19: sonnet to iterate, opus on the golden cases only for full green. The mark
@@ -888,6 +888,8 @@ def load_cases(patterns: list[str], golden_only: bool = False) -> list[Case]:
         if patterns and not any(fnmatch.fnmatch(name, p) for p in patterns):
             continue
         spec = json.loads(spec_path.read_text())
+        if spec.get("superseded_by") and not include_superseded:
+            continue
         if golden_only and spec.get("golden") is not True:
             continue
         cases.append(Case(name, spec_path.parent, spec))
@@ -1155,7 +1157,7 @@ def claude_options(spec: dict[str, Any], mcp_config: dict[str, Any] | None = Non
     allowed = allowed_tools(root or PLUGIN_ROOT) + ([CALENDAR_TOOL] if "calendar" in mcp_config["mcpServers"] else []) + (PEER_MOCK_TOOLS if "peers" in mcp_config["mcpServers"] else [])
     return ("--setting-sources", "project", "--strict-mcp-config", "--mcp-config", json.dumps(mcp_config),
             "--max-turns", str(spec.get("max_turns", 10)), "--tools", *TOOLS,
-            "--allowedTools", *allowed, "--disallowedTools", *DISALLOWED)
+            "--allowedTools", *allowed, *(("--disallowedTools", *DISALLOWED) if DISALLOWED else ()))
 
 
 def call_claude(request: Request, options: tuple[str, ...], env: dict[str, str], out: Path,

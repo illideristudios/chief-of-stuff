@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import subprocess
 import time
 import uuid
 from datetime import datetime
@@ -17,11 +18,15 @@ import clock as engine_clock
 import dispatch_prompt
 import guard_binding
 import host_adapter
+import limits
+import limits_probe
 import make_worktree
 import process_status
 import reconcile
+import runtimes
 import supervisor
-from settings import ModelEntry, SettingsError, pick, load as load_settings
+import t3_adapter
+from settings import ModelEntry, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import RETRYABLE, Failure, Reply, Request, retry_at
@@ -109,6 +114,32 @@ def _exit_code(run_dir: Path) -> int:
     return _exit_record(run_dir)[0]
 
 
+def stop(record: dict) -> None:
+    """Stop a local run by its verified identities, then prove both runner and host ended.
+
+    The T3 polling process is not the server-owned worker. It must never be used as
+    a cancellation handle. Identity failures and unavailable process reads fail closed.
+    """
+    if record.get("launcher") == "t3":
+        raise RuntimeError("T3 cannot cancel a thread")
+    session = record.get("session_id")
+    if not isinstance(session, str) or not session:
+        raise RuntimeError("cannot verify worker identity")
+    for pid_key, identity_key, host in (("pid", "identity", True), ("runner_pid", "runner_identity", False)):
+        pid, expected = record.get(pid_key), record.get(identity_key)
+        if type(pid) is not int or pid <= 0 or not isinstance(expected, str) or not expected:
+            raise RuntimeError("cannot verify worker identity")
+        actual = process_status.identity(pid, session, host=host)
+        if actual is not None and actual != expected:
+            raise RuntimeError("worker process identity changed; refusing to stop it")
+    process_status.stop_session(session)
+    for pid_key, host in (("pid", True), ("runner_pid", False)):
+        if process_status.identity(record[pid_key], session, host=host) is not None:
+            raise RuntimeError("cannot verify prior worker ended")
+    if process_status.carriers(session):
+        raise RuntimeError("cannot verify prior worker ended: session processes remain")
+
+
 def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                   trees: Path, clock: engine_clock.Clock) -> dict | None:
     """Recover a detached start before changing its tree or moving its exit evidence."""
@@ -122,6 +153,13 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                 raise RuntimeError("existing worker start is unverified; preserving its evidence")
             return None
         record = json.loads(started.read_text())
+        if (run_dir / "t3.json").is_file() or (run_dir / "thread.json").is_file():
+            record.update(runtime="claude", launcher="t3")
+            if (run_dir / "thread.json").is_file():
+                record.update(_thread_fields(run_dir))
+            heads = json.loads((run_dir / "branch_heads.json").read_text()) if (run_dir / "branch_heads.json").is_file() else None
+            if isinstance(heads, dict) and all(isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}", v) for v in heads.values()):
+                record["branch_heads"] = heads
         prepared = data.get("review_trees", {}).get(str(attempt), {}) if stage == "review" else {
             "tree": data.get("worktree"), "branch": data.get("work_branch")}
         record.update(run_dir=str(run_dir), tree=prepared.get("tree"), branch=prepared.get("branch"),
@@ -139,6 +177,9 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
             or not Path(record["tree"]).resolve().is_relative_to(trees.resolve())
             or run_dir.resolve().is_relative_to(Path(record["tree"]).resolve())):
         raise RuntimeError("existing worker identity is incomplete; preserving its evidence")
+    if record.get("launcher") == "t3":
+        # A dead poller says nothing about the remote worker. Keep its reservation and adopt its evidence.
+        return record
     try:
         _exit_code(run_dir)
     except (OSError, ValueError, KeyError, TypeError):
@@ -162,29 +203,53 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
 
 def _model(store: Any, key: str, stage: str, data: dict, actor: Any,
            models: dict[str, tuple[ModelEntry, ...]], at: str,
-           launchable: Callable[[str], bool] = lambda runtime: runtime == "claude", how: str = "first",
-           choose: Callable[[tuple[ModelEntry, ...]], ModelEntry] | None = None) -> ModelEntry:
-    """The entry this start launches: the stage rotation's first launchable entry, or with `how` "random" a uniform
-    pick among the launchable ones (#877: comparing models over time), or the next one after a quota stop, across
-    runtimes (ledger D10, #701); the persona's model when none is launchable. An entry this engine cannot launch here
-    is logged as skipped, never a failure."""
+           launchable: Callable[[str], bool] = lambda runtime: runtime == "claude", how: str = "round_robin",
+           choose: Callable[[tuple[ModelEntry, ...]], ModelEntry] | None = None, *, attempt: int = 1,
+           available: Callable[[ModelEntry], bool] = lambda entry: True, workflow: str = "") -> ModelEntry:
+    """Select from the existing class rotation. Retries follow their recorded entry under every strategy.
+
+    Fresh launches share a durable round-robin cursor; first and random remain explicit configuration.
+    Eligibility uses launch preconditions and known account limits, never performance records.
+    """
     cls = TASK_CLASS.get(stage, stage)
     rotation = models.get(cls, ())
-    usable = tuple(entry for entry in rotation if launchable(entry.runtime))
-    chosen = (((choose or random.choice)(usable) if how == "random" else usable[0]) if usable
-              else ModelEntry("claude", actor.model, actor.effort or None))
-    previous = data.get("model", {}).get(stage)
-    if usable and "quota" in data and previous:
-        try:
-            chosen = pick(usable, after=previous)
-        except SettingsError:
-            pass  # every launchable entry has stopped; the quota wait is over, so start from the first again
-    passed = rotation if how == "random" else (rotation[:rotation.index(chosen)] if chosen in rotation else rotation)
-    skipped = [str(entry) for entry in passed if entry not in usable]
+    launchable_entries = tuple(entry for entry in rotation if launchable(entry.runtime))
+    usable = tuple(entry for entry in launchable_entries if available(entry))
+    skipped = [str(entry) for entry in rotation if entry not in launchable_entries]
     if skipped:
         store.add_log(key, f"skipped {', '.join(skipped)}: not launchable here; a non-Claude host needs its CLI on "
                            "PATH and a forge-protected default branch (§13, #701)", at)
-    return chosen
+    capped = [str(entry) for entry in launchable_entries if entry not in usable]
+    if capped:
+        store.add_log(key, f"skipped {', '.join(capped)}: account near its configured limit", at)
+    if not usable:
+        fallback = ModelEntry("claude", actor.model, actor.effort or None)
+        if not launchable(fallback.runtime):
+            raise RuntimeError("no rotation entry is launchable here")
+        if capped or not available(fallback):
+            raise RuntimeError("no rotation entry available below its account limit")
+        usable = (fallback,)
+
+    previous = next((str(ModelEntry(seg.runtime, seg.model, seg.effort or None))
+                     for seg in reversed(store.segments(key))
+                     if TASK_CLASS.get(seg.stage, seg.stage) == cls and seg.runtime and seg.model
+                     and (seg.stage != stage or seg.attempt < attempt)), "")
+    if not previous and "quota" in data:
+        previous = data.get("model", {}).get(stage, "")
+
+    def select(cursor: str) -> str:
+        if previous or how == "round_robin":
+            ordered = runtimes.following(rotation, previous or cursor)
+            return str(next((entry for entry in ordered if entry in usable), usable[0]))
+        return str((choose or random.choice)(usable) if how == "random" else usable[0])
+
+    selected = store.rotation_choice(key, stage, attempt, cls, tuple(map(str, usable)), select, workflow)
+    return next(entry for entry in usable if str(entry) == selected)
+
+
+def below_limit(runtime: str, account: str, now: datetime, warn_at: float) -> bool:
+    """Use the existing no-call probe and threshold. Unknown limits leave an entry eligible."""
+    return not limits.near_cap(limits_probe.read(runtime, account), now, warn_at)
 
 
 def _guarded(forge: Any, issue_key: str) -> bool:
@@ -240,6 +305,13 @@ def _clear_tree(root: Path, tree: Path, store: Any, key: str, at: str) -> None:
         session = prior.get("session_id") if isinstance(prior, dict) else None
         if prior.get("cwd") != str(tree) or not isinstance(session, str) or not session:
             continue
+        if (command.parent / "t3.json").exists():
+            try:
+                state = t3_adapter.observe(command.parent)
+            except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+                raise RuntimeError(f"T3 run {command.parent.name} is unverified; preserving its tree") from exc
+            if t3_adapter.outcome(state) is None:
+                raise RuntimeError(f"T3 run {command.parent.name} is still live in {tree.name}")
         live = process_status.carriers(session)
         if not live:
             continue
@@ -272,7 +344,7 @@ def stage_defaults(root: Path, text: str, stage: str) -> Any:
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
            claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
-           clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
+           clock: engine_clock.Clock = engine_clock.system, launcher: str = "cli") -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
@@ -282,10 +354,12 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     data = _resume(store, issue_key)
     existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
     if existing is not None:
-        store.set_ownership(issue_key, existing["tree"], "tree")
-        _save_run(store, issue_key, stage, attempt, existing)
+        store.set_tree(issue_key, existing["tree"])
         # Adopt what the start launched, not today's rotation.
-        runtime, _, ran = data.get("model", {}).get(stage, "").partition(":")
+        selected = data.get("rotation_choices", {}).get(f"{stage}-{attempt}", {}).get("entry", "")
+        selected = selected or data.get("model", {}).get(stage, "")
+        _save_run(store, issue_key, stage, attempt, existing, model=selected)
+        runtime, _, ran = selected.partition(":")
         model, _, effort = ran.rpartition("@") if "@" in ran else (ran, "", "")
         used = (model, effort) if model else (actor.model, actor.effort or "")
         return (*used, runtime) if runtime not in ("", "claude") else used
@@ -297,7 +371,10 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
-    assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
+    body = got.issue.body
+    if stage != "review" and (changes := data.get("architect_changes")):
+        body += f"\n\n## Architect findings for {changes['head']}\n\n{changes['reply']}\n"
+    assignment = dispatch_prompt.compose_issue(row, got.issue.title, body, stage, actor, root=root,
                                                skills=defaults.skills if defaults else (), rules=rules,
                                                require_green=require_green)
     number = int(issue_key.rpartition("#")[2])
@@ -315,7 +392,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             raise RuntimeError("prepared review tree is unreadable")
         if request_head.branch != branch:
             raise RuntimeError("request branch changed since the refused start")
-        store.set_ownership(issue_key, str(tree), "tree")
+        store.set_tree(issue_key, str(tree))
         if prepared_review.get("head") != request_head.head or head[1] != request_head.head:
             # Retain the obsolete tree under cleanup ownership; build the new head in a fresh checkout.
             tree_name = f"{tree_name}-{uuid.uuid4()}"
@@ -325,7 +402,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         code, actual = make_worktree.git(["symbolic-ref", "--short", "HEAD"], tree)
         if code or actual != branch or not tree.resolve().is_relative_to(trees.resolve()):
             raise RuntimeError("existing worktree is missing or no longer on the work branch")
-        store.set_ownership(issue_key, str(tree), "tree")
+        store.set_tree(issue_key, str(tree))
     elif not prepared_review:
         started = any(name.startswith(f"{stage}-") for name in data.get("runs", {}))
         # A failed start before any worker (such as an unreadable issue) left no tree to lose.
@@ -336,7 +413,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         made = make_worktree.build(root, clone or root, str(trees), tree_name, branch,
                                    agent, from_branch=from_branch)
         tree = made.path
-        store.set_ownership(issue_key, str(tree), "tree")
+        store.set_tree(issue_key, str(tree))
         if stage != "review":
             # Keep this even after a refused start: a relaunch can use the tree without a fresh cut (#551).
             store.update_resume(issue_key, lambda d: d.update(worktree=str(tree), work_branch=branch))
@@ -372,6 +449,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     protects: list[bool] = []  # the forge is asked once, and only when a non-Claude entry is considered
 
     def launchable(runtime: str) -> bool:
+        if launcher == "t3":
+            return t3_adapter.available(runtime) and _guarded(forge, issue_key)
         if runtime == "claude":
             return True
         if not host_adapter.available(runtime):
@@ -380,23 +459,48 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             protects.append(_guarded(forge, issue_key))
         return protects[0]
 
-    chosen = _model(store, issue_key, stage, data, actor, loaded.models, clock().isoformat(), launchable,
-                    how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "first"))
+    now = clock()
+    capacity: dict[str, bool] = {}
+
+    def available(entry: ModelEntry) -> bool:
+        if entry.runtime not in capacity:
+            account = claude_as_profile if entry.runtime == "claude" else ""
+            capacity[entry.runtime] = below_limit(entry.runtime, account, now, loaded.limits.warn_at)
+        return capacity[entry.runtime]
+
+    workflow = policies.workflow_for(data.get("issue_type") or getattr(row, "issue_type", None)).name
+    rotation = loaded.models.get(TASK_CLASS.get(stage, stage), ())
+    if launcher == "t3" and rotation and not any(entry.runtime in t3_adapter.PROVIDERS for entry in rotation):
+        raise RuntimeError("T3 has no engine channel for any runtime in this rotation")
+    chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
+                    how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
+                    attempt=attempt, available=available, workflow=workflow)
     try:
+        if launcher == "t3" and chosen.runtime not in t3_adapter.PROVIDERS:
+            raise RuntimeError(f"T3 has no engine channel for {chosen.runtime}; refusing a local fallback")
+        if launcher == "t3" and claude_as_profile:
+            raise RuntimeError("T3 cannot map claude_as_profile to a provider instance; refusing the default account")
         request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                           cwd=str(tree), worker=True, agent=agent,
                           plugin_dirs=plugin_dirs)
         host: dict[str, Any] = {}
-        if chosen.runtime == "claude":
+        via_t3 = launcher == "t3" and chosen.runtime == "claude"  # T3 is the launcher; the worker is still a claude worker
+        if chosen.runtime == "claude" and not via_t3:
             runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
         else:
-            # §13: no guard plugin on these hosts, so the forge must protect the default and the request's target, and
-            # every protected branch's head is kept so collect can see a merge or push outside the engine (#860).
+            # §13: no guard plugin loads on these hosts or in a T3 thread, so the forge must protect the default and the
+            # request's target, and every protected branch's head is kept so collect can see a merge or push outside
+            # the engine (#860).
             if not _guarded(forge, issue_key):
                 raise RuntimeError(f"{chosen.runtime} workers launch only where the forge protects the default branch "
                                    "and the branch its request targets")
             host = {"runtime": chosen.runtime, "branch_heads": host_adapter.branch_heads(tree, forge.protected_branches())}
-            runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
+            if via_t3:
+                host["launcher"] = "t3"
+                (run_dir / "branch_heads.json").write_text(json.dumps(host["branch_heads"]))
+                runner = t3_adapter.start(request, run_dir, env=env)
+            else:
+                runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
         try:
             deadline = time.monotonic() + 5
             while not (run_dir / "started.json").exists():
@@ -404,6 +508,18 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                     raise RuntimeError("could not verify worker start: adapter did not start a host")
                 time.sleep(0.01)
             pid = json.loads((run_dir / "started.json").read_text())["pid"]
+            if via_t3:  # the thread id is the worker's identity under T3, beside the session id (§13)
+                if (run_dir / "thread.json").exists():
+                    host.update(_thread_fields(run_dir))
+                record = {"pid": pid, "session_id": session_id, "identity": "t3",
+                          "runner_pid": runner.pid, "runner_identity": "t3", "run_dir": str(run_dir),
+                          "started_at": clock().isoformat(), "tree": str(tree), "branch": branch,
+                          "starting_head": starting_head, **host}
+                if stage == "review":
+                    record["reviewed_head"] = request_head.head
+                _save_run(store, issue_key, stage, attempt, record, model=str(chosen))
+                _runners[str(run_dir)] = runner
+                return chosen.model, chosen.effort or ""
             while True:
                 identity = process_status.identity(pid, session_id, host=True)
                 if identity is None:
@@ -425,6 +541,14 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                 record["reviewed_head"] = request_head.head
             _save_run(store, issue_key, stage, attempt, record, model=str(chosen))
         except Exception as start_error:
+            if via_t3:
+                # A remote start may have succeeded. Preserve its files and tree even if the engine's
+                # own verification or store write failed; the next pass adopts it rather than relaunching.
+                try:
+                    t3_adapter.cancel(runner, run_dir)
+                except Exception as cancel_error:
+                    store.add_log(issue_key, f"T3 start unverified; preserved for recovery: {cancel_error}", clock().isoformat())
+                raise start_error
             try:
                 claude_adapter.cancel(runner)
             except Exception as cancel_error:
@@ -456,6 +580,100 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         raise StartFailed(chosen, exc) from exc
 
 
+def _thread_fields(run_dir: Path) -> dict:
+    """Only the thread's id and link from the runner's `thread.json`, as strings: nothing else it holds is taken."""
+    found = json.loads((run_dir / "thread.json").read_text())
+    return {key: str(found[key]) for key in ("thread_id", "thread_link")}
+
+
+NEVER_WRITTEN = "it was never written to the worker session"
+
+
+def deliver_messages(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system) -> None:
+    """Hand queued operator messages to their Claude runner's mailbox and settle earlier handoffs (#1160).
+
+    Delivered means the CLI replayed the message's uuid; failed means it provably never reached the session. A message
+    written but never echoed stays sending: it is ambiguous, so it is neither failed nor written again.
+    """
+    for item in store.items():
+        for message in store.worker_messages(item.issue_key):
+            if message.status not in ("queued", "sending"):
+                continue
+            try:
+                _deliver(store, root, message)
+            except ValueError:
+                pass  # another engine resolved it first; the store refuses conflicting outcomes
+            except (OSError, RuntimeError) as exc:
+                store.add_log(item.issue_key, f"worker message {message.id} not handed off: {exc}", clock().isoformat())
+
+
+def _deliver(store: Any, root: Path, message: Any) -> None:
+    identity = (message.id, message.issue_key, message.stage, message.attempt, message.session_id)
+
+    def fail(reason: str, *, claim_id: str | None = None) -> None:
+        store.fail_worker_message(*identity, reason=reason,
+                                  expected_status="sending" if claim_id else "queued", delivery_id=claim_id)
+
+    run_dir = _run_dir(root, message.issue_key, message.stage, message.attempt)
+    record = _resume(store, message.issue_key).get("runs", {}).get(f"{message.stage}-{message.attempt}")
+    if not isinstance(record, dict) or record.get("session_id") != message.session_id \
+            or Path(record.get("run_dir", "")).resolve() != run_dir.resolve():
+        record = None
+    if message.status == "queued":
+        segment = next((s for s in store.segments(message.issue_key)
+                        if (s.stage, s.attempt) == (message.stage, message.attempt)), None)
+        if segment is None or segment.ended_at is not None:
+            return fail(f"the worker attempt ended before delivery; {NEVER_WRITTEN}")
+        if record is None:
+            return  # the run record is saved just after launch verifies the start
+        runtime = record.get("runtime", "claude")
+        if runtime != "claude":
+            return fail(f"{runtime} workers cannot receive live messages; {NEVER_WRITTEN}")
+        if not claude_adapter.messaging(run_dir):
+            return fail(f"this worker was started without live messaging; {NEVER_WRITTEN}")
+        with claude_adapter.mailbox_lock(run_dir):
+            if (run_dir / claude_adapter.MAILBOX / "closed").exists() or not _runner_live(record, run_dir):
+                return fail(f"the worker session ended before delivery; {NEVER_WRITTEN}")
+            if not claude_adapter.intake_open(run_dir):
+                return  # the runner has not sent the assignment yet
+            claim = store.begin_worker_message_delivery(*identity)
+            try:
+                claude_adapter.post(run_dir, {"delivery_id": claim.delivery_id, "session_id": message.session_id,
+                                              "body": message.body})
+            except OSError as exc:
+                if claude_adapter.handoff_state(run_dir, claim.delivery_id)[0] == "missing":
+                    fail(f"handoff failed ({exc}); {NEVER_WRITTEN}", claim_id=claim.delivery_id)
+                raise
+        return
+    if record is None or not claude_adapter.messaging(run_dir):
+        return  # nothing can prove where a sending message went; leave it unconfirmed
+    # The lock orders this judgement after any handoff holding it: a claim with no file is then a crashed handoff.
+    with claude_adapter.mailbox_lock(run_dir):
+        state, ack = claude_adapter.handoff_state(run_dir, message.delivery_id)
+        if state == "acked":
+            if ack.get("session_id") != message.session_id or ack.get("delivery_id") != message.delivery_id:
+                raise RuntimeError("acknowledgment names a different session or delivery")
+            store.ack_worker_message(*identity, delivery_id=message.delivery_id,
+                                     evidence=f"Claude CLI replayed uuid {message.delivery_id} at {ack.get('at')}; "
+                                              "the CLI read it, which does not show the model acted on it")
+        elif state == "taken" and claude_adapter.replayed(run_dir, message.delivery_id, message.session_id, message.body):
+            store.ack_worker_message(*identity, delivery_id=message.delivery_id,
+                                     evidence=f"Claude CLI replayed uuid {message.delivery_id} in the attempt's stream; "
+                                              "the CLI read it, which does not show the model acted on it")
+        elif state == "missing":
+            fail(f"the handoff was interrupted before the mailbox write; {NEVER_WRITTEN}", claim_id=message.delivery_id)
+        elif state == "rejected" or (state == "inbox" and not _runner_live(record, run_dir)
+                                      and claude_adapter.revoke(run_dir, message.delivery_id)):
+            fail(f"the worker closed its intake before taking the message; {NEVER_WRITTEN}", claim_id=message.delivery_id)
+
+
+def _runner_live(record: dict, run_dir: Path) -> bool:
+    """The pipe owner is up. An unavailable process view raises; it never reads as a stopped runner."""
+    if (run_dir / "exit.json").exists():
+        return False
+    return process_status.identity(record["runner_pid"], record["session_id"]) == record.get("runner_identity")
+
+
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
             trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False,
             finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None) -> reconcile.Facts | None:
@@ -466,6 +684,10 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             continue
         key = segment.issue_key
         data = _resume(store, key)
+        recovery = data.get("stall_recovery", {})
+        if (recovery.get("stage"), recovery.get("attempt"), recovery.get("phase")) == (
+                segment.stage, segment.attempt, "stopping"):
+            continue  # the engine owns this intentional stop, including an interrupted recovery
         now = clock()
         outcome, reason, reply, exited_at = "failed", "", None, None
         try:
@@ -487,6 +709,10 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     record = data["runs"][f"{segment.stage}-{segment.attempt}"]
             if not isinstance(record, dict):
                 raise ValueError("missing run record")
+            if record.get("launcher") == "t3":
+                observed = t3_adapter.observe(record)
+                if observed.error or observed.alive is not False:
+                    continue  # a dead polling process cannot close a live or unverified T3 thread
             if (type(record.get("pid")) is not int or record["pid"] <= 0
                     or any(not isinstance(record.get(field), str) or not record[field]
                            for field in ("session_id", "run_dir", "tree"))):
@@ -499,6 +725,17 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 _save_run(store, key, segment.stage, segment.attempt, record)
                 data = _resume(store, key)
                 record = data["runs"][f"{segment.stage}-{segment.attempt}"]
+            if record.get("launcher") == "t3":
+                try:
+                    remote = t3_adapter.refresh(run_dir)
+                except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+                    store.add_log(key, f"T3 state unverified; preserving worker: {exc}", now.isoformat())
+                    continue
+                if (run_dir / "thread.json").is_file():
+                    record.update(_thread_fields(run_dir))
+                    _save_run(store, key, segment.stage, segment.attempt, record)
+                if t3_adapter.outcome(remote) is None:
+                    continue
             runner = _runners.get(str(run_dir))
             if runner is not None and runner.poll() is not None:
                 _runners.pop(str(run_dir))
@@ -522,8 +759,11 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             code, exited_at = _exit_record(run_dir)
             runtime = record.get("runtime", "claude")
             stdout, stderr = (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text()
-            if runtime == "claude":
+            via_t3 = record.get("launcher") == "t3"  # a thread's reply is plain text, never a Claude envelope
+            if runtime == "claude" and not via_t3:
                 reply = claude_adapter.classify(code, stdout, stderr)
+            elif via_t3:
+                reply = t3_adapter.classify(code, stdout, stderr)
             else:
                 reply = host_adapter.classify(runtime, code, stdout, stderr)
                 host_adapter.cleanup(record)
@@ -562,7 +802,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                         outcome = "done"
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
-            if runtime != "claude":
+            if runtime != "claude" or via_t3:
                 held = host_adapter.moved_outside_engine(store, record, now.isoformat())
                 if held:
                     outcome, reason = "human_review", held

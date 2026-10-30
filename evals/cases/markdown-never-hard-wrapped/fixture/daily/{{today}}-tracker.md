@@ -13,10 +13,6 @@
 | time | item | Robin's words |
 |---|---|---|
 
-## File ownership
-
-- Upload fix: `src/upload/`
-
 ## Log
 
 - 09:00 opened the day

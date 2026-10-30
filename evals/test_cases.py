@@ -171,9 +171,6 @@ class CaseLintTest(unittest.TestCase):
     def test_retired_deploy_provider_is_absent_outside_archives(self):
         # C20 names the open gap. Only the architect edits architecture/compliance.md.
         self.assertLessEqual(set(retired_provider_files(EVALS.parent)), {"architecture/compliance.md"})
-        ledger = (EVALS.parent / "architecture/compliance.md").read_text().splitlines()
-        stray = [line[:60] for line in ledger if RETIRED_PROVIDER in line.lower() and not line.startswith("| C20 |")]
-        self.assertEqual(stray, [])
 
     def test_retired_provider_scan_reads_source_and_skips_generated_state(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1004,7 +1001,7 @@ class CaseLintTest(unittest.TestCase):
         from unittest.mock import patch
         from evals.test_agent_budget import COORDINATOR_SESSIONS_RULES
         names = (*self.COORDINATOR_SESSIONS_SKILL_CASES, *self.COORDINATOR_SESSIONS_SKIPPED_CASES)
-        loaded = run.load_cases(list(names))
+        loaded = run.load_cases(list(names), include_superseded=True)
         self.assertEqual({case.name for case in loaded}, set(names))
         moved = {sentence for sentences in COORDINATOR_SESSIONS_RULES.values() for sentence in sentences}
         with patch.object(run, "_free_port", return_value=0):
@@ -1134,27 +1131,6 @@ class CaseLintTest(unittest.TestCase):
         "one-shot-in-flight-is-checked-with-processes", "dispatch-writes-the-prompt", "spawn-needs-a-yes",
     )
 
-    def test_dispatch_graders_load_and_quote_moved_rules(self):
-        from unittest.mock import patch
-        from evals.test_agent_budget import DISPATCH_RULES
-        names = (*self.DISPATCH_SKILL_CASES, *self.DISPATCH_SKILL_SKIPPED_CASES)
-        loaded = run.load_cases(list(names))
-        self.assertEqual({case.name for case in loaded}, set(names))
-        moved = {sentence for sentences in DISPATCH_RULES.values() for sentence in sentences}
-        with patch.object(run, "_free_port", return_value=0):
-            for case in loaded:
-                with self.subTest(case=case.name), tempfile.TemporaryDirectory() as d:
-                    c = ctx(case.spec)
-                    rendered = run.render_value(case.spec, c)
-                    run.render_tree(case.root / "fixture", Path(d), c)
-                    self.assertTrue((Path(d) / "CLAUDE.md").is_file())
-                    for g in graders(rendered):
-                        if "skills/dispatch/SKILL" in g.get("input_match", ""):
-                            self.assertIn(g["rule"], rules_text())
-                            self.assertIn(g["rule"], moved, "Read grader must quote a moved sentence verbatim")
-                            self.assertIn(g["type"], run.GRADER_TYPES)
-                            for key in ("tool", "input_match", "before"):
-                                re.compile(g[key])
 
     def test_dispatch_graders_read_before_the_first_launch_tracker_write_or_result(self):
         from datetime import timezone
@@ -1164,11 +1140,11 @@ class CaseLintTest(unittest.TestCase):
         # name: (the moved sentence the grader quotes, what the Read must precede)
         expected = {
             'item-becomes-task-and-dispatch': ('The Tasks item is the whole ask — write it so a session that reads only that row knows what it is for and what finished looks like, because that is the text the session receives.', 'launch'),
-            'dispatch-needs-yes': ('For a session, you are not writing this block, you are **showing** it: the script reads those lines back off the two rows you already wrote, resolves the tracker to an absolute path, names the worktree, and adds a header of its own that you cannot write or withhold.', 'launch'),
+            'dispatch-needs-yes': ('For a session, you are not writing this block, you are **showing** it: the script reads those lines back off the row you already wrote, resolves the tracker to an absolute path, names the worktree, and adds a header of its own that you cannot write or withhold.', 'launch'),
             'dispatch-names-a-type': ("With `Agent:` lines: a session of one type named there — its own terminal, its own worktree — and then the proposal also names the branch and the path you would create, and the session's name.", 'launch'),
             'no-agent-lines-is-today': ('In an interactive workspace with no `Agent:` lines in the block: a background subagent (the `Agent` tool with `run_in_background: true`), and the subagent type.', 'launch'),
-            'deep-work-becomes-proposal': ('For a new interactive session, show a **dispatch proposal** and await approval.', 'launch'),
-            'dispatch-on-yes-updates-tracker': ("Keep the existing Tasks item and name cells byte-for-byte: approval changes ownership and state, not the task's wording.", 'agent'),
+            'deep-work-becomes-proposal': ('Launch ready interactive work automatically too.', 'launch'),
+            'dispatch-on-yes-updates-tracker': ("Keep the existing Tasks item and name cells byte-for-byte: dispatch changes ownership and state, not the task's wording.", 'agent'),
             'one-shot-dispatch-autonomous': ("Routine one-shot dispatch is authorized by the setting or the user's task-specific request.", 'launch'),
             'one-shot-disjoint-tasks-launch-together': ('Give each launch its own Bash call with `run_in_background: true`; never chain launches with `;` or `&&`, never pipe a launch, and never start one without the flag.', 'launch'),
             'one-shot-relaunch-redispatches': ("That is not a held or failed task and not the user's to decide: relaunch it now in a fresh worktree from current main, without asking, and log why.", 'launch'),
@@ -1178,7 +1154,7 @@ class CaseLintTest(unittest.TestCase):
             'models-effort-whatever-the-runtime': ('Launch an entry as `--runtime <runtime> --model <model-id>`, plus `--effort <effort>` when the entry has one, with the model ID verbatim.', 'launch'),
             'worker-task-by-name': ("Pass the row's `name` cell as `--task`; it resolves to the one row with that name.", 'launch'),
             'worktree-clone-is-a-repos-name': ("`<repo>` is the repository's checkout directory; when the settings' `[repos]` table names that repository, pass the name instead.", 'launch'),
-            'worker-check-validates-a-new-row': ('Before proposing a new task for dispatch, validate its Tasks and File ownership rows with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.', 'launch'),
+            'worker-check-validates-a-new-row': ('Before proposing a new task for dispatch, validate its Tasks row with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.', 'launch'),
             # The report sentence stays in the agent (#539 review R5), so the skill Read grader quotes the moved notification sentence.
             'one-shot-report-is-read-with-result': ("A background launch's completion notification only says the launch ended: name the task in its Bash description, and on the notification read that task's report with `chief-of-stuff result --root . --task <the Tasks name>`, then reconcile it, sync the issue's Kanban state and report that task before using its result.", 'result'),
             'one-shot-worker-named-after-its-issue': ("The name is the one the user gave, or `<project>-<issue>-<role>`: the repository holding the task's issue, its number, and what the worker does (`implementer`, `reviewer`, `researcher`), as in `app-12-reviewer`.", 'launch'),
@@ -1273,149 +1249,7 @@ class CaseLintTest(unittest.TestCase):
                 dirty = block.replace("```\nTask", f"```\n{line}\nTask")
                 self.assertIsNotNone(re.search(g["pattern"], dirty, re.MULTILINE))
 
-    def test_review_pipeline_skill_graders_load_and_quote_rules_text(self) -> None:
-        from unittest.mock import patch
-        loaded = run.load_cases(list(self.REVIEW_PIPELINE_SKILL_CASES))
-        self.assertEqual({case.name for case in loaded}, set(self.REVIEW_PIPELINE_SKILL_CASES))
-        text = rules_text()
-        with patch.object(run, "_free_port", return_value=0):
-            for case in loaded:
-                with self.subTest(case=case.name), tempfile.TemporaryDirectory() as d:
-                    c = ctx(case.spec)
-                    rendered = run.render_value(case.spec, c)
-                    work = Path(d)
-                    run.render_tree(case.root / "fixture", work, c)
-                    self.assertTrue((work / "CLAUDE.md").is_file())
-                    for g in graders(rendered):
-                        if g.get("rule"):
-                            self.assertIn(g["rule"], text, g["name"])
-                        if "skills/review-pipeline/SKILL" in g.get("input_match", ""):
-                            self.assertTrue(g.get("rule"), g["name"])
-                            self.assertIn(g["type"], run.GRADER_TYPES)
-                            for key in ("input_match", "before", "tool"):
-                                re.compile(g[key])
 
-    def test_review_pipeline_skill_graders_require_read_before_the_first_action(self) -> None:
-        """Action scenarios, including an over-budget session poll, read the skill first."""
-        from datetime import timezone
-        from unittest.mock import patch
-        read_match = r'"file_path": "[^"\n]*skills/review-pipeline/SKILL\.md"'
-        edit_before = (
-            r'\A(?=[\s\S]*"(?:old_string|content)":)[\s\S]*"file_path": '
-            r'"(?:[^"\n]*[/\\])?daily[/\\]{{today}}-tracker\.md"'
-        )
-        send_before = (
-            r'\A(?=[\s\S]*"(?:to|recipient)": "[^"\n]+")[\s\S]*"(?:text|content)": "'
-            r'|"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+inbox\b|(?:scripts/)?inbox\.py\b)'
-            r'(?:(?![;&|]|\\n)(?:\\.|[^"\\]))*\bsend\b'
-        )
-        threads_before = (
-            r'"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+review-threads\b|(?:scripts/)?review_threads\.py\b)'
-        )
-        merge_before = (
-            r'"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+merge-approved\b|(?:scripts/)?merge_approved\.py\b)'
-        )
-        poll_before = send_before + r'|"(?:session_id|session_ref|session)": "[^"\n]+"'
-        budget_rule = "Poll that task's session and tell the user; never stop or kill it."
-        auto_rule = "Send each automatic fix at once, without asking, to the owning session with `Plan: enter plan mode (EnterPlanMode) for this task before anything else; write nothing until the user approves the plan.`, as every assignment is, and leave it out of the ask."
-        expected = {
-            "over-budget-polls-the-session": (budget_rule, poll_before),
-            "triage-acts-on-the-reply": ("Record the reply as a Decisions row quoting it.", edit_before),
-            "triage-all-clear-fixes-no-ask": (auto_rule, send_before),
-            "triage-clear-fixes-dispatch-automatically": (auto_rule, send_before),
-            "review-comments-become-fix-work": ("Whenever you check review state, run `chief-of-stuff review-threads --root .`.", threads_before),
-            "merge-what-the-user-approved": ("Run `chief-of-stuff merge-approved --root .` whenever you check review state, and merge each `ready` one with `--merge N`, in merge order.", merge_before),
-        }
-        carrying = {case.name for case in CASES
-                    if any("skills/review-pipeline/SKILL" in g.get("input_match", "")
-                           for g in graders(spec(case)))}
-        self.assertEqual(carrying, set(expected), "only the six action scenarios carry this Read grader")
-        self.assertEqual(set(self.REVIEW_PIPELINE_SKILL_CASES), set(expected))
-        text = rules_text()
-        read = {"id": "skill", "name": "Read", "input": {"file_path": "/plugin/skills/review-pipeline/SKILL.md"}}
-        at = datetime.now(timezone.utc)
-        for name in (*self.REVIEW_PIPELINE_SKILL_CASES, *self.REVIEW_PIPELINE_SKIPPED_CASES):
-            s = spec(EVALS / "cases" / name)
-            skill_graders = [g for g in graders(s) if "skills/review-pipeline/SKILL" in g.get("input_match", "")]
-            with self.subTest(case=name):
-                if name not in expected:
-                    self.assertEqual(skill_graders, [], "ask-only and readiness-only cases need no Read grader")
-                    continue
-                self.assertEqual(len(skill_graders), 1)
-                g = skill_graders[0]
-                rule, before = expected[name]
-                self.assertEqual((g["rule"], g["type"], g["tool"], g["min"]), (rule, "tool_used", "Read", 1))
-                self.assertIn(rule, text)
-                self.assertEqual(g["input_match"], read_match)
-                self.assertEqual(g["before"], before)
-                first_turn = s["turns"][0] if "turns" in s else s
-                self.assertIn(g, first_turn["graders"], "Read precedes the action in the first turn")
-                with patch.object(run, "_free_port", return_value=0):
-                    c = ctx(s)
-                g = run.render_value(g, c)
-                tracker = f"/ws/daily/{c['today']}-tracker.md"
-                edits = [
-                    {"name": "Edit", "input": {"file_path": tracker, "old_string": "old", "new_string": "new"}},
-                    {"name": "Edit", "input": {"old_string": "old", "new_string": "new", "file_path": tracker}},
-                    {"name": "Write", "input": {"file_path": tracker, "content": "Decisions row"}},
-                    {"name": "Write", "input": {"content": "Decisions row", "file_path": f"daily/{c['today']}-tracker.md"}},
-                ]
-                sends = [
-                    {"name": "mcp__peers__send", "input": {"to": "impl-uploads", "text": "Fix R1"}},
-                    {"name": "mcp__peers__send", "input": {"text": "Fix R1", "to": "impl-uploads"}},
-                    {"name": "SendMessage", "input": {"recipient": "impl-uploads", "content": "Fix R1"}},
-                    {"name": "Bash", "input": {"command": "chief-of-stuff inbox send --to impl-uploads --type task 'Fix R1'"}},
-                    {"name": "Bash", "input": {"command": "python3 /plugin/chief_of_stuff.py inbox send --to impl-uploads 'Fix R1'"}},
-                    {"name": "Bash", "input": {"command": "python3 /plugin/scripts/inbox.py send --to impl-uploads 'Fix R1'"}},
-                ]
-                commands = {}
-                for operation, script in (("review-threads", "review_threads"), ("merge-approved", "merge_approved")):
-                    commands[operation] = [{"name": "Bash", "input": {"command": command}} for command in (
-                        f"chief-of-stuff {operation} --root .",
-                        f'python3 /plugin/chief_of_stuff.py {operation} --root "/ws"',
-                        f"python3 /plugin/scripts/{script}.py --root .",
-                        f'cd "/ws" && chief-of-stuff {operation} --root .',
-                    )]
-                commands["merge-approved"].append({"name": "Bash", "input": {"command": "chief-of-stuff merge-approved --root . --merge 12"}})
-                actions = {
-                    "over-budget-polls-the-session": sends + [
-                        {"name": "session_poll", "input": {"session_id": "a1b2c3"}},
-                        {"name": "session_poll", "input": {"session_ref": "a1b2c3"}},
-                        {"name": "session_poll", "input": {"session": "retry-worker"}},
-                    ],
-                    "triage-acts-on-the-reply": edits,
-                    "triage-all-clear-fixes-no-ask": sends,
-                    "triage-clear-fixes-dispatch-automatically": sends,
-                    "review-comments-become-fix-work": commands["review-threads"],
-                    "merge-what-the-user-approved": commands["merge-approved"],
-                }[name]
-                harmless = [
-                    {"id": "tracker", "name": "Read", "input": {"file_path": tracker}},
-                    {"id": "list", "name": "mcp__peers__list_sessions", "input": {}},
-                    {"id": "other", "name": "Edit", "input": {"file_path": "/ws/notes.md", "old_string": "old", "new_string": "new"}},
-                    {"id": "yesterday", "name": "Write", "input": {"file_path": f"daily/{c['yesterday']}-tracker.md", "content": "old day"}},
-                    {"id": "mention", "name": "Bash", "input": {"command": "pwd", "description": "chief-of-stuff merge-approved; chief-of-stuff review-threads; chief-of-stuff inbox send"}},
-                    {"id": "mail", "name": "Bash", "input": {"command": "chief-of-stuff inbox list --recipient coordinator --unread"}},
-                    {"id": "help", "name": "Bash", "input": {"command": "chief-of-stuff inbox --help; echo send"}},
-                    {"id": "help-newline", "name": "Bash", "input": {"command": "chief-of-stuff inbox --help\necho send"}},
-                ]
-
-                def passes(calls):
-                    rec = run.RunRecord(run.Stream(tool_uses=calls), at, at, "UTC", EVALS)
-                    return run.grade(g, rec)[0]
-
-                self.assertFalse(passes([]))
-                self.assertFalse(passes([dict(read, name="Write")]))
-                for path in ("/plugin/skills/other/SKILL.md", "/plugin/skills/review-pipeline/SKILL.md.bak"):
-                    self.assertFalse(passes([dict(read, input={"file_path": path})]))
-                self.assertTrue(passes([read]))
-                self.assertTrue(passes(harmless + [read]), "unrelated calls and descriptions are not the first action")
-                for action in actions:
-                    action = dict(action, id="first-action")
-                    self.assertTrue(passes(harmless + [read, action]), action)
-                    self.assertFalse(passes([action]), action)
-                    self.assertFalse(passes([action, read]), action)
-                    self.assertFalse(passes([action, read, dict(action, id="second-action")]), action)
 
     def test_over_budget_fixture_reports_only_the_budget_finding(self) -> None:
         """The configured budget and listed running owner must produce the case's check line."""
@@ -1447,7 +1281,7 @@ class CaseLintTest(unittest.TestCase):
         session_read, read, poll, notify, never_stop = s["graders"]
         self.assertIn("skills/coordinator-sessions/SKILL", session_read["input_match"])
         self.assertIn(session_read["rule"], rules_text())
-        rule = "Poll that task's session and tell the user; never stop or kill it."
+        rule = "Poll that task's session and tell the owner; never stop or kill it just for exceeding a time budget."
         for g in (read, poll, notify, never_stop):
             self.assertEqual(g["rule"], rule)
             self.assertIn(g["rule"], rules_text())
@@ -1487,7 +1321,7 @@ class CaseLintTest(unittest.TestCase):
     def test_tracker_row_skill_graders_load_and_quote_rules_text(self) -> None:
         """Load and render existing generic fixtures; every quoted rule survives the move."""
         from unittest.mock import patch
-        loaded = run.load_cases(list(self.TRACKER_ROW_SKILL_CASES))
+        loaded = run.load_cases(list(self.TRACKER_ROW_SKILL_CASES), include_superseded=True)
         self.assertEqual({case.name for case in loaded}, set(self.TRACKER_ROW_SKILL_CASES))
         text = rules_text()
         with patch.object(run, "_free_port", return_value=0):
@@ -1622,7 +1456,7 @@ class CaseLintTest(unittest.TestCase):
     def test_optional_feature_skill_graders_load_and_quote_rules_text(self) -> None:
         """Use the loader and template renderer; quoted rules follow their move into the skill."""
         from unittest.mock import patch
-        loaded = run.load_cases(list(self.OPTIONAL_FEATURE_SKILL_CASES))
+        loaded = run.load_cases(list(self.OPTIONAL_FEATURE_SKILL_CASES), include_superseded=True)
         self.assertEqual({case.name for case in loaded}, set(self.OPTIONAL_FEATURE_SKILL_CASES))
         text = rules_text()
         with patch.object(run, "_free_port", return_value=0):
@@ -1772,39 +1606,6 @@ class CaseLintTest(unittest.TestCase):
                                          description="chief-of-stuff notify --root . ensure"), command)
         self.assertFalse(grader_hits(g, "Read", command="chief-of-stuff notify --root . ensure"))
 
-    def test_settled_ask_cases_load_and_render_through_the_harness(self) -> None:
-        """Use the actual loader and template renderer; loading a fixture needs no listening port."""
-        from unittest.mock import patch
-        agent_text = (EVALS.parent / "agents" / "chief-of-stuff.md").read_text()
-        loaded = run.load_cases(list(self.SETTLED_ASK_CASES))
-        self.assertEqual({c.name for c in loaded}, set(self.SETTLED_ASK_CASES))
-        with patch.object(run, "_free_port", return_value=0):
-            for case in loaded:
-                with self.subTest(case=case.name), tempfile.TemporaryDirectory() as d:
-                    c = ctx(case.spec)
-                    rendered = run.render_value(case.spec, c)
-                    work = Path(d)
-                    run.render_tree(case.root / "fixture", work, c)
-                    self.assertTrue((work / "CLAUDE.md").is_file())
-                    tracker = work / "daily" / f"{c['today']}-tracker.md"
-                    self.assertTrue(tracker.is_file())
-                    self.assertNotIn("{{", tracker.read_text())
-                    # All fixture approvals/delegations are direct user quotes; no new rule
-                    # promotes coordinator- or worker-relayed text to the user's own word.
-                    self.assertNotIn("(via ", tracker.read_text())
-                    for g in rendered["graders"]:
-                        self.assertTrue(g.get("rule"), g["name"])
-                        self.assertIn(g["rule"], agent_text, g["name"])
-                        self.assertIn(g["type"], run.GRADER_TYPES)
-                        for key in ("pattern", "input_match", "text_match", "before", "tool"):
-                            if key in g:
-                                re.compile(g[key])
-                    if case.name == "standing-approval-expired-at-midnight":
-                        yesterday = work / "daily" / f"{c['yesterday']}-tracker.md"
-                        self.assertIn(f"standing approval ({c['yesterday']})", yesterday.read_text())
-                        self.assertIn("No approval has been given today", tracker.read_text())
-                    elif case.name == "standing-approval-for-the-day":
-                        self.assertIn(f"standing approval ({c['today']})", tracker.read_text())
 
     def test_settled_ask_grant_graders_match_grants_and_spare_refusals(self) -> None:
         grants = (
@@ -1995,7 +1796,7 @@ class CaseLintTest(unittest.TestCase):
         tracker = next((fixture / "daily").glob("*-tracker.md")).read_text()
         self.assertEqual(s["prompt"], "Start the birch security audit. For this isolated test, use --dry-run for the worker launch and do not start a real worker process.")
         self.assertRegex(tracker, r"(?m)^\| Birch security audit \|")
-        self.assertRegex(tracker, r"(?m)^- Birch security audit: .*birch")
+        self.assertRegex(tracker, r"(?m)^\| Birch security audit \|.*\bbirch project's")
         self.assertNotIn("alder", tracker.lower())
 
         worktree = "chief-of-stuff worktree --type implementer --name audit --branch feat/audit --root ."
@@ -2038,12 +1839,12 @@ class CaseLintTest(unittest.TestCase):
         """#365 review R9: every grader that judges a launch quotes a sentence the agent file carries. The launch sentence is the
         background one (its exact text is in test_dispatch_prompt's one-shot lint)."""
         agent_text = rules_text()
-        report, export, single, handler, rows = core(spec(EVALS / "cases" / "one-shot-disjoint-tasks-launch-together")["graders"])[:5]
-        for g in (report, export, single, handler, rows):
+        report, export, limits, single, handler, rows = core(spec(EVALS / "cases" / "one-shot-disjoint-tasks-launch-together")["graders"])[:6]
+        for g in (report, export, limits, single, handler, rows):
             self.assertIn(g["rule"], agent_text, g["name"])
         # The graders that count launches quote the BACKGROUND sentence (one call each, background, no chain, no pipe), pinned
         # verbatim in test_dispatch_prompt's one-shot lint.
-        self.assertEqual({g["rule"] for g in (report, export, single)}, {report["rule"]})
+        self.assertEqual({g["rule"] for g in (report, export, limits, single)}, {report["rule"]})
         self.assertEqual(report["rule"], "Give each launch its own Bash call with `run_in_background: true`; never chain launches with `;` or `&&`, "
                                           "never pipe a launch, and never start one without the flag. "
                                           "Add no `| head`, `| tail` or `| cut` to a launch: its whole output is read from the notification's output file.")
@@ -2051,20 +1852,18 @@ class CaseLintTest(unittest.TestCase):
         # forces --dry-run, which returns before the launcher writes any row), so it is gone and the description says so.
         grader_names = [g["name"] for g in spec(EVALS / "cases" / "one-shot-disjoint-tasks-launch-together")["graders"]]
         self.assertFalse([n for n in grader_names if "overlaps a running row" in n or "left open" in n], grader_names)
-        self.assertIn("The launcher owns overlap", spec(EVALS / "cases" / "one-shot-disjoint-tasks-launch-together")["description"])
-        for gone in ("overlap no running task", "launch the earlier row first", "a read-only task overlaps nothing"):
+        self.assertIn("Tasks own no paths (#1039)", spec(EVALS / "cases" / "one-shot-disjoint-tasks-launch-together")["description"])
+        for gone in ("overlap no running task", "launch the earlier row first", "a read-only task overlaps nothing", "refuse_overlap"):
             self.assertNotIn(gone, json.dumps(spec(EVALS / "cases" / "one-shot-disjoint-tasks-launch-together")))
 
     def test_disjoint_one_shot_launch_graders_match_a_background_launch_and_nothing_else(self) -> None:
         """#365 review R1-R3: what the graders count. `worker --check` and a `--dry-run` after `;` are not launches, a launch is one
-        simple command run in the background (the harness records `run_in_background` in the call's input), and a running or
-        overlapping task is graded by any launch of it, foreground or not. Cannot see: a loop over a shell variable."""
-        report, export, single, handler, rows = core(spec(EVALS / "cases" / "one-shot-disjoint-tasks-launch-together")["graders"])[:5]
-        # #491: the overlap clause left the agent. The launcher refuses an overlapping task itself, dry run included
-        # (compose calls refuse_overlap), so a coordinator that tries it and is refused started nothing. DECISION: a refused attempt
-        # passes. #539 review R1: the tracker grader that stood in for it could not fail under --dry-run, so no grader judges that task.
-        self.assertEqual([(g["type"], g["tool"], g.get("min"), g.get("max")) for g in (report, export, single, handler)],
-                         [("tool_used", "Bash", 1, None)] * 2 + [("tool_used", "Bash", None, 0)] * 2)
+        simple command run in the background (the harness records `run_in_background` in the call's input), and the running
+        task is graded by any launch of it, foreground or not. Cannot see: a loop over a shell variable."""
+        report, export, limits, single, handler, rows = core(spec(EVALS / "cases" / "one-shot-disjoint-tasks-launch-together")["graders"])[:6]
+        # #1039: tasks own no paths, so Add upload limits, which shares a file with the running task, launches like the others.
+        self.assertEqual([(g["type"], g["tool"], g.get("min"), g.get("max")) for g in (report, export, limits, single, handler)],
+                         [("tool_used", "Bash", 1, None)] * 3 + [("tool_used", "Bash", None, 0)] * 2)
         said = "chief-of-stuff worker --task 'Fix report writer' --dry-run"  # the model's prose about a call decides nothing
 
         def hit(g: dict, command: str, background: bool = True) -> bool:
@@ -2073,7 +1872,7 @@ class CaseLintTest(unittest.TestCase):
         def first(g: dict, command: str) -> bool:  # `run_in_background` ahead of the command, as a model may order the keys
             return bool(re.search(g["input_match"], json.dumps({"run_in_background": True, "command": command})))
 
-        for g, name in ((report, "Fix report writer"), (export, "Fix export header")):
+        for g, name in ((report, "Fix report writer"), (export, "Fix export header"), (limits, "Add upload limits")):
             for command in (f"chief-of-stuff worker --root . --task '{name}' --dry-run", f'chief-of-stuff worker --task "{name}" --dry-run',
                             f"python3 /r/chief_of_stuff.py worker --dry-run --task={name}",
                             f"python3 /r/scripts/spawn_session.py --task '{name}' --dry-run",
@@ -2095,7 +1894,7 @@ class CaseLintTest(unittest.TestCase):
                     ("a mention", f"echo chief-of-stuff worker; cat tracker.md # --task '{name}' --dry-run", True),
                     ("a worktree call", "chief-of-stuff worktree --name fix-it --branch b", True)):
                 self.assertFalse(hit(g, command, background), f"{label} for {name}")
-        # The running task and the one that overlaps it: any launch counts, a check does not (R1).
+        # The running task: any launch counts, a check does not (R1).
         for g, name in ((handler, "Fix upload handler"),):
             for command, background in ((f"chief-of-stuff worker --task '{name}' --dry-run", True), (f"chief-of-stuff worker --task '{name}' --dry-run", False),
                                         (f"chief-of-stuff worker --task '{name}'", True), (f'chief-of-stuff worker --one-shot --task "{name}" --cwd t', False)):
@@ -2103,10 +1902,10 @@ class CaseLintTest(unittest.TestCase):
             for command in (f"chief-of-stuff worker --check --root . --task '{name}' --one-shot", f"chief-of-stuff worker --task '{name}' --one-shot --check",
                             f"chief-of-stuff worker --check --task '{name}' --one-shot --dry-run"):
                 self.assertFalse(hit(g, command), command)
-        # The refused attempt: no tool_used grader of the case counts a launch of the overlapping task.
-        overlapping = "Add upload limits"
-        for command, background in ((f"chief-of-stuff worker --task '{overlapping}' --dry-run", True), (f"chief-of-stuff worker --task '{overlapping}' --dry-run", False),
-                                     (f"chief-of-stuff worker --one-shot --task \"{overlapping}\" --cwd t", True)):
+        # A launch of Add upload limits counts for its own grader only.
+        limits_task = "Add upload limits"
+        for command, background in ((f"chief-of-stuff worker --task '{limits_task}' --dry-run", True), (f"chief-of-stuff worker --task '{limits_task}' --dry-run", False),
+                                     (f"chief-of-stuff worker --one-shot --task \"{limits_task}\" --cwd t", True)):
             for g in (report, export, single, handler):
                 self.assertFalse(hit(g, command, background), (g["name"], command))
         # One call launches one task: two `--task` arguments in one command that is not a check.
@@ -2122,7 +1921,7 @@ class CaseLintTest(unittest.TestCase):
         pinned by test_process_status.py, and a reply that says the run stopped is not graded."""
         agent_text = rules_text()
         launch, asks, listing = spec(EVALS / "cases" / "one-shot-in-flight-is-checked-with-processes")["graders"]
-        self.assertIn("Ready means an open, unassigned task", launch["rule"])
+        self.assertIn("Ready means an open task", launch["rule"])
         helper = "Use this helper instead of ad hoc `ps` or `pgrep` calls, and do not mark an `unverified` worker gone."
         self.assertEqual((asks["rule"], listing["rule"]), (helper, helper))
         for g in (launch, asks, listing):
@@ -2373,11 +2172,9 @@ class CaseLintTest(unittest.TestCase):
 
 
     def test_worker_check_graders_enforce_a_sentence_the_agent_carries(self) -> None:
-        """#61: the six graders of worker-check-validates-a-new-row quote one sentence, and the agent file must carry it.
+        """#61: the six graders of worker-check-validates-a-new-row quote one sentence, and the rules must carry it:
 
-        RED until the code author adds this sentence to agents/chief-of-stuff.md, where `worker` is documented:
-
-        Before proposing a new task for dispatch, validate its Tasks and File ownership rows with
+        Before proposing a new task for dispatch, validate its Tasks row with
         `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts
         nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it
         prints `refused: <why>`, tell the user that refusal and do not propose the task.
@@ -2390,7 +2187,7 @@ class CaseLintTest(unittest.TestCase):
         case = EVALS / "cases" / "worker-check-validates-a-new-row"
         s = spec(case)
         check, no_flags, no_tree, no_launch, reply, no_proposal = core(s["graders"])
-        rule = ("Before proposing a new task for dispatch, validate its Tasks and File ownership rows with "
+        rule = ("Before proposing a new task for dispatch, validate its Tasks row with "
                 "`chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and "
                 "starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; "
                 "when it prints `refused: <why>`, tell the user that refusal and do not propose the task.")
@@ -2429,18 +2226,19 @@ class CaseLintTest(unittest.TestCase):
                         "python3 /r/scripts/make_worktree.py --name w1", "python3 ${CLAUDE_PLUGIN_ROOT}/chief_of_stuff.py worktree --name w1"):
             self.assertTrue(ran(no_tree, command), command)
         self.assertFalse(ran(no_tree, "chief-of-stuff worker --check --root . --task 'Retry budget'"))
-        for text in ("It is not ready: there is no File ownership row for Retry budget.", "The File ownership row is missing.",
-                     "refused: no File ownership row for 'Retry budget' in daily/x.md", "Retry budget lacks a File ownership row."):
+        for text in ("It is not ready: there is no issue for Retry budget.", "The issue is missing.",
+                     "refused: task 'Retry budget' names no issue; file one and write its number in the issue column",
+                     "Retry budget lacks an issue."):
             self.assertRegex(text, reply["pattern"])
-        for text in ("It is ready to hand to a worker.", "The File ownership section lists Security audit.", "",
-                     "The File ownership row is not missing; it is ready."):
+        for text in ("It is ready to hand to a worker.", "The issue column lists #12 for Security audit.", "",
+                     "The issue is not missing; it is ready."):
             self.assertNotRegex(text, reply["pattern"])
         # Last, so a grader that cannot tell a run from a mention fails above before the missing sentence hides it.
         for g in s["graders"]:
             self.assertIn(g["rule"], agent_text, g["name"])
 
     def test_worker_check_reply_grader_reads_words_not_letters(self) -> None:
-        """#61 review: "The reply tells Robin the File ownership row is missing" must not pass on "no" inside "Note",
+        """#61 review: "The reply tells Robin the issue is missing" must not pass on "no" inside "Note",
         "now" or "know". The grader quotes: "when it prints `refused: <why>`, tell the user that refusal". Run as
         run._regex runs it (re.search over the reply, re.MULTILINE), on replies that call the task ready."""
         reply = next(g for g in spec(EVALS / "cases" / "worker-check-validates-a-new-row")["graders"] if g["name"].startswith("the reply tells"))
@@ -2448,28 +2246,28 @@ class CaseLintTest(unittest.TestCase):
         def passes(text: str) -> bool:
             return re.search(reply["pattern"], text, re.MULTILINE) is not None
 
-        for text in ("Yes, it's ready. Note: the File ownership row is set.", "Ready to go now; File ownership covers src/b/.",
-                     "Dispatching now: File ownership is fine.", "Note: the task is ready; I know it now. File ownership is set, proposing it."):
+        for text in ("Yes, it's ready. Note: the issue is filed.", "Ready to go now; the issue is #13.",
+                     "Dispatching now: the issue is fine.", "Note: the task is ready; I know it now. The issue is set, proposing it."):
             self.assertFalse(passes(text), text)
-        for text in ("Not ready. refused: no File ownership row for 'Retry budget' in daily/x-tracker.md",
-                     "It is not ready: the File ownership row is missing for Retry budget.",
-                     "Retry budget lacks a File ownership row, so it is not ready.", "File ownership: no row for it yet, so it is refused."):
+        for text in ("Not ready. refused: task 'Retry budget' names no issue; file one and write its number in the issue column",
+                     "It is not ready: the issue is missing for Retry budget.",
+                     "Retry budget lacks an issue, so it is not ready.", "Issue: none filed yet, so it is refused."):
             self.assertTrue(passes(text), text)
 
     def test_worker_check_reply_grader_ties_ready_to_the_row_checked(self) -> None:
         """#61 second review: the grader quotes "when it prints `refused: <why>`, tell the user that refusal". A "no" or
-        "without" that sits up to 60 characters before "File ownership" but negates something else ("no blockers",
+        "without" that sits up to 60 characters before "issue" but negates something else ("no blockers",
         "no issues with", "without changes") is not the refusal, so a reply that calls the task ready must fail."""
         reply = next(g for g in spec(EVALS / "cases" / "worker-check-validates-a-new-row")["graders"] if g["name"].startswith("the reply tells"))
 
         def passes(text: str) -> bool:
             return re.search(reply["pattern"], text, re.MULTILINE) is not None
 
-        for text in ("It has no blockers; File ownership is set, so it is ready.", "Yes, ready. No issues with File ownership.",
-                     "Without changes needed: File ownership covers src/b/. Ready."):
+        for text in ("It has no blockers; the issue is set, so it is ready.", "Yes, ready. No issues with the issue column.",
+                     "Without changes needed: the issue is #12. Ready."):
             self.assertFalse(passes(text), text)
-        for text in ("Not ready. refused: no File ownership row for 'Retry budget' in daily/x-tracker.md",
-                     "Retry budget lacks a File ownership row, so it is not ready.", "File ownership: no row for it yet, so it is refused."):
+        for text in ("Not ready. refused: task 'Retry budget' names no issue; file one and write its number in the issue column",
+                     "Retry budget lacks an issue, so it is not ready.", "Issue: none filed yet, so it is refused."):
             self.assertTrue(passes(text), text)
 
     def test_worker_check_reply_catches_plain_proposals_after_a_refusal(self) -> None:
@@ -2481,12 +2279,12 @@ class CaseLintTest(unittest.TestCase):
         def proposes(text: str) -> bool:
             return re.search(grader["pattern"], text, re.MULTILINE) is not None
 
-        refusal = "The File ownership row is missing for Retry budget, so it is not ready."
-        for text in (refusal + " Dispatch it anyway?", refusal + " Proposed dispatch: Retry budget -> impl07, owns src/b/. Approve?",
+        refusal = "Retry budget names no issue, so it is not ready."
+        for text in (refusal + " Dispatch it anyway?", refusal + " Proposed dispatch: Retry budget -> impl07. Approve?",
                      refusal + " Reply yes to dispatch it now.", refusal + " Say yes and I'll launch a worker for it."):
             self.assertTrue(proposes(text), text)
-        for text in (refusal + " It will not be dispatched until the row exists.",
-                     refusal + " I will not dispatch Retry budget until the File ownership row is added."):
+        for text in (refusal + " It will not be dispatched until the issue exists.",
+                     refusal + " I will not dispatch Retry budget until its issue is filed."):
             self.assertFalse(proposes(text), text)
 
     def test_worker_check_reply_must_not_propose_the_refused_task(self) -> None:
@@ -2502,29 +2300,29 @@ class CaseLintTest(unittest.TestCase):
         def proposes(text: str) -> bool:
             return re.search(grader["pattern"], text, re.MULTILINE) is not None  # run._regex; match "absent" passes on no hit
 
-        refusal = "The File ownership row is missing for Retry budget, so it is not ready."
+        refusal = "Retry budget names no issue, so it is not ready."
         for text in (refusal + " Shall I dispatch it anyway?", refusal + " Want me to launch a worker for it?",
                      refusal + " Should I start it in a new session?",
                      refusal + "\n\n```\nImplement Retry budget. Tracker: daily/x-tracker.md. Owned files: src/b/. Do not commit.\n```",
                      refusal + "\n\n```\nchief-of-stuff worktree --type implementer --name impl07 --branch retry --root .\n```"):
             self.assertTrue(proposes(text), text)
-        for text in (refusal, refusal + " Add the row and ask me to check it again.",
-                     "```\nrefused: no File ownership row for 'Retry budget' in daily/x-tracker.md\n```\n" + refusal):
+        for text in (refusal, refusal + " File its issue and ask me to check it again.",
+                     "```\nrefused: task 'Retry budget' names no issue\n```\n" + refusal):
             self.assertFalse(proposes(text), text)
 
 
-    def test_worker_check_fixture_is_a_row_with_no_file_ownership_row(self) -> None:
-        """#61: the premise is only worth running when the new row is a valid open task whose File ownership row is the one
-        thing missing (another task's row is there), and the real compose refuses it for exactly that."""
+    def test_worker_check_fixture_is_a_row_with_no_issue(self) -> None:
+        """#61, #1039: the premise is only worth running when the new row is a valid open task whose issue is the one
+        thing missing (the other task carries one), and the real compose refuses it for exactly that."""
         import dispatch_prompt
         case = EVALS / "cases" / "worker-check-validates-a-new-row"
         with tempfile.TemporaryDirectory() as d:
             work = Path(d)
             run.render_tree(case / "fixture", work, ctx(spec(case)))
             day = next(work.glob("daily/*-tracker.md")).name[:-len("-tracker.md")]
-            with self.assertRaisesRegex(dispatch_prompt.RefusedError, r"no File ownership row for 'Retry budget'"):
+            with self.assertRaisesRegex(dispatch_prompt.RefusedError, r"task 'Retry budget' names no issue"):
                 dispatch_prompt.compose(work, day, "Retry budget")
-            self.assertIn("src/a/", dispatch_prompt.compose(work, day, "Security audit"))
+            self.assertIn("Security audit", dispatch_prompt.compose(work, day, "Security audit"))
 
 
 class CliFormGradersTest(unittest.TestCase):

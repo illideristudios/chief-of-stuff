@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from evals.rules_text import rules_text
@@ -28,6 +29,7 @@ from test_board_flow_design import outline  # noqa: E402
 import tracker as tr  # noqa: E402
 from backlog import Backlog, GitHubBacklog  # noqa: E402
 import settings as st  # noqa: E402
+import task_forge  # noqa: E402
 
 CT = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 9, 16, 14, 30, tzinfo=CT)
@@ -331,7 +333,7 @@ class RenderTest(unittest.TestCase):
 
     def test_the_page_declares_its_charset_first(self) -> None:
         """The Artifact wrapper sets one; a local open of the written file showed `Â·` for every ` · ` (C7's visual check)."""
-        self.assertTrue(self.html.startswith('<meta charset="utf-8">\n'), self.html[:80])
+        self.assertTrue(self.html.startswith('<!doctype html>\n<html lang="en">\n<meta charset="utf-8">\n'), self.html[:80])
 
     def test_embeds_tracker_hash_and_instants(self) -> None:
         sha = hashlib.sha256(TRACKER.encode()).hexdigest()
@@ -362,6 +364,17 @@ class RenderTest(unittest.TestCase):
             with self.subTest(cell=bad):
                 html = rb.render(LANED_TRACKER.replace("| 09:00 | 17:00 |", f"| {bad} | {bad} |", 1), self.cfg, NOW)
                 self.assertIn("Write eval README", html)
+
+    def test_the_header_shows_the_latest_policy_change(self) -> None:
+        early = SimpleNamespace(kind="policy_change", message="engine: policy changed: aaaaaaaaaaaa (overlay policy.toml)")
+        late = SimpleNamespace(kind="policy_change", message="engine: policy changed: bbbbbbbbbbbb (overlay policy.toml)")
+        page = task_forge.PageData((), (), (), (), {}, (), (early, late))
+        html = rb.render(TRACKER, self.cfg, NOW, db=page)
+        self.assertIn("bbbbbbbbbbbb", html)
+        self.assertIn("overlay policy.toml", html)
+        self.assertNotIn("aaaaaaaaaaaa", html)
+        quiet = rb.render(TRACKER, self.cfg, NOW, db=task_forge.PageData((), (), (), (), {}))
+        self.assertNotIn("policy changed", quiet)
 
 
 class ShortNameTest(unittest.TestCase):
@@ -663,8 +676,33 @@ class CliTest(unittest.TestCase):
         self.assertIn(">PENDING<", (pages / "decision-deploy-window.html").read_text())
         self.assertEqual((pages / "decision-broken.html").exists(), False)
         # #208: detail stays on the Decisions page; the board's tab retains its pending count.
-        self.assertIn('<a href="/decisions" data-tone="pending">Decisions<span class="badge" title="1 pending">1</span></a>', board)
+        self.assertIn('<a href="/decisions#pending-decisions" data-tone="pending">Decisions<span class="badge" title="1 pending">1</span></a>', board)
         self.assertNotIn('id="decisions"', board)
+
+    def test_needs_input_tile_and_decisions_tab_link_to_the_pending_block(self) -> None:
+        # #1122: the tile and the tab name the id of the labelled PENDING block on /decisions, which exists, once,
+        # whether or not a decision is pending.
+        for pending in (True, False):
+            with self.subTest(pending=pending):
+                root = self.pages_root(free_port())
+                pages = root / "pages"
+                pages.mkdir()
+                if pending:
+                    (pages / "decision-deploy-window.json").write_text(json.dumps(
+                        {"ask": "Which window?", "options": [{"key": "A", "title": "Tonight"}], "recommended": "A",
+                         "why": "Quiet.", "default": "Nothing ships.", "headline": "Decide deploy-window"}))
+                    (pages / "decision-deploy-window.html").write_text("page")
+                (root / "daily" / "2026-09-16-tracker.md").write_text(TRACKER)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    board = rb.main(["--date", "2026-09-16", "--root", str(root)]).read_text()
+                page = (pages / "decisions.html").read_text()
+                target = "/decisions#pending-decisions"
+                self.assertRegex(board, rf'<a class="panels-tile" data-kind="blocked" href="{target}"><span class="panels-label">NEEDS INPUT')
+                self.assertRegex(board, rf'<a href="{target}"[^>]*>Decisions')
+                self.assertEqual(re.findall(r'id="pending-decisions"', page), ['id="pending-decisions"'])
+                heading = re.search(r'<section aria-labelledby="pending-decisions">\s*<h2 id="pending-decisions"[^>]*>PENDING', page)
+                self.assertTrue(heading, "the anchor is the PENDING heading, which labels its section")
+                self.assertRegex(page, rf'<a href="{target}"[^>]*aria-current="page"|<a [^>]*aria-current="page"[^>]*href="{target}"')
 
     def test_summary_line_counts_long_items(self) -> None:
         root = Path(tempfile.mkdtemp())
@@ -1845,11 +1883,12 @@ class FlowRefReviewTest(unittest.TestCase):
                 self.assertEqual(set(re.findall(r'class="gantt-ref"[^>]*>([^<]*)<', flow)), {"!51"})
 
     def test_issue_key_and_issue_url_flow_refs_still_link_to_the_issue_page(self) -> None:
-        for ref in ("group/project#7", "https://forge.example/group/project/-/issues/7",
-                    "https://github.com/group/project/issues/7"):
+        for ref, identity in (("group/project#7", "github%3Agroup%2Fproject%237"),
+                              ("https://forge.example/group/project/-/issues/7", "gitlab%3Aforge.example%2Fgroup%2Fproject%237"),
+                              ("https://github.com/group/project/issues/7", "github%3Agroup%2Fproject%237")):
             with self.subTest(ref=ref):
                 flow = self.flow(ref, "Build the parser")
-                self.assertEqual(set(re.findall(r'href="(/issues/[^"]*)"', flow)), {"/issues/7"})
+                self.assertEqual(set(re.findall(r'href="(/issues/[^"]*)"', flow)), {f"/issues/{identity}"})
 
     def test_forge_issue_url_flow_labels_show_only_the_issue_number(self) -> None:
         # #459: display is #N, independent of the full key used to merge passes.
@@ -2005,3 +2044,11 @@ class DensityTest(unittest.TestCase):
         html = rb.render(TRACER_TRACKER, cfg, NOW)
         self.assertLess(len(html), 32_000,
                         f"Board page is {len(html)} bytes, budget is 32 000")
+
+
+class BoardDocumentTest(unittest.TestCase):
+    def test_board_page_is_a_styled_standards_mode_document(self) -> None:
+        """#968: no doctype rendered the board in quirks mode. Its decision forms moved to /decisions (#895)."""
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        html = rb.render(TRACER_TRACKER, cfg, NOW)
+        self.assertTrue(html.startswith('<!doctype html>\n<html lang="en">'))
