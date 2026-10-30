@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import selectors
 import signal
 import shutil
@@ -75,6 +76,27 @@ def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
     prepared.pop()  # stream input has no positional prompt, as in drive_turns
     config_dir = overlay.get("CLAUDE_CONFIG_DIR") or str(session_logs.claude_home())
     return spawn(prepared, request, run_dir, overlay, stdin_prompt=request.prompt, config_dir=config_dir)
+
+
+def transcript_path(record: dict) -> Path:
+    """The exact Claude log in the launch's pinned account, never the current engine account.
+
+    Older launches without a pinned config directory are unknown; guessing after a restart
+    could select another account's transcript. T3 callers must use their thread instead.
+    """
+    if record.get("launcher") == "t3":
+        raise ValueError("T3 transcripts come from the thread")
+    prepared = json.loads((Path(record["run_dir"]) / "command.json").read_text())
+    session = record["session_id"]
+    if (not isinstance(prepared, dict)
+            or not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session)
+            or prepared.get("session_id") != session
+            or Path(prepared["cwd"]).resolve() != Path(record["tree"]).resolve()):
+        raise ValueError("transcript launch identity mismatch")
+    config = Path(prepared.get("config_dir") or prepared["env"]["CLAUDE_CONFIG_DIR"])
+    if not config.is_absolute():
+        raise ValueError("transcript account directory was not pinned absolutely")
+    return config / "projects" / session_logs._slug(Path(record["tree"])) / f"{session}.jsonl"
 
 
 def spawn(prepared: list[str], request: Request, run_dir: Path, env: dict[str, str] | None = None,

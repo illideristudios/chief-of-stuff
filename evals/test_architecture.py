@@ -27,6 +27,7 @@ LEAVES = ("fragment", "gantt", "columns", "panels", "page_reload")
 
 # Every script module that draws nothing. A new one belongs here unless it renders a page.
 DRAWS_NOTHING = (
+    "transcripts",
     "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "forge_review",
     "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "kanban_cli", "pipeline_cli", "audit_tasks",
     "one_shot", "spawn_session", "session_exec", "shell_setup", "process_status", "one_shot_result", "adopt_one_shots", "merge_approved", "merge_ready",
@@ -233,6 +234,8 @@ CIRCLES: dict[str, frozenset[str]] = {
         "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance", "heartbeat",
     }),
     "adapters": frozenset({
+        "transcripts",  # Claude transcript file ingestion and normalization.
+        "migrations/versions/0013_transcripts",  # Store schema, with its gateway.
         "fragment", "page_common", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
         "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge", "private_state",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
