@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The workspace's chief-of-stuff settings: a TOML file the `## Coordinator` block names with `Settings:`.
 
-Zach, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
+the owner, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
 settings into a config file. Default to 6 and 22". Notification, lane, budget, and Kanban settings
 live here, along with suggested models and their rotations (#111), stage launch defaults (#121), and [limits].
 
@@ -15,6 +15,7 @@ import re
 import math
 import tomllib
 import unicodedata
+import warnings
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -62,7 +63,7 @@ class Notify:
 
 @dataclass(frozen=True)
 class Lane:
-    """A lane is the sequence of stages a task moves through (Zach, 2026-09-23, #33). A gate is a stage only
+    """A lane is the sequence of stages a task moves through (the owner, 2026-09-23, #33). A gate is a stage only
     the user's word passes."""
     stages: tuple[str, ...]
     gates: tuple[str, ...] = ()
@@ -88,7 +89,6 @@ class Workflow:
     architecture_reviewer: str | None = None
     reviewer_session: str | None = None
     delivery: str = "pull-request"
-    merge_owner: str = "coordinator"
     approver: str | None = None
 
 
@@ -116,6 +116,7 @@ class Workers:
     teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
     stall: Stall = field(default_factory=Stall)
     failure_limit: int = 2
+    fix_round_limit: int = 3
 
 
 @dataclass(frozen=True)
@@ -351,6 +352,9 @@ def _workers(table) -> Workers:
     failure_limit = table.get("failure_limit", Workers.failure_limit)
     if type(failure_limit) is not int or failure_limit < 1:
         raise SettingsError("[workers] failure_limit must be a positive whole number")
+    fix_round_limit = table.get("fix_round_limit", Workers.fix_round_limit)
+    if type(fix_round_limit) is not int or fix_round_limit < 1:
+        raise SettingsError("[workers] fix_round_limit must be a positive whole number")
     launcher = table.get("launcher", "ghostty")
     if launcher not in ("ghostty", "tmux", "herdr"):
         raise SettingsError("[workers] launcher must be `ghostty`, `tmux` or `herdr`")
@@ -396,7 +400,7 @@ def _workers(table) -> Workers:
         commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
                    claude_as_profile=profile, worker_launcher=worker_launcher, require_green_tests=green, rules=tuple(rules),
-                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit, **commands)
+                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit, fix_round_limit=fix_round_limit, **commands)
 
 
 def _repos(table) -> dict[str, str]:
@@ -450,14 +454,13 @@ def _workflow(table) -> Workflow:
     delivery = table.get("delivery", "pull-request")
     if delivery not in ("pull-request", "branch"):
         raise SettingsError("[workflow] delivery must be `pull-request` or `branch`")
-    # Accept old settings without retaining their owner wait. The engine owns every merge.
-    merge_owner = table.get("merge_owner", "coordinator")
-    if merge_owner not in ("user", "worker", "approval", "coordinator"):
-        raise SettingsError("[workflow] merge_owner must be `coordinator` (legacy values are accepted)")
+    # Compatibility only: no runtime merge authority is configured by this retired key.
+    if "merge_owner" in table:
+        warnings.warn("[workflow] merge_owner is retired and ignored; the engine owns merges", stacklevel=2)
     approver = table.get("approver")  # optional review-thread filter, never merge authority
     if approver is not None and (not isinstance(approver, str) or not approver.strip()):
         raise SettingsError("[workflow] approver must be a non-empty forge username")
-    return Workflow(**names, delivery=delivery, merge_owner="coordinator", approver=approver)
+    return Workflow(**names, delivery=delivery, approver=approver)
 
 
 def _lane(name: str, table) -> Lane:
@@ -524,9 +527,9 @@ def _kanban(table) -> Kanban:
     for name, index in mapping.items():
         if not name.strip() or type(index) is not int or not 0 <= index < len(stages):
             raise SettingsError(f"[kanban.map] {name!r} must be a stage index in 0..{len(stages)-1}")
-    holds, terminal = table.get("hold_stages", []), table.get("terminal_stages", [])
-    if not isinstance(holds, list) or not all(isinstance(x, str) for x in holds) or not set(holds) <= set(mapping):
-        raise SettingsError("[kanban] hold_stages must be mapped stages")
+    if "hold_stages" in table:
+        warnings.warn("[kanban] hold_stages is retired and ignored; stages advance automatically", stacklevel=2)
+    terminal = table.get("terminal_stages", [])
     if (not isinstance(terminal, list) or not all(isinstance(x, str) and x.strip() for x in terminal)
             or len(terminal) != len({x.casefold() for x in terminal}) or any("," in x for x in terminal)
             or human.casefold() in {x.casefold() for x in terminal} or set(terminal) & set(mapping)

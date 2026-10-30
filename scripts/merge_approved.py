@@ -29,7 +29,7 @@ GITHUB_METHODS = (("allow_merge_commit", "--merge"), ("allow_squash_merge", "--s
 
 def allowed_method(repo: str, gh=backlog.run_gh) -> str:
     """The `gh pr merge` flag for the first method the repository allows, or "error: <why>" when none is or the
-    settings are unreadable (Zach, 2026-10-18: "we shouldn't prefer a merge strategy")."""
+    settings are unreadable (the owner, 2026-10-18: "we shouldn't prefer a merge strategy")."""
     code, out, err = gh(["api", f"repos/{repo}"])
     if code:
         return f"error: repository merge settings: {err.strip() or f'gh api exited {code}'}"

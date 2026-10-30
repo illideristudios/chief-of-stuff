@@ -46,7 +46,7 @@ ENGINE_STATE = (".chief-of-stuff/", "store.db", "store.db-wal", "store.db-shm")
 
 
 def ignore_in_git(root: Path, names: list[str], dry: bool) -> str:
-    """#870 (Zach, 2026-10-18: "the init files should be gitignored in any repo"): add each name under `root` to its
+    """#870 (the owner, 2026-10-18: "the init files should be gitignored in any repo"): add each name under `root` to its
     repository's info/exclude, which git honours with no tracked change; "" outside a work tree or when all are there."""
     def read(*args: str) -> str:
         # Two path reads need no credentials, so git runs without the write env's (CodeQL: nothing secret reaches print).

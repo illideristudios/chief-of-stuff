@@ -132,8 +132,6 @@ def _planning_inputs(store: Any, items: list) -> dict:
         "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
                          if (quota := state.get("quota"))},
         "usage": {key: nums for key, state in states.items() if (nums := _measured(state))},
-        "waived_gates": {key: tuple(state.get("waived_gates") or ())
-                         for key, state in states.items() if state.get("waived_gates")},
         "failure_acknowledged": {key: state.get("failure_acknowledged", ()) for key, state in states.items()},
     }
 
@@ -189,12 +187,6 @@ def _resolved(policies: policy.Policies, store: Any, key: str, stage: str) -> po
 def _workflow_for(policies: policy.Policies, store: Any, item: Any) -> policy.Workflow:
     issue_type = _resume(store, item.issue_key).get("issue_type") or getattr(item, "issue_type", None)
     return policies.workflow_for(issue_type)
-
-
-def _clear_waived_gates(store: Any, key: str) -> None:
-    data = _resume(store, key)
-    if data.pop("waived_gates", None) is not None:
-        store.set_resume(key, data)
 
 
 def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str, ...],
@@ -919,8 +911,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     def plan():
         return reconcile.plan(items, policies=policies, free_slots=free_slots, now=now,
-                              hold_stages=board.hold_stages if board is not None else (),
-                              failure_limit=workers.failure_limit, facts=facts, **inputs)
+                              failure_limit=workers.failure_limit, fix_round_limit=workers.fix_round_limit, facts=facts, **inputs)
 
     actions = plan()
     if reviews := engine_merge.consultations(forge, store, actions, at):
@@ -1014,7 +1005,6 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                             data.pop("pending_stage", None)
                             store.set_resume(key, data)
                     raise
-                _clear_waived_gates(store, key)
                 _clear_interrupt(store, key, "limit", scope={"stage": stage})
                 # A successful relaunch after a raised limit must not keep the exhausted interrupt (#963).
                 _clear_interrupt(store, key, "exhausted", scope={})
@@ -1028,9 +1018,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                         trio_gate.record(store, key, rev)
             elif isinstance(action, reconcile.Merge):
                 if engine_merge.execute(action, forge, store, at, policies=policies,
-                                        inputs={**_planning_inputs(store, [by_key[key]]), "failure_limit": workers.failure_limit}, hold_stages=()):
+                                        inputs={**_planning_inputs(store, [by_key[key]]), "failure_limit": workers.failure_limit,
+                                                "fix_round_limit": workers.fix_round_limit}):
                     stage = "merge"
-                    _clear_waived_gates(store, key)
             elif isinstance(action, reconcile.Close):
                 worker.teardown_once(store, root, key, action.stage, action.attempt, teardown_command, at)
                 if action.suite_hold:
@@ -1085,8 +1075,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
             if not isinstance(exc, HoldReleaseFailed):
                 store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at, op)
     for item in store.items():
-        workflow, state = _workflow_for(policies, store, item), _resume(store, item.issue_key)
-        passed = reconcile.passed_gates(workflow, policies, state.get("room"), now, state.get("waived_gates") or ())
+        workflow = _workflow_for(policies, store, item)
+        passed = {edge.gate for edge in workflow.edges if edge.gate}
         _sync_decision_interrupts(store, item, at, workflow.start, passed)
     completed = {item.issue_key for item in store.items()
                  if item.forge_state == "closed" and item.merge_state == "merged"
@@ -1099,6 +1089,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True,
                        completed=completed):
         raise RuntimeError("cleanup failed; see the issue logs")
+    _beat(store, root, facts, clock())
     return actions
 
 
@@ -1214,13 +1205,11 @@ def _persist_launchd_handoff(root: Path, release: Path) -> bool:
     return True
 
 
-def _beat(db: Any, forge: Any, root: Path, trees: Path, workers: settings.Workers, tick: datetime) -> None:
+def _beat(db: Any, root: Path, facts: reconcile.Facts, tick: datetime) -> None:
     """Deliver the heartbeat after a pass (#1179). A failure is logged to the engine log and never stops the engine."""
     try:
-        now = datetime.now(timezone.utc)
-        limit = timedelta(minutes=workers.stall.after_minutes)
-        facts = engine_facts.gather(forge=forge, store=db, root=root, trees=trees, now=now, stall_after=limit)
-        failures = heartbeat_store.beat(db, now, tick, dict(facts.progress), limit, sinks=heartbeat_store.sinks(root))
+        failures = heartbeat_store.beat(db, tick, tick, dict(facts.progress), facts.stall_after,
+                                        sinks=heartbeat_store.sinks(root))
     except Exception as exc:
         failures = [f"heartbeat: {exc}"]
     for failure in failures:
@@ -1402,7 +1391,6 @@ def main(argv: list[str] | None = None) -> int:
                         error_kind = None
                     if args.once:
                         return 1 if failed else 0
-                    _beat(db, source, root, trees, config.workers, datetime.now(timezone.utc))
                     with contextlib.suppress(OSError):
                         write_engine_status(
                             root,

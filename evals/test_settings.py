@@ -1,6 +1,6 @@
 """Unit tests for scripts/settings.py: the workspace's chief-of-stuff.toml, named by the Coordinator block.
 
-Zach, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
+the owner, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
 settings into a config file. Default to 6 and 22". A value that cannot be read is refused, never
 guessed at.
 """
@@ -142,16 +142,22 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaises(st.SettingsError):
             st.load(self.root, self.write('[workflow]\nreviewer_session = "a b"\n'))
 
-    def test_code_delivery_and_merge_owner(self):
-        self.assertEqual((st.load(self.root, None).workflow.delivery,
-                          st.load(self.root, None).workflow.merge_owner), ("pull-request", "coordinator"))
+    def test_code_delivery_and_legacy_merge_owner(self):
+        self.assertEqual(st.load(self.root, None).workflow.delivery, "pull-request")
         workflow = st.load(self.root, self.write('[workflow]\ndelivery = "branch"\n')).workflow
         self.assertEqual(workflow.delivery, "branch")
-        workflow = st.load(self.root, self.write('[workflow]\nmerge_owner = "worker"\n')).workflow
-        self.assertEqual(workflow.merge_owner, "coordinator")
-        for text in ('delivery = "direct"', 'merge_owner = "bot"'):
-            with self.subTest(text=text), self.assertRaises(st.SettingsError):
-                st.load(self.root, self.write('[workflow]\n' + text + '\n'))
+        with self.assertWarnsRegex(UserWarning, "merge_owner.*ignored"):
+            workflow = st.load(self.root, self.write('[workflow]\nmerge_owner = "worker"\n')).workflow
+        self.assertNotIn("merge_owner", vars(workflow))
+        with self.assertRaises(st.SettingsError):
+            st.load(self.root, self.write('[workflow]\ndelivery = "direct"\n'))
+
+    def test_fix_round_limit_defaults_to_three_and_is_a_positive_whole_number(self):
+        self.assertEqual(st.load(self.root, None).workers.fix_round_limit, 3)
+        self.assertEqual(st.load(self.root, self.write('[workers]\nfix_round_limit = 5\n')).workers.fix_round_limit, 5)
+        for bad in ("0", "-1", "2.5", '"3"', "true"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(st.SettingsError, "fix_round_limit"):
+                st.load(self.root, self.write(f"[workers]\nfix_round_limit = {bad}\n"))
 
     def test_worker_cap_is_absent_or_a_positive_whole_number(self):
         self.assertIsNone(st.load(self.root, None).workers.max_concurrency)
@@ -260,7 +266,7 @@ class SettingsTest(unittest.TestCase):
             self.assertEqual(got.workers.rules, (rule,))
 
     def test_claude_as_profile_is_absent_or_a_claude_as_profile_name(self):
-        # Zach, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".
+        # the owner, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".
         self.assertEqual(st.load(self.root, None).workers.claude_as_profile, "")
         got = st.load(self.root, self.write('[workers]\nclaude_as_profile = "secondary"\n')).workers
         self.assertEqual(got.claude_as_profile, "secondary")
@@ -444,7 +450,7 @@ build = { stages = ["implement", "pr", "review", "triage", "merge"], gates = ["t
 
 
 class LanesTest(unittest.TestCase):
-    """#33 (Zach, 2026-09-23): "A lane: the sequence that a task has to move through" — named, in the toml."""
+    """#33 (the owner, 2026-09-23): "A lane: the sequence that a task has to move through" — named, in the toml."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -573,7 +579,6 @@ class KanbanSettingsTest(unittest.TestCase):
         for bad in (
             KANBAN.replace('plan = 0', 'plan = 6'),
             KANBAN.replace('plan = 0', 'plan = true'),
-            KANBAN.replace('"triage", "merge"', '"unknown", "merge"'),
             KANBAN.replace('"00 - PLAN", ', '"01 - PLAN REVIEW", '),
             KANBAN.replace('terminal_stages = ["main"]', 'terminal_stages = ["review"]'),
         ):
@@ -623,7 +628,7 @@ rotation = ["codex:gpt-test-coder@medium", "claude:sonnet", "claude:haiku@low"]
 
 class ModelsTest(unittest.TestCase):
     """#111: "I want, as part of the toml, the suggested models and model rotations to use." Each entry is
-    `runtime:model-id@effort`; effort is part of the entry (Zach: "effort should be part of the model id")."""
+    `runtime:model-id@effort`; effort is part of the entry (the owner: "effort should be part of the model id")."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

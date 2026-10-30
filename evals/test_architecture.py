@@ -273,7 +273,6 @@ MODULE_CIRCLE = {name: circle for circle, names in CIRCLES.items() for name in n
 # Section 5: inward→outward imports known today. The set may only shrink; each entry is a compliance gap.
 OUTWARD_IMPORTS = frozenset({
     "board_sources→process_status",
-    "decision_page→notify_service",
     "dispatch_prompt→backlog_ref",
     "dispatch_prompt→settings",
     "dispatch_prompt→workspace",
@@ -378,6 +377,13 @@ def outward_imports(graph: dict[str, set[str]] | None = None) -> set[str]:
 
 
 class DependencyRuleTest(unittest.TestCase):
+    def test_heartbeat_uses_public_workspace_io_and_shared_page_helpers(self) -> None:
+        self.assertNotIn("decision_page", imports(SCRIPTS / "heartbeat_page.py"))
+        tree = ast.parse((SCRIPTS / "heartbeat_store.py").read_text())
+        self.assertEqual([alias.name for node in ast.walk(tree)
+                          if isinstance(node, ast.ImportFrom) and node.module == "workspace"
+                          for alias in node.names if alias.name.startswith("_")], [])
+
     def test_every_script_launcher_and_hook_is_in_exactly_one_circle(self) -> None:
         hooks = discovered_hooks()
         inventory = ({p.stem for p in SCRIPTS.glob("*.py")} | set(LAUNCHERS) | set(hooks)

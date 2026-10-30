@@ -355,11 +355,11 @@ class MigrationTest(unittest.TestCase):
             self.addCleanup(db.engine.dispose)
             db.upsert_item(KEY)
             split = {"decision": {"options": ["approve", "reject"], "stage": "plan", "attempt": 1}, "default": "Not written"}
-            db.add_decision(KEY, "scope", "Approve this file ownership? A", None, "zach", split)
-            db.add_decision(KEY, "scope", "Approve this file ownership? B", None, "zach", {**split, "status": "blocked"})
-            db.add_decision(KEY, "scope", "Approve this file ownership? C", None, "zach", split)
+            db.add_decision(KEY, "scope", "Approve this file ownership? A", None, "owner", split)
+            db.add_decision(KEY, "scope", "Approve this file ownership? B", None, "owner", {**split, "status": "blocked"})
+            db.add_decision(KEY, "scope", "Approve this file ownership? C", None, "owner", split)
             db.add_decision(KEY, "scope", "Approve this file ownership? C", "approve", "user", split)
-            db.add_decision(KEY, "ask", "Which parser?", None, "zach", split)
+            db.add_decision(KEY, "ask", "Which parser?", None, "owner", split)
             before = [(r.id, r.answer, r.record) for r in db.decisions(KEY)]
             store.migrate(path)
             rows = db.decisions(KEY)

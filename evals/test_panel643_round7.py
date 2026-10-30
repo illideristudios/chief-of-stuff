@@ -34,7 +34,7 @@ class IntentEndToEndTest(unittest.TestCase):
 
     def asked(self, topic, question, answer=""):
         self.db.sync_from_forge(self.forge.snapshots())
-        return self.db.add_decision(KEY, topic, question, answer or None, "user" if answer else "zach")
+        return self.db.add_decision(KEY, topic, question, answer or None, "user" if answer else "owner")
 
     def current(self, row):
         """A decision's state: its identity's latest row (rows are append-only)."""

@@ -38,7 +38,7 @@ def exhaust_retry(row: Any, failures: int) -> DecisionUpdate | None:
     if row is None or row.answer or failures < MAX_TRIO_RETRIES or not retryable_failure(row.record):
         return None
     reason = f"trio unavailable after {failures} attempts: {row.question}"
-    return DecisionUpdate(row.topic, row.question, None, "zach",
+    return DecisionUpdate(row.topic, row.question, None, "owner",
                           {**row.record, "retry_exhausted": failures, "error": reason})
 
 
@@ -116,7 +116,7 @@ def needs_owner(rows: Sequence[Any]) -> NeedsOwner | None:
     decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
     if is_gate(row, decision):  # Legacy coordinator gates and saved owner waits are retired.
         return None
-    if (row.answer or "").strip() or row.decided_by != "zach":
+    if (row.answer or "").strip() or row.decided_by != "owner":
         return None
     stage, attempt = decision.get("stage", ""), decision.get("attempt", 0)
     return NeedsOwner(identity(row), stage, attempt, str(record.get("error") or row.question))

@@ -68,7 +68,7 @@ def _ordinal(n: int) -> str:
 class Estimate:
     """Where task i of an owner's N lands.
 
-    Two bases. `history`: the queue drains at the mean elapsed time of closed tasks of each size (Zach,
+    Two bases. `history`: the queue drains at the mean elapsed time of closed tasks of each size (the owner,
     2026-09-18: "generate an average amount of time spent per t-shirt sized puzzle ... use that"). `queue`:
     no task has closed with a range yet, so the queue drains evenly by the horizon — the 0.10.0 model,
     which claims nothing about effort. The label says which, so a reader can tell a measurement from a share.

@@ -3,7 +3,7 @@
 Every test drives a real loopback server on port 0, the way test_probe_health.py does. The
 interesting code is the header, the pagination and the four ways a fetch can fail, and a mocked
 urllib would skip all four. The suite never touches the network and never reads the real Keychain:
-the Keychain lookup is injected, because a test that passes only on Zach's laptop proves nothing.
+the Keychain lookup is injected, because a test that passes only on the owner's laptop proves nothing.
 """
 
 import contextlib
@@ -99,19 +99,19 @@ def issue(iid: int, title: str, state: str = "opened", labels=(), closed_at: str
         "title": title,
         "state": state,
         "labels": list(labels),
-        "web_url": f"https://labs.gauntletai.com/zachgardner/openemr/-/issues/{iid}",
+        "web_url": f"https://forge.example.test/example/project/-/issues/{iid}",
         "updated_at": "2026-09-20T05:11:02.000Z",
         "closed_at": closed_at,
     }
 
 
-ISSUES = "/api/v4/projects/zachgardner%2Fopenemr/issues"
+ISSUES = "/api/v4/projects/example%2Fproject/issues"
 
 
 def config_text(line: str) -> str:
     return (
         "# Workspace\n\n## Coordinator\n\n"
-        "- User: Zach\n"
+        "- User: the owner\n"
         "- Timezone: America/Chicago\n"
         f"{line}"
         "- Board: Artifact tool; URL https://example.test/b\n\n"
@@ -126,18 +126,18 @@ def written(text: str) -> Path:
 
 
 def cfg(base: str) -> bl.Backlog:
-    return bl.Backlog(host=base, project="zachgardner/openemr", env="CHIEF_OF_STUFF_GITLAB_TOKEN")
+    return bl.Backlog(host=base, project="example/project", env="CHIEF_OF_STUFF_GITLAB_TOKEN")
 
 
 class ConfigTest(unittest.TestCase):
     def test_reads_host_project_and_env_name_from_the_coordinator_block(self):
         path = written(config_text(
-            "- Backlog: GitLab; host https://labs.gauntletai.com; project zachgardner/openemr;"
+            "- Backlog: GitLab; host https://forge.example.test; project example/project;"
             " token env CHIEF_OF_STUFF_GITLAB_TOKEN\n"
         ))
         found = bl.backlog_from_config(path)
-        self.assertEqual(found.host, "https://labs.gauntletai.com")
-        self.assertEqual(found.project, "zachgardner/openemr")
+        self.assertEqual(found.host, "https://forge.example.test")
+        self.assertEqual(found.project, "example/project")
         self.assertEqual(found.env, "CHIEF_OF_STUFF_GITLAB_TOKEN")
 
     def test_no_backlog_line_is_absence_not_an_error(self):
@@ -145,14 +145,14 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNone(bl.backlog_from_config(written(config_text(""))))
 
     def test_a_host_that_is_not_http_is_refused(self):
-        path = written(config_text("- Backlog: GitLab; host ssh://labs.gauntletai.com; project a/b\n"))
+        path = written(config_text("- Backlog: GitLab; host ssh://forge.example.test; project a/b\n"))
         with self.assertRaises(bl.BacklogError):
             bl.backlog_from_config(path)
 
     def test_a_literal_token_in_the_config_is_refused(self):
         """House rule 6: a token never lives in a file that is committed. The config carries its NAME."""
         path = written(config_text(
-            f"- Backlog: GitLab; host https://labs.gauntletai.com; project a/b; token {TOKEN}\n"
+            f"- Backlog: GitLab; host https://forge.example.test; project a/b; token {TOKEN}\n"
         ))
         with self.assertRaises(bl.BacklogError) as caught:
             bl.backlog_from_config(path)
@@ -161,13 +161,13 @@ class ConfigTest(unittest.TestCase):
     def test_the_env_name_ends_at_the_first_space(self):
         """The live config line carries a parenthetical after the name, and an env var has no spaces."""
         path = written(config_text(
-            "- Backlog: GitLab; host https://labs.gauntletai.com; project a/b;"
+            "- Backlog: GitLab; host https://forge.example.test; project a/b;"
             " token env CHIEF_OF_STUFF_GITLAB_TOKEN (in the Keychain, never in this file)\n"
         ))
         self.assertEqual(bl.backlog_from_config(path).env, "CHIEF_OF_STUFF_GITLAB_TOKEN")
 
     def test_keychain_service_is_derived_from_the_host(self):
-        self.assertEqual(cfg("https://labs.gauntletai.com").service, "gitlab-labs.gauntletai.com")
+        self.assertEqual(cfg("https://forge.example.test").service, "gitlab-forge.example.test")
 
     def test_a_missing_token_names_the_variable_and_the_keychain_service(self):
         self.assertEqual(bl.Backlog("https://h.test", "g/p", "TEAM_TOKEN").missing_token,
@@ -237,7 +237,7 @@ class IssuesTest(unittest.TestCase):
     def test_closed_at_defaults_to_empty(self):
         """A GitLab issue with no `closed_at` (an open one) reports an empty string, never None."""
         body = json.dumps([{"iid": 1, "title": "open", "state": "opened", "labels": [],
-                            "web_url": "https://labs.gauntletai.com/zachgardner/openemr/-/issues/1"}])
+                            "web_url": "https://forge.example.test/example/project/-/issues/1"}])
         server, base = serve({("GET", ISSUES, "opened", "1"): (200, body, {})})
         self.addCleanup(stop, server)
         got = bl.issues(cfg(base), token=TOKEN)
@@ -323,7 +323,7 @@ class CountsTest(unittest.TestCase):
         self.assertNotIn("0 open", rendered)
 
 
-LABELS = "/api/v4/projects/zachgardner%2Fopenemr/labels"
+LABELS = "/api/v4/projects/example%2Fproject/labels"
 
 
 def key(method: str, path: str) -> tuple:
@@ -416,7 +416,7 @@ class WriteTest(unittest.TestCase):
 
 class LabelTest(unittest.TestCase):
     """Labels are created on demand from what a write asks for. No vocabulary is baked in:
-    Zach, 2026-09-19 22:47 — "lanes are also going to be changeable over time"."""
+    the owner, 2026-09-19 22:47 — "lanes are also going to be changeable over time"."""
 
     def test_creates_only_the_labels_that_are_missing(self):
         plan = {
@@ -470,7 +470,7 @@ class LabelTest(unittest.TestCase):
 class CliWriteTest(unittest.TestCase):
     def config_at(self, base: str) -> str:
         return str(written(config_text(
-            f"- Backlog: GitLab; host {base}; project zachgardner/openemr;"
+            f"- Backlog: GitLab; host {base}; project example/project;"
             " token env CHIEF_OF_STUFF_GITLAB_TOKEN\n"
         )))
 
@@ -511,16 +511,16 @@ class CliWriteTest(unittest.TestCase):
 
 # ---- GitHub -------------------------------------------------------------------------------------
 #
-# Zach, 2026-09-22 13:40: "for all future issue tracking, I want it to be stored in
-# https://github.com/locriani/GauntletIssues as github issues." `gh` carries the auth; the runner is
+# the owner, 2026-09-22 13:40: "for all future issue tracking, I want it to be stored in
+# https://github.com/example/project as github issues." `gh` carries the auth; the runner is
 # injected, so none of these touch the network or a socket.
 
 LIVE_LINE = (
-    "- Backlog: GitHub issues; repo https://github.com/locriani/GauntletIssues (private); read and write "
-    "with `gh issue` (Zach, 2026-09-22 13:40: \"for all future issue tracking, I want it to be stored in "
-    "https://github.com/locriani/GauntletIssues as github issues.\")\n"
+    "- Backlog: GitHub issues; repo https://github.com/example/project (private); read and write "
+    "with `gh issue` (the owner, 2026-09-22 13:40: \"for all future issue tracking, I want it to be stored in "
+    "https://github.com/example/project as github issues.\")\n"
 )
-REPO = "locriani/GauntletIssues"
+REPO = "example/project"
 GH = bl.GitHubBacklog(repo=REPO)
 
 
@@ -646,7 +646,7 @@ class GitHubReadTest(unittest.TestCase):
 
 
 class IssueRefTest(unittest.TestCase):
-    """A tracker's `issue` cell. Zach, 2026-09-22 22:20: each task "is actually backed by an entry in github"."""
+    """A tracker's `issue` cell. the owner, 2026-09-22 22:20: each task "is actually backed by an entry in github"."""
 
     def test_forms(self):
         for cell, want in (("#9", (REPO, 9)), (" #12 ", (REPO, 12)), ("o/n#4", ("o/n", 4)),
@@ -718,7 +718,7 @@ class ParseIssueArgTest(unittest.TestCase):
                 self.assertIsNone(bl.parse_issue_arg(arg, GH))
 
 
-# Zach, 2026-09-23 22:40: "remove the github issue remote and make everything use gitlab now that we have that going."
+# the owner, 2026-09-23 22:40: "remove the github issue remote and make everything use gitlab now that we have that going."
 GL = bl.Backlog(host="https://gl.example", project="g/p")
 
 
@@ -756,7 +756,7 @@ class GitLabIssueRefTest(unittest.TestCase):
         self.assertIsNone(bl.issue_ref("https://gl.example/g/p/-/issues/1", None))
 
     def test_project_shorthand_remains_github_in_gitlab_backlog(self):
-        ref = bl.issue_ref("locriani/GauntletIssues#33", GL)
+        ref = bl.issue_ref("example/project#33", GL)
         self.assertEqual(ref, bl.IssueRef(REPO, 33))
         self.assertEqual(ref.label(GL), f"{REPO}#33")
         github = bl.issue_ref(f"https://github.com/{REPO}/issues/33", GL)
@@ -972,7 +972,7 @@ class CommentsTest(unittest.TestCase):
         plan = {("GET", f"{ISSUES}/12/notes", "", "1"): (200, json.dumps([
             {"body": "closed the duplicate", "author": {"username": "gitlab-bot"},
              "created_at": "2026-09-25T10:00:00Z", "system": True},
-            {"body": "the design gate passes on the new layout", "author": {"username": "zach"},
+            {"body": "the design gate passes on the new layout", "author": {"username": "owner"},
              "created_at": "2026-09-25T21:48:00Z", "system": False},
             {"body": "one more question", "author": {"username": "robin"},
              "created_at": "2026-09-26T08:15:00Z", "system": False},
@@ -984,12 +984,12 @@ class CommentsTest(unittest.TestCase):
             stop(server)
         self.assertTrue(got.ok)
         self.assertEqual([(n.author, n.time, n.body) for n in got.notes], [
-            ("zach", "2026-09-25T21:48:00Z", "the design gate passes on the new layout"),
+            ("owner", "2026-09-25T21:48:00Z", "the design gate passes on the new layout"),
             ("robin", "2026-09-26T08:15:00Z", "one more question"),
         ])
 
     def test_notes_read_every_page_before_the_answer(self):
-        page_one = [{"body": f"note {i}", "author": {"username": "zach"},
+        page_one = [{"body": f"note {i}", "author": {"username": "owner"},
                      "created_at": f"2026-09-25T10:{i // 60:02d}:{i % 60:02d}Z", "system": False}
                     for i in range(100)]
         last = {"body": "the last note", "author": {"username": "robin"},
@@ -1034,14 +1034,14 @@ class GitHubReadTest(unittest.TestCase):
         self.assertIn("view", fake.calls[0])
 
     def test_comments_read_in_order_through_gh_api(self):
-        fake = FakeGh(comments=[{"user": {"login": "zach"}, "created_at": "2026-09-25T21:48:00Z",
+        fake = FakeGh(comments=[{"user": {"login": "owner"}, "created_at": "2026-09-25T21:48:00Z",
                                  "body": "the gate passes"},
                                 {"user": {"login": "robin"}, "created_at": "2026-09-26T08:15:00Z",
                                  "body": "one more"}])
         got = bl.comments(GH, 12, gh=fake)
         self.assertTrue(got.ok)
         self.assertEqual([(n.author, n.time, n.body) for n in got.notes], [
-            ("zach", "2026-09-25T21:48:00Z", "the gate passes"),
+            ("owner", "2026-09-25T21:48:00Z", "the gate passes"),
             ("robin", "2026-09-26T08:15:00Z", "one more"),
         ])
 
@@ -1063,10 +1063,10 @@ class ViewTextTest(unittest.TestCase):
 
     def test_comments_follow_in_order_with_author_and_time(self):
         one = bl.Issue(iid=12, title="t", state="opened", body="")
-        text = bl.view_text(one, notes=(bl.Note("zach", "2026-09-25T21:48:00Z", "the gate passes"),
+        text = bl.view_text(one, notes=(bl.Note("owner", "2026-09-25T21:48:00Z", "the gate passes"),
                                         bl.Note("robin", "2026-09-26T08:15:00Z", "one more")))
         self.assertEqual(text.splitlines()[-2:], [
-            "2026-09-25T21:48:00Z zach: the gate passes",
+            "2026-09-25T21:48:00Z owner: the gate passes",
             "2026-09-26T08:15:00Z robin: one more",
         ])
 
@@ -1082,7 +1082,7 @@ class ViewMainTest(unittest.TestCase):
         server, base = serve(planned)
         self.addCleanup(stop, server)
         path = written(config_text(
-            f"- Backlog: GitLab; host {base}; project zachgardner/openemr; token env CHIEF_OF_STUFF_GITLAB_TOKEN\n"
+            f"- Backlog: GitLab; host {base}; project example/project; token env CHIEF_OF_STUFF_GITLAB_TOKEN\n"
         ))
         out, err = io.StringIO(), io.StringIO()
         with patch.dict(os.environ, {"CHIEF_OF_STUFF_GITLAB_TOKEN": TOKEN}):  # noqa: S607
@@ -1101,13 +1101,13 @@ class ViewMainTest(unittest.TestCase):
             ("GET", f"{ISSUES}/12", "", "1"):
                 (200, json.dumps({**issue(12, "the design gate"), "description": "gate it"}), {}),
             ("GET", f"{ISSUES}/12/notes", "", "1"): (200, json.dumps([
-                {"body": "the design gate passes", "author": {"username": "zach"},
+                {"body": "the design gate passes", "author": {"username": "owner"},
                  "created_at": "2026-09-25T21:48:00Z", "system": False},
             ]), {}),
         }
         code, out, err, _server = self.run_view("--comments", plan=plan)
         self.assertEqual(code, 0, err)
-        self.assertIn("2026-09-25T21:48:00Z zach: the design gate passes", out)
+        self.assertIn("2026-09-25T21:48:00Z owner: the design gate passes", out)
 
     def test_a_missing_issue_exits_1_saying_unknown(self):
         code, out, err, _server = self.run_view(plan={})

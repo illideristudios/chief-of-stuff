@@ -445,7 +445,7 @@ def listed(owner: str, roster: set[str], refs: set[str], user: str = "") -> tupl
     """Is this context still in `## Sessions`, and if not, what did the asking turn on?
 
     A ref is minted once and survives every rename; a name is a tab title, and here they change —
-    `768194`'s was rewritten at 03:21 on Zach's word that the worktree is the name, and the join,
+    `768194`'s was rewritten at 03:21 on the owner's word that the worktree is the name, and the join,
     reading names, called a live session's tree orphaned. So where the cell carries a ref and the
     roster has refs to compare it against, the ref decides and the name is decoration. A ref the
     roster does not carry is a real absence even under a familiar name: the context that took the

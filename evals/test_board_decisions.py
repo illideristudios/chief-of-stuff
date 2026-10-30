@@ -43,7 +43,7 @@ def answered(**fields) -> SimpleNamespace:
 
 class DecisionActionsTest(unittest.TestCase):
     def test_answer_appends_an_answered_row_and_a_forge_comment(self) -> None:
-        tr = da.answer(make_decision(decided_by="zach"), "Yes, split it", decided_by="user", answered_at=ANSWERED_AT)
+        tr = da.answer(make_decision(decided_by="owner"), "Yes, split it", decided_by="user", answered_at=ANSWERED_AT)
         self.assertEqual((tr.decision.status, tr.decision.answer, tr.decision.decided_by, tr.decision.answered_at),
                          ("answered", "Yes, split it", "user", ANSWERED_AT))
         self.assertEqual((tr.update.topic, tr.update.question, tr.update.answer, tr.update.decided_by),
@@ -159,7 +159,7 @@ class RespondTest(unittest.TestCase):
 
     def respond(self, action, text="Because", *, record=None, target="", stage="review", history=(), issue_type=None,
                 policies=None):
-        return da.respond(record or make_decision(decided_by="zach"), action, text, target_stage=target,
+        return da.respond(record or make_decision(decided_by="owner"), action, text, target_stage=target,
                           current_stage=stage, history=history, policies=policies or self.policies,
                           issue_type=issue_type, answered_at=ANSWERED_AT)
 
@@ -305,7 +305,7 @@ class HumanAnswerTest(unittest.TestCase):
     """Human answer wins: no model row lands over a person's answer (architect ruling on #758, item 2)."""
 
     def test_a_persons_latest_answer_is_returned_for_its_decision_only(self):
-        rows = [make_decision(id=1, decided_by="zach"), answered(id=2, decided_by="user", answer="Keep it")]
+        rows = [make_decision(id=1, decided_by="owner"), answered(id=2, decided_by="user", answer="Keep it")]
         trio = decision_escalation.DecisionUpdate("design", "Split the parser into two passes?", "Split", "trio", {})
         self.assertEqual(da.human_answer(rows, trio).answer, "Keep it")
         self.assertIsNone(da.human_answer(rows, decision_escalation.DecisionUpdate("design", "Another?", "Split", "trio", {})))

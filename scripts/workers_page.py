@@ -21,8 +21,9 @@ import panels
 import session_logs
 from clock import parse_stamp
 from task_forge import EXHAUSTED_CHIP, PageData, retry_exhaustion, segment_worker_key, source_workers
-from decision_page import HEAD, context, pending_count, write_if_changed
+from decision_page import context, pending_count
 from fragment import tab_bar, issue_href, href, latest_thread_link
+from page_common import HEAD, write_if_changed
 from md import section as _section
 from tracker import TRAILING_NUMBER, launcher, parse_tracker
 from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STAGE, STARTED

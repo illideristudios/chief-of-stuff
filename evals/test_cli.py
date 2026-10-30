@@ -191,6 +191,26 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
             [sys.executable, str(ROOT / "scripts/install_model_guidance.py"), "--help"],
         )
 
+    def test_decision_page_is_plain_but_decision_graph_uses_the_pinned_venv(self):
+        venv_python = Path("/pin/venv/bin/python")
+        for command, args, backed in (
+            ("decision", ["--root", "/workspace", "--name", "release-cut"], False),
+            ("decisions", ["--root", "/workspace", "leaves"], True),
+        ):
+            with self.subTest(command=command), \
+                 mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+                 mock.patch.object(supervisor, "data_dir", return_value=Path("/pin/data")), \
+                 mock.patch.object(supervisor, "ensure_venv", return_value=venv_python) as ensure, \
+                 mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+                with self.assertRaises(SystemExit):
+                    cli.main([command, *args])
+                if backed:
+                    ensure.assert_called_once_with(Path("/pin/data"))
+                else:
+                    ensure.assert_not_called()
+                python = str(venv_python) if backed else sys.executable
+                execv.assert_called_once_with(python, [python, str(ROOT / cli.COMMANDS[command]), *args])
+
     def test_work_routes_to_the_store_backed_driver_and_forwards_intake_options(self):
         venv_python = Path("/pin/venv/bin/python")
         args = ["--root", "/workspace", "Add a flag", "--body", "why", "--issue", "3", "--commit"]
@@ -328,7 +348,9 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
         reaching = {name for name, target in cli.COMMANDS.items()
                     if target.startswith("scripts/") and target.count("/") == 1
                     and forbidden_reach(scripts, Path(target).stem, set(), frozenset({"sqlalchemy", "alembic"}))}
-        self.assertEqual(reaching, set(cli.STORE_BACKED))
+        self.assertEqual(reaching, set(cli.STORE_BACKED),
+                         f"Computed store-backed commands: {sorted(reaching)}; "
+                         f"declared STORE_BACKED commands: {sorted(cli.STORE_BACKED)}")
 
 
 if __name__ == "__main__":

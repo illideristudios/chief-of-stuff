@@ -116,6 +116,30 @@ class FakeForge:
 
 
 class EngineTest(unittest.TestCase):
+    def test_heartbeat_uses_the_same_facts_as_the_planner_without_a_second_gather(self):
+        known = reconcile.Facts(blockers=(), progress=((KEY, NOW),), stall_after=timedelta(minutes=17))
+        with mock.patch.object(engine.engine_facts, "gather", return_value=known) as gathered, \
+                mock.patch.object(engine.heartbeat_store, "beat", return_value=[]) as beat:
+            self.run_pass()
+        gathered.assert_called_once()
+        beat.assert_called_once_with(self.db, NOW, NOW, {KEY: NOW}, known.stall_after,
+                                     sinks=mock.ANY)
+
+    def test_workspace_fix_round_limit_reaches_the_planner(self):
+        self.forge.rows[0]["stage"] = "review"
+        self.db.sync_from_forge(self.forge.snapshots())
+        for i in range(3):
+            start = NOW - timedelta(minutes=20-i*2)
+            end = start + timedelta(minutes=1)
+            self.db.record_segment(KEY, "review", i + 1, start.isoformat(), end.isoformat(), "done")
+            if i < 2:
+                self.db.record_segment(KEY, "implement", i + 1, end.isoformat(),
+                                       (end + timedelta(minutes=1)).isoformat(), "done")
+        review_report(self.db, KEY, attempt=3, counts={"minor": 1})
+        actions = self.run_pass(workers=replace(engine.settings.Workers(), fix_round_limit=2))
+        self.assertIsInstance(actions[0], reconcile.Escalate)
+        self.assertIn("2 fix rounds", self.db.resume(KEY)["park"]["reason"])
+
     def test_legacy_suite_hold_becomes_a_failed_attempt_for_automatic_retry(self):
         self.db.upsert_item(KEY, stage="implement", human_review=True)
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "human_review")
@@ -201,7 +225,7 @@ class EngineTest(unittest.TestCase):
 
     def run_pass(self, **kwargs):
         return engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
-                               trees=self.trees, launch=self.launch, workers=engine.settings.Workers(),
+                               trees=self.trees, launch=self.launch, workers=kwargs.pop("workers", engine.settings.Workers()),
                                clock=lambda: self.now, **kwargs)
 
     def finish(self, stage, attempt=1, outcome="done"):
@@ -1778,7 +1802,7 @@ class EngineTest(unittest.TestCase):
 
     def test_a_decision_hold_wait_blocks_no_answered_decision(self):
         answered = self.decide("design", "Approve schema?", "Yes")
-        self.decide("scope", "Still open?", by="zach")
+        self.decide("scope", "Still open?", by="owner")
         with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
             self.run_pass()
         self.assertEqual(self.state(answered).status, "answered")
@@ -1786,7 +1810,7 @@ class EngineTest(unittest.TestCase):
     def test_a_wait_blocked_answer_settles_even_beside_a_pending_sibling(self):
         # #1124: a wait never blocked it for good, so an open sibling is no reason to keep it blocked.
         blocked = self.decide("design", "Approve schema?", "Yes", status="blocked", blocked_reason="merge conflicts")
-        self.decide("scope", "Still open?", by="zach")
+        self.decide("scope", "Still open?", by="owner")
         with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "merge conflicts")]):
             self.run_pass()
         self.assertEqual((self.state(blocked).status, self.state(blocked).blocked_reason), ("answered", ""))
@@ -2382,7 +2406,7 @@ class EngineTest(unittest.TestCase):
         self.db.upsert_item(KEY, stage="implement")
         ask = self.db.add_ask(KEY, "implement", 1, "s1", "Which credentials?", [], "ctx")
         self.run_pass(model=mock.Mock())
-        self.assertEqual(self.db.decisions(KEY)[-1].decided_by, "zach")
+        self.assertEqual(self.db.decisions(KEY)[-1].decided_by, "owner")
         self.db.answer_ask(KEY, ask, "Use the test account")
         self.run_pass()
         self.assertNotIn("decision_interrupts", self.db.resume(KEY))
@@ -2598,7 +2622,7 @@ class EngineTest(unittest.TestCase):
 
     def _merge_gate(self):
         self._trio()
-        self.p.stages["review"] = policy.Place("review", "critic", {"zach_gates": ("merge",)})
+        self.p.stages["review"] = policy.Place("review", "critic", {})
         self.p.workflows["standard"] = policy.Workflow("standard", "implement", (
             policy.Edge("implement", "review"), policy.Edge("review", "implement"),
             policy.Edge("review", "merge", "merge")))
@@ -2607,34 +2631,6 @@ class EngineTest(unittest.TestCase):
         self.db.record_segment(KEY, "review", 1, (NOW - timedelta(minutes=2)).isoformat(),
                                (NOW - timedelta(minutes=1)).isoformat(), "done")
         self.findings()
-
-
-    def _superseded_merge_gate(self, mode):
-        self._merge_gate()
-        if mode == "exhausted":
-            model = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
-            for _ in range(8):
-                self.run_pass(model=model)
-                self.now += timedelta(hours=2)
-        else:
-            model = self._votes([(mode, "hold")] * 3)
-            self.run_pass(model=model)
-        self.assertEqual(len(self.db.resume(KEY)["decision_interrupts"]), 1)
-        self.now += timedelta(hours=1)
-        self.db.record_segment(KEY, "review", 2, self.now.isoformat(), self.now.isoformat(), "done")
-        self.findings(attempt=2)
-        fresh = self._votes([("adopt", "approve")] * 3)
-        self.assertIsInstance(self.run_pass(model=fresh)[0], reconcile.Ask)
-        self.assertEqual(fresh.n, 3)
-        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
-        self.assertEqual(self.run_pass(model=fresh), [reconcile.Merge(KEY)])
-
-
-
-
-
-
-
 
 
     def _restart_clears_downstream_owner_interrupts(self, start):

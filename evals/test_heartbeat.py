@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -134,10 +133,15 @@ class StoreTest(unittest.TestCase):
 
     def test_an_unanswered_owner_decision_from_a_split_trio_is_a_split(self):
         self.db.upsert_item(A)
-        self.db.add_decision(A, "naming", "Which name?", decided_by="zach", record={"unanimous": False})
+        self.db.add_decision(A, "naming", "Which name?", decided_by="owner", record={"unanimous": False})
         self.db.upsert_item(B)
-        self.db.add_decision(B, "naming", "Which name?", decided_by="zach", record={"unanimous": True})
-        self.assertEqual({k: f.split_trio for k, f in self.rows().items()}, {A: True, B: False})
+        self.db.add_decision(B, "naming", "Which name?", decided_by="owner", record={"unanimous": True})
+        self.db.upsert_item(C)
+        self.db.add_decision(C, "naming", "Which name?", decided_by="trio", record={"unanimous": False})
+        self.db.upsert_item(D)
+        self.db.add_decision(D, "naming", "Which name?", decided_by="owner", answer="Use the short name",
+                             record={"unanimous": False})
+        self.assertEqual({k: f.split_trio for k, f in self.rows().items()}, {A: True, B: False, C: False, D: False})
 
     def test_the_park_reason_and_the_open_segment_come_from_the_store(self):
         self.db.upsert_item(A)
@@ -195,12 +199,12 @@ class EngineBeatTest(unittest.TestCase):
         self.db = store.Store(self.root / "store.db", clock=lambda: NOW)
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(A, forge_state="closed", merge_state="merged")
-        self.workers = SimpleNamespace(stall=SimpleNamespace(after_minutes=45))
+        self.facts = engine.reconcile.Facts(progress=((A, TICK),), stall_after=LIMIT)
 
     def beat(self, sinks):
-        with mock.patch.object(engine.engine_facts, "gather", return_value=SimpleNamespace(progress=())), \
+        with mock.patch.object(engine.engine_facts, "gather", side_effect=AssertionError("must reuse pass facts")), \
                 mock.patch.object(heartbeat_store, "sinks", return_value=sinks):
-            engine._beat(self.db, None, self.root, self.root, self.workers, TICK)
+            engine._beat(self.db, self.root, self.facts, TICK)
 
     def test_a_pass_delivers_the_heartbeat_to_the_sinks(self):
         sink = Recorder("board")
@@ -214,10 +218,10 @@ class EngineBeatTest(unittest.TestCase):
         self.assertEqual([(e.kind, e.message) for e in self.db.engine_log()],
                          [("heartbeat", "title: the T3 title could not be set")])
 
-    def test_a_failure_to_gather_is_logged_not_raised(self):
-        with mock.patch.object(engine.engine_facts, "gather", side_effect=OSError("no git")):
-            engine._beat(self.db, None, self.root, self.root, self.workers, TICK)
-        self.assertEqual([e.message for e in self.db.engine_log()], ["heartbeat: no git"])
+    def test_a_failure_to_render_is_logged_not_raised(self):
+        with mock.patch.object(heartbeat_store, "beat", side_effect=OSError("unreadable store")):
+            engine._beat(self.db, self.root, self.facts, TICK)
+        self.assertEqual([e.message for e in self.db.engine_log()], ["heartbeat: unreadable store"])
 
 
 class PageTest(unittest.TestCase):

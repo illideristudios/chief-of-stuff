@@ -7,7 +7,7 @@ from html import escape
 from pathlib import Path
 
 import heartbeat_store
-from decision_page import HEAD, write_if_changed
+from page_common import HEAD, write_if_changed
 from fragment import issue_href, tab_bar
 
 SECTIONS = (("done", "Done"), ("assumed", "Done on assumptions"), ("parked", "Parked"))

@@ -1,6 +1,6 @@
 """The canonical page theme, vendored here and carried by the board and decision pages.
 
-Stage 2 of the page-theme plan (Zach, 2026-10-07): frank-lloyd-aight's `docs/page-theme.css` is the
+Stage 2 of the page-theme plan (the owner, 2026-10-07): frank-lloyd-aight's `docs/page-theme.css` is the
 canonical theme, `assets/page-theme.css` is its verbatim vendored copy, and `scripts/sync_page_theme.py`
 re-copies it from the pinned source and exits non-zero on any drift. The board and decision pages inline
 the whole theme ahead of their own rules: the theme rides at the top of each page's own one `<style>` block —

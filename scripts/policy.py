@@ -1,7 +1,7 @@
 """Policy and workflow as data (design decisions 12 and 13): personas, rooms, stages, workflow graphs, and the
 effective policy for a persona at a stage in a room.
 
-Zach, 2026-10-10: "everything is policy driven. We have default policies, and based on personas. This is all
+the owner, 2026-10-10: "everything is policy driven. We have default policies, and based on personas. This is all
 configurable at a stage / room level." Every policy field starts from the base `[policy]` table and is overridden, in
 order, by the persona's, the stage's and the room's own `policy` table, so a value set for one stage or room holds only
 there. A field is replaced whole, never merged. This module reads no file: `settings.load_policy` reads the TOML.
@@ -17,6 +17,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from math import isfinite
+import warnings
 
 from runtimes import EFFORTS
 
@@ -37,15 +38,14 @@ class Approval:
 
 @dataclass(frozen=True)
 class Policy:
-    zach_gates: tuple[str, ...] = ()  # gates only Zach's own word passes; none by default (decision 6)
     blocking_severity: str = "minor"  # a finding at or above it blocks merge; minor is "burn down to no open findings"
     architect: bool = False  # the architect is consulted where this holds
-    retry_limit: int = 3  # fix rounds before an unrecoverable-failure ping (Zach, 2026-10-11)
+    retry_limit: int = 3  # launcher-hold release failures before escalation
     launch: str = "adapter"  # a worker runs through the model adapter, or as a full Claude Code session
     trio: tuple[str, ...] = ()  # the decision trio when no topic tag maps to one (decision 5a)
     trios: dict[str, tuple[str, ...]] = field(default_factory=dict)  # decision topic tag -> three personas
     approvals: tuple[Approval, ...] = ()
-    # No default limits: they are set in 1.1 from what 1.0 measures (Zach, 2026-10-10). None is no limit.
+    # No default limits: they are set in 1.1 from what 1.0 measures (the owner, 2026-10-10). None is no limit.
     spend_usd: float | None = None
     quota_percent: float | None = None
     time_minutes: float | None = None
@@ -129,7 +129,7 @@ class Policies:
         return next((w for w in self.workflows.values() if issue_type in w.issue_types), self.workflows[self.default_workflow])
 
 
-FIELDS = {f.name for f in fields(Policy)}
+FIELDS = {f.name for f in fields(Policy)} | {"zach_gates"}  # legacy input only, never runtime policy
 
 
 def _table(where: str, value, allowed: set[str] | None = None) -> dict:
@@ -195,7 +195,8 @@ def _policy(where: str, value, personas: set[str], gates: set[str]) -> dict:
         if key in ("spend_usd", "quota_percent", "time_minutes"):
             v = _limit(at, v)
         elif key == "zach_gates":
-            v = _names(at, v)
+            warnings.warn(f"{at} is retired and ignored; workflow gates advance automatically", stacklevel=2)
+            continue
         elif key == "trio":
             v = _trio(at, v, personas)
         elif key == "trios":

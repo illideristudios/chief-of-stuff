@@ -148,7 +148,7 @@ class GateTest(unittest.TestCase):
         self.assertIsNone(got.recommendation)
         self.assertEqual(len(self.model.requests), 3)
         row, = self.store.decisions(KEY)
-        self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+        self.assertEqual((row.answer, row.decided_by), (None, "owner"))
         self.assertEqual([v["vote"] for v in row.record["verdicts"]], ["adopt", "concern", "adopt"])
         self.assertEqual(row.record["verdicts"][1]["reasoning"], "Too much coupling")
         self.assertIsNone(row.record["recommendation"])
@@ -162,7 +162,7 @@ class GateTest(unittest.TestCase):
                 self.assertEqual(len(self.model.requests), 3)
                 row = self.store.decisions(KEY)[-1]
                 self.assertEqual((row.answer, row.decided_by),
-                                 (None, "" if kind in model_port.RETRYABLE else "zach"))
+                                 (None, "" if kind in model_port.RETRYABLE else "owner"))
                 verdict = row.record["verdicts"][0]
                 self.assertEqual(verdict["vote"], "concern")
                 self.assertIsNone(verdict["choice"])
@@ -184,7 +184,7 @@ class GateTest(unittest.TestCase):
                 self.assertIsNone(got.recommendation)
                 self.assertEqual(len(self.model.requests), 3)
                 row = self.store.decisions(KEY)[-1]
-                self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+                self.assertEqual((row.answer, row.decided_by), (None, "owner"))
                 self.assertEqual(row.record["verdicts"][1]["vote"], "concern")
                 self.assertIn("malformed", row.record["verdicts"][1]["reasoning"])
 
@@ -194,7 +194,7 @@ class GateTest(unittest.TestCase):
         self.assertFalse(got.unanimous)
         self.assertIsNone(got.recommendation)
         row, = self.store.decisions(KEY)
-        self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+        self.assertEqual((row.answer, row.decided_by), (None, "owner"))
         self.assertEqual([v["vote"] for v in row.record["verdicts"]], ["adopt"] * 3)
         self.assertEqual([v["choice"] for v in row.record["verdicts"]], [OPTIONS[0], OPTIONS[1], OPTIONS[0]])
 
@@ -206,7 +206,7 @@ class GateTest(unittest.TestCase):
                 self.assertFalse(got.unanimous)
                 self.assertIsNone(got.recommendation)
                 row = self.store.decisions(KEY)[-1]
-                self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+                self.assertEqual((row.answer, row.decided_by), (None, "owner"))
                 verdict = row.record["verdicts"][1]
                 self.assertEqual(verdict["vote"], "concern")
                 self.assertIsNone(verdict["choice"])
@@ -265,7 +265,7 @@ class GateTest(unittest.TestCase):
         self.assertIsNone(decision_escalation.answer_ask(self.store.decisions(KEY), ask))
 
     def test_needs_owner_reads_only_the_latest_row_for_a_decision_attempt(self):
-        row = decision_escalation.DecisionUpdate("plan", "Gate?", None, "zach", {
+        row = decision_escalation.DecisionUpdate("plan", "Gate?", None, "owner", {
             "error": "gate unavailable", "decision": {
                 "stage": "implement", "attempt": 1, "context": "implement-1"}})
         expected = decision_escalation.NeedsOwner(("plan", "Gate?", ""), "implement", 1, "gate unavailable")
@@ -281,7 +281,7 @@ class GateTest(unittest.TestCase):
 
     def test_a_new_context_cannot_reuse_an_unanswered_exhaustion(self):
         decision = replace(self.decision, context="implement-1")
-        self.store.add_decision(KEY, decision.topic, decision.question, None, "zach", {
+        self.store.add_decision(KEY, decision.topic, decision.question, None, "owner", {
             "retry_exhausted": 8, "decision": asdict(decision)})
         model = FakeModel([reply(choice=OPTIONS[1])] * 3)
         got = trio_gate.decide(replace(decision, context="implement-2"), self.store.decisions(KEY),
@@ -303,7 +303,7 @@ class GateTest(unittest.TestCase):
         decision = replace(self.decision, options=("approve", "hold"), stage="implement", attempt=1, gate=True)
         self.consult([reply(choice="hold")] * 3, decision=decision)
         row, = self.store.decisions(KEY)
-        self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+        self.assertEqual((row.answer, row.decided_by), (None, "owner"))
         self.assertEqual(row.record["recommendation"], "hold")
 
     def test_invalid_options_are_escalated_and_deduplicated_by_the_use_case(self):
@@ -332,7 +332,7 @@ class GateTest(unittest.TestCase):
         context = decision_escalation.replacement_context(origin, segment)
         record = {"decision": {**origin.record["decision"], "context": context}, "unanimous": False}
         row = SimpleNamespace(topic=origin.topic, question=origin.question, answer=None,
-                              decided_by="zach", record=record)
+                              decided_by="owner", record=record)
         spec, existing, pending = decision_escalation.replacement_ask(origin, segment, [row], [])
         self.assertIsInstance(pending, decision_escalation.DecisionUpdate)
         self.assertIsNone(existing)
@@ -341,7 +341,7 @@ class GateTest(unittest.TestCase):
         update = decision_escalation.link_ask(pending, 42)
         self.assertIsInstance(update, decision_escalation.DecisionUpdate)
         self.assertEqual((update.topic, update.question, update.answer, update.decided_by),
-                         (row.topic, row.question, None, "zach"))
+                         (row.topic, row.question, None, "owner"))
         self.assertEqual(update.record, {**record, "answer_ask_id": 42})
         self.assertNotIn("answer_ask_id", row.record)
 
@@ -495,7 +495,7 @@ class TrioModelsTest(unittest.TestCase):
         got = self.ask(self.port(lambda request: model_port.Failure("quota", "429 quota")))
         self.assertTrue(got.escalated)
         row = self.store.decisions(KEY)[-1]
-        self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+        self.assertEqual((row.answer, row.decided_by), (None, "owner"))
         self.assertTrue(row.record["retry_exhausted"])
         self.assertIn("every [models.trio] entry stopped on quota", row.record["error"])
 
@@ -503,7 +503,7 @@ class TrioModelsTest(unittest.TestCase):
         got = self.ask(self.port(launchable=lambda runtime: False))
         self.assertTrue(got.escalated)
         self.assertEqual(self.requests, [])
-        self.assertEqual(self.store.decisions(KEY)[-1].decided_by, "zach")
+        self.assertEqual(self.store.decisions(KEY)[-1].decided_by, "owner")
 
 
 class DefaultTest(unittest.TestCase):
@@ -530,7 +530,7 @@ class DefaultTest(unittest.TestCase):
             "Denied": trio_gate.Decision(KEY, "ask", "Permission requested for Bash", ("allow", "deny"),
                                          context=permission, instance="ask-1"),
             # reconcile._gate waits at a gate until its answer is approve
-            "Hold": trio_gate.Decision(KEY, "plan", "gate requires Zach's approval", ("approve", "hold"),
+            "Hold": trio_gate.Decision(KEY, "plan", "gate requires the owner's approval", ("approve", "hold"),
                                        context="implement-1", gate=True),
             # engine_mcp's ask: the worker reports blocked and waits for the engine
             "The worker waits": trio_gate.Decision(KEY, "ask", "Which parser?", OPTIONS, instance="ask-2"),
@@ -543,7 +543,7 @@ class DefaultTest(unittest.TestCase):
         decision = trio_gate.Decision(KEY, "ask", "Which parser?", OPTIONS, instance="ask-3")
         trio_gate.consult(decision, self.policy, PERSONAS, FakeModel([reply()] * 3), self.store)
         self.assertTrue(self.store.decisions(KEY)[-1].record["default"].startswith("The worker waits"))
-        gate = trio_gate.Decision(KEY, "plan", "gate requires Zach's approval", ("approve",), gate=True)
+        gate = trio_gate.Decision(KEY, "plan", "gate requires the owner's approval", ("approve",), gate=True)
         for _ in range(2):  # refused every pass, recorded once
             trio_gate.decide(gate, self.store.decisions(KEY), self.policy, PERSONAS, None, self.store)
         rows = [r for r in self.store.decisions(KEY) if r.topic == "plan"]

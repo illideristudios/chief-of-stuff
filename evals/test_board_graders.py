@@ -1,5 +1,5 @@
 """The board graders, reading the board the renderer wrote into the case's pages dir, and the runner's
-pages wiring (Zach, 2026-09-24 14:07: "we should host our own webserver"; the mock publish tool is gone)."""
+pages wiring (the owner, 2026-09-24 14:07: "we should host our own webserver"; the mock publish tool is gone)."""
 
 from __future__ import annotations
 

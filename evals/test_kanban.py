@@ -289,7 +289,7 @@ class CliTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         (self.root / "CLAUDE.md").write_text(
-            "## Coordinator\n- User: Zach\n- Timezone: America/Chicago\n"
+            "## Coordinator\n- User: the owner\n- Timezone: America/Chicago\n"
             "- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
             "- Settings: `chief-of-stuff.toml`\n"
             "- Backlog: GitLab issues; host https://labs.example.test; project team/app\n")
