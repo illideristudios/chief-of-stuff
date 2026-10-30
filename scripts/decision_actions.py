@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Collection, Sequence
 
-from decision_escalation import DecisionUpdate, identity, latest
+from decision_escalation import DecisionUpdate, identity, latest, needs_owner
 
 OPEN_STATES = frozenset({"open", "blocked"})
 CLOSED_STATES = frozenset({"answered", "reversed", "re-routed", "superseded"})
@@ -100,6 +100,12 @@ def addresses(records: Sequence[Any]) -> dict[int, int]:
 def states(records: Sequence[Any]) -> list[DecisionState]:
     """Every decision's current state."""
     return [state_of(row) for row in current_rows(records)]
+
+
+def waits_on_owner(row: Any) -> bool:
+    """C30: a decision's newest row waits on the owner only when needs_owner says so, or its intent is blocked (#1124)."""
+    status = state_of(row).status
+    return status == "blocked" or (status == "open" and needs_owner([row]) is not None)
 
 
 def board_status(record: Any) -> str:
@@ -316,7 +322,7 @@ def tab_counts(items, decisions, segments, resumes: dict | None = None) -> dict:
     An exhausted retry with no live segment is held (#963): it is not ready to dispatch.
     """
     opened = {i.issue_key: i for i in items if i.forge_state != "closed"}
-    pending = [d for d in states([d for d in decisions if d.issue_key in opened]) if d.status in OPEN_STATES]
+    pending = [d for d in current_rows([d for d in decisions if d.issue_key in opened]) if waits_on_owner(d)]
     held = {d.issue_key for d in pending}
     waiting = waiting_workers(items, segments, resumes)
     held.update(waiting)

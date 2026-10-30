@@ -57,8 +57,9 @@ DRAWS_NOTHING = (
     "decisions_cli",  # Frameworks and Drivers: coordinator/architect/owner decision graph CLI.
     "performance",
     "performance_report",
+    "bake",
     "limits", "limits_history", "limits_probe", "limits_cli", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
-    "supervisor", "release_selection", "engine_intent",
+    "supervisor", "self_update", "release_selection", "engine_intent",
     "startup",
     "guard_commands",  # Entities: pure shell command gate judgements.
     "guard_rules",  # Use Cases: pure Stop, permission-ask and resume judgements.
@@ -258,15 +259,16 @@ CIRCLES: dict[str, frozenset[str]] = {
         "migrations/versions/0010_worker_messages",
         "migrations/versions/0011_rotation_records",
         "migrations/versions/0012_decision_graph",
+        "migrations/versions/0014_cleanup_teardown",
     }),
     "drivers": frozenset({
-        "claude_adapter", "host_adapter", "t3_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor", "release_selection", "engine_intent",
+        "claude_adapter", "host_adapter", "t3_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor", "self_update", "release_selection", "engine_intent",
         "startup", "store_access", "kanban_cli", "pipeline_cli", "process_status", "session_exec", "spawn_session",
         "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
         "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
-        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "architect_signals_cli", "decisions_cli",
+        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "bake", "architect_signals_cli", "decisions_cli",
         "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }

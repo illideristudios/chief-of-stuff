@@ -192,11 +192,12 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                   held: dict[Task, str] | None = None, loops: set[Task] | frozenset[Task] = frozenset(),
                   live_keys: frozenset[str] = frozenset(), live_tasks: set[Task] | frozenset[Task] = frozenset(),
                   ambiguous_numbers: set[int] | None = None,
-                  threads: dict[str, str] | None = None) -> list[columns.Column]:
-    """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
-    a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
+                  threads: dict[str, str] | None = None, moves: list | None = None) -> list[columns.Column]:
+    """The Build board: a card at the stage Flow keeps, with done cards only in main.
+    Task cards sort by issue number. Sources add each card's changes
+    and marks, and a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
-    held = hold_causes(tasks, kanban, sources, lanes, frozenset()) if held is None else held
+    held = hold_causes(tasks, kanban, sources, lanes, frozenset(), moves) if held is None else held
     gates = {g for lane in lanes.values() for g in lane.gates}
     ambiguous_numbers = ambiguous_issue_numbers(tasks, sources.home) if ambiguous_numbers is None else ambiguous_numbers
 
@@ -259,16 +260,23 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
 
-    # Done means done (#1153): a finished task leaves the stage columns; only `main` holds finished work.
-    laned = [t for t in tasks if t.lane.strip() and t.stage.strip()
-             and (t.kind != "done" or effective_stage(t, sources, lanes) == "main")]
-    at = {t: effective_stage(t, sources, lanes) for t in laned}
+    candidates = [t for t in tasks if t.lane.strip() and t.stage.strip()]
+    stages = {t: effective_stage(t, sources, lanes, moves, tasks) for t in candidates}
+    # Main's done-card rule (#1153/#1154), applied to the same stage Build and Flow display.
+    laned = [t for t in candidates if t.kind != "done" or stages[t] == "main"]
+    at = {t: stages[t] for t in laned}
     order = list(dict.fromkeys(stage_order(lanes) + list(at.values())))
     # No PR column: a card at `pr` draws in the stage after it, normally review.
     into = {"pr": order[order.index("pr") + 1]} if "pr" in order[:-1] else {}
     order = [s for s in order if s not in into]
-    cols = [columns.Column(stage, tuple(card(t, at[t]) for t in laned if into.get(at[t], at[t]) == stage),
-                           *(("gate", "gate") if stage in gates else ())) for stage in order]
+
+    def cards_at(stage: str) -> tuple[columns.Card, ...]:
+        # Numbered cards first, ascending; no number last; ties keep tracker order (#887).
+        group = [t for t in laned if into.get(at[t], at[t]) == stage]
+        group.sort(key=lambda t: ((n := issue_number(t.issue)) is None, n or 0))
+        return tuple(card(t, at[t]) for t in group)
+
+    cols = [columns.Column(stage, cards_at(stage), *(("gate", "gate") if stage in gates else ())) for stage in order]
     merged = merged_today(sources, now) if now else []
     if merged:
         cards = tuple(columns.Card(c.title, "merged today", tuple((i, page(i, issue_url(i))) for i in c.issues[:1]) + ((c.ref, change_href(c)),),
@@ -331,8 +339,9 @@ def _tasks_from_store(db: PageData, cfg: Config, lanes: dict | None, kanban: Kan
     for item in store_items:
         lane_name = item.workflow or default_lane
         lane_obj = (lanes or {}).get(lane_name)
-        stage_name = item.stage or (lane_obj.stages[0] if lane_obj and lane_obj.stages else "implement")
         item_segs = segs_by_key.get(item.issue_key, [])
+        stage_name = item.stage or (item_segs[-1].stage if item_segs else
+                                   lane_obj.stages[0] if lane_obj and lane_obj.stages else "implement")
         open_seg = next((s for s in reversed(item_segs) if s.ended_at is None), None)
         open_decs = [d for d in store_decisions if d.issue_key == item.issue_key and state_of(d).status in ("open", "blocked")]
         exhausted = retry_exhaustion(db.resume(item.issue_key), item_segs, db.log(item.issue_key))
@@ -401,16 +410,6 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
 
     issues = sum(1 for t in tasks if t.issue.strip() and not t.workflow)
     changes = sum(1 for c in sources.changes.values() if c.state == "open")
-    # A task's stage for drift, computed once, keyed by the task: every nameless task shares the blank name.
-    stages = {t: effective_stage(t, sources, lanes or {}) for t in tasks}
-    # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
-    pending_refs = dict(pending_refs or {})
-    for d in store_decisions:
-        if state_of(d).status in ("open", "blocked"):
-            pending_refs.setdefault(d.issue_key, None)
-            pending_refs.setdefault(source_key(d.issue_key, sources.home), None)
-    held = {**hold_causes(tasks, kanban, sources, lanes or {}, pending_refs), **store_held}
-    held = {t: why for t, why in held.items() if t.kind != "done"}
     # Each snapshot is parsed once even when Flow, holds and loop marks all need it.
     flow_log = [*(stage_log or []), (tracker_day or today, tracker_text)]
     all_log = dict([*(loop_log if loop_log is not None else look_log or []), *(look_log or []), *flow_log])
@@ -418,13 +417,23 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     moves = {d: tracker_log.moves(text, d, zone) for d, text in all_log.items()}
     flow_moves = [m for day, _ in flow_log for m in moves[day]]
     earlier = list(rows.items())
+    # A task's stage for drift, computed once, keyed by the task: every nameless task shares the blank name.
+    stages = {t: effective_stage(t, sources, lanes or {}, flow_moves, tasks) for t in tasks}
+    # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
+    pending_refs = dict(pending_refs or {})
+    for d in store_decisions:
+        if state_of(d).status in ("open", "blocked"):
+            pending_refs.setdefault(d.issue_key, None)
+            pending_refs.setdefault(source_key(d.issue_key, sources.home), None)
+    held = {**hold_causes(tasks, kanban, sources, lanes or {}, pending_refs, flow_moves), **store_held}
+    held = {t: why for t, why in held.items() if t.kind != "done"}
     loops = looping(tasks, [m for ms in moves.values() for m in ms], lanes or {}, sources.home, earlier) | store_loops
     live_keys = frozenset(s.issue_key for s in db.segments() if s.ended_at is None) if db is not None else frozenset()
     known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
     ambiguous_numbers = ambiguous_issue_numbers(known, sources.home)
     threads = _worker_threads(db) if db is not None else {}
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops, live_keys,
-                               source_worker_tasks(sources, tasks), ambiguous_numbers, threads)
+                               source_worker_tasks(sources, tasks), ambiguous_numbers, threads, moves=flow_moves)
     inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols, inline=inline, linked_inline=lambda text: markdown_inline(text, links=False))}'
@@ -437,7 +446,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
         navigation = tab_counts(tracker_text, cfg, now, lanes or {}, kanban, sources, pending_refs, looked,
                                 [*(look_log or []), *(stage_log or [])], slots, held=held, ends=ends, tracker_day=tracker_day)
     if db is not None:
-        flow_rows = flow_chart.build_from_store(db, now, include_hold_bars=True)
+        # build_from_store yields (issue_key, status, row); the board section only needs status+row.
+        flow_rows = [(s, r) for _key, s, r in flow_chart.build_from_store(db, now, include_hold_bars=True)]
     else:
         flow_rows = flow_chart.build(flow_moves, known, lanes or {}, held_names(held), ends, now,
                                      queue_durations(active, hist), slots,
@@ -536,9 +546,11 @@ figure{{margin:0;padding:0;background:none;border:0}}
   function hms(d){{return new Intl.DateTimeFormat('en-GB',{{timeZone:tz,hour:'2-digit',minute:'2-digit',second:'2-digit'}}).format(d);}}
   function pad(n){{return (n<10?'0':'')+n;}}
   function tick(){{
-    var now=new Date(),ms=dl-now,sign=ms<0?'-':'',s=Math.floor(Math.abs(ms)/1000);
+    var now=new Date(),ms=dl-now,s=Math.floor(Math.abs(ms)/1000),expired=ms<0;
+    var dur=Math.floor(s/3600)+'h'+pad(Math.floor(s/60)%60)+'m'+pad(s%60)+'s';
     root.querySelector('.panels-now').textContent=hms(now);
-    root.querySelector('.panels-left').textContent=sign+Math.floor(s/3600)+'h'+pad(Math.floor(s/60)%60)+'m'+pad(s%60)+'s';
+    root.querySelector('.panels-due .panels-clock-name').textContent=root.dataset.deadlineName+(expired?' passed':' in');
+    root.querySelector('.panels-left').textContent=expired?dur+' ago':dur;
   }}
   tick();setInterval(tick,1000);
 }})();

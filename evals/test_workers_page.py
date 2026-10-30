@@ -575,6 +575,20 @@ class NeedsInputParityTest(unittest.TestCase):
         self.assertIn("CRASHED", html)
         self.assertRegex(html, r'href="/workers"[^>]*>Workers<span class="badge" title="1 need input">1</span>')
 
+    def test_main_owner_decision_counts_remain_separate_from_worker_waits(self):
+        import decision_actions
+        items = [_item("owner"), _item("automatic"), _item("blocked"), _item("worker", human_review=True)]
+        decisions = [SimpleNamespace(id=i, issue_key=key, topic="scope", question=key,
+                                     answer=answer, decided_by=by, record=record)
+                     for i, (key, by, answer, record) in enumerate((
+                         ("owner", "owner", None, {}),
+                         ("automatic", "trio", None, {}),
+                         ("blocked", "trio", "approve", {"status": "blocked"}),
+                     ), 1)]
+        counts = decision_actions.tab_counts(items, decisions, [])
+        self.assertEqual(counts, {"workers": 1, "dispatch": 1, "decisions": 2})
+        self.assertEqual(counts["workers"], task_forge.workers_need_input(items=items))
+
     def test_missing_review_flag_defaults_to_no_wait_but_segment_review_still_counts(self):
         summary = SimpleNamespace(issue_key="github:example/repo#7", forge_state="open")
         self.assertEqual(task_forge.workers_need_input(items=[summary]), 0)

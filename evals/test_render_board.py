@@ -1,6 +1,7 @@
 """Unit tests for scripts/render_board.py: the board is a render of the tracker, and every bar cites a field."""
 
 import contextlib
+from dataclasses import replace
 import hashlib
 import http.server
 import io
@@ -24,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import estimate  # noqa: E402
 import md  # noqa: E402
 import render_board as rb  # noqa: E402
-from workspace import parse_coordinator  # noqa: E402
+from workspace import Deadline, parse_coordinator  # noqa: E402
 from test_board_flow_design import outline  # noqa: E402
 import tracker as tr  # noqa: E402
 from backlog import Backlog, GitHubBacklog  # noqa: E402
@@ -1201,6 +1202,87 @@ class DeadlineScopeTest(unittest.TestCase):
         # main() renders at the real clock, so the name is whichever governing deadline is next — never the exam.
         m = re.search(r"horizon=(Launch|Final|end of day) ", buf.getvalue())
         self.assertIsNotNone(m, buf.getvalue())
+
+
+class ExpiredDeadlineClockTest(unittest.TestCase):
+    """When every configured deadline is past, the clock counts toward today's end of day, never backward."""
+
+    def setUp(self) -> None:
+        self.now = datetime(2026, 10, 18, 17, 42, tzinfo=CT)
+        self.cfg = parse_coordinator(CLAUDE_MD, today=self.now.date())
+
+    def test_every_deadline_past_selects_end_of_day(self) -> None:
+        self.assertEqual([d.name for d in self.cfg.deadlines], ["Launch", "Final"])
+        self.assertTrue(all(d.at < self.now for d in self.cfg.deadlines))
+        html = rb.render(TRACKER, self.cfg, self.now)
+        self._assert_clock(html, "2026-10-18T23:59:00-05:00", "end of day in", "6h17m00s")
+        self.assertNotIn("Final in", html)
+        self.assertNotIn("Launch in", html)
+        self.assertNotRegex(html, r'class="panels-left"[^>]*>-')
+
+    def test_no_configured_deadlines_use_the_same_fallback(self) -> None:
+        text = CLAUDE_MD.replace("- Deadlines:\n  - Launch: 2026-09-16 23:59\n  - Final: 2026-09-20 12:00\n", "")
+        cfg = parse_coordinator(text, today=self.now.date())
+        self.assertEqual(cfg.deadlines, ())
+        html = rb.render(TRACKER, cfg, self.now)
+        self._assert_clock(html, "2026-10-18T23:59:00-05:00", "end of day in", "6h17m00s")
+
+    def test_the_first_deadline_still_ahead_wins(self) -> None:
+        now = datetime(2026, 9, 17, 10, 0, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, now)
+        self._assert_clock(html, "2026-09-20T12:00:00-05:00", "Final in", None)
+        self.assertNotIn("end of day", html)
+
+    def test_a_deadline_equal_to_now_stays_and_reads_zero(self) -> None:
+        now = datetime(2026, 9, 16, 23, 59, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, now)
+        self._assert_clock(html, "2026-09-16T23:59:00-05:00", "Launch in", "0h00m00s")
+        self.assertNotIn("Launch passed", html)
+
+    def test_a_named_only_future_deadline_is_the_clock(self) -> None:
+        cfg = parse_coordinator(CLAUDE_MD_EXAM, today=SUNDAY.date())
+        html = rb.render(SUNDAY_TRACKER, cfg, SUNDAY)
+        self._assert_clock(html, "2026-09-26T23:59:00-05:00", "PCCAT 1st attempt in", None)
+        self.assertEqual(estimate.governing_deadline(cfg, SUNDAY).name, "end of day")
+        self.assertEqual(rb.horizon(cfg, SUNDAY), (datetime(2026, 9, 21, 0, 0, tzinfo=CT), "end of day"))
+
+    def test_an_expired_list_keeps_the_task_horizon(self) -> None:
+        self.assertEqual(rb.nearest_deadline(self.cfg, self.now).name, "end of day")
+        self.assertEqual(rb.nearest_deadline(self.cfg, self.now).at, datetime(2026, 10, 18, 23, 59, tzinfo=CT))
+        self.assertEqual(estimate.governing_deadline(self.cfg, self.now).at, datetime(2026, 10, 18, 23, 59, tzinfo=CT))
+        self.assertEqual(rb.horizon(self.cfg, self.now), (datetime(2026, 10, 19, 0, 0, tzinfo=CT), "end of day"))
+
+    def test_the_fallback_uses_the_workspace_zone(self) -> None:
+        zone = ZoneInfo("America/Los_Angeles")
+        now = datetime(2026, 10, 18, 17, 42, tzinfo=zone)
+        cfg = parse_coordinator(CLAUDE_MD.replace("America/Chicago", "America/Los_Angeles"), today=now.date())
+        html = rb.render(TRACKER, cfg, now)
+        self.assertIn('data-tz="America/Los_Angeles"', html)
+        self._assert_clock(html, "2026-10-18T23:59:00-07:00", "end of day in", "6h17m00s")
+
+    def test_after_2359_the_same_day_says_passed_and_the_next_day_is_new(self) -> None:
+        late = datetime(2026, 10, 18, 23, 59, 30, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, late)
+        self._assert_clock(html, "2026-10-18T23:59:00-05:00", "end of day passed", "0h00m30s ago")
+        nxt = datetime(2026, 10, 19, 0, 0, 1, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, nxt)
+        self._assert_clock(html, "2026-10-19T23:59:00-05:00", "end of day in", "23h58m59s")
+
+    def test_a_deadline_name_is_escaped_in_the_attribute_and_the_label(self) -> None:
+        now = self.now
+        name = 'A<B>&"C"'
+        cfg = replace(self.cfg, deadlines=(Deadline(name, datetime(2026, 10, 18, 20, 0, tzinfo=CT)),))
+        html = rb.render(TRACKER, cfg, now)
+        self.assertIn('data-deadline-name="A&lt;B&gt;&amp;&quot;C&quot;"', html)
+        self.assertIn('<span class="panels-clock-name">A&lt;B&gt;&amp;&quot;C&quot; in</span>', html)
+        self.assertNotIn("A<B>", html)
+
+    def _assert_clock(self, html: str, instant: str, label: str, left: str | None) -> None:
+        self.assertIn(f'data-deadline="{instant}"', html)
+        self.assertIn(f'<span class="panels-clock-name">{label}</span>', html)
+        self.assertIn(f'<time class="panels-left" datetime="{instant}">', html)
+        if left is not None:
+            self.assertIn(f'<time class="panels-left" datetime="{instant}">{left}</time>', html)
 
 
 class DecisionDeadlineTest(unittest.TestCase):
