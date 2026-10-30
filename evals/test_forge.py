@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -45,6 +46,26 @@ SHARED = Kanban(stages=("stage: shared",), human_review_label="needs human",
 def gh_issue(number, title, labels=(), state="OPEN"):
     return {"number": number, "title": title, "state": state, "labels": [{"name": n} for n in labels],
             "url": f"https://github.com/{REPO}/issues/{number}", "updatedAt": "", "closedAt": None, "body": "the body"}
+
+
+def project_answer(args, project, items):
+    query = next(a[6:] for a in args if a.startswith("query="))
+    data = {}
+    for section in re.finditer(r'(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\)(.*?)(?=r\d+: repository|$)', query):
+        alias, owner, repo, body = section.groups()
+        issues = {}
+        for number in re.findall(r'n(\d+): issue', body):
+            url = f"https://github.com/{owner}/{repo}/issues/{number}".casefold()
+            item = next((x for x in items if x["content"]["url"].casefold() == url), None)
+            key = project.field[:1].lower() + project.field[1:]
+            value = item.get(key) if item else None
+            nodes = ([{"id": item.get("id"), "project": {"number": project.number,
+                       "owner": {"login": project.owner}}, "fieldValueByName":
+                       {"__typename": "ProjectV2ItemFieldSingleSelectValue", "name": value} if value is not None else None}]
+                     if item else [])
+            issues[f"n{number}"] = {"projectItems": {"nodes": nodes, "pageInfo": {"hasNextPage": False}}}
+        data[alias] = issues
+    return 0, json.dumps({"data": data}), ""
 
 
 class FakeGh(tma.FakeGhGraphql):
@@ -113,6 +134,11 @@ class FakeGh(tma.FakeGhGraphql):
                                               "options": [{"id": f"option_{n}", "name": n} for n in opts]}]}), ""
         if args[:2] == ["project", "view"]:
             return 0, json.dumps({"id": "PVT_board"}), ""
+        if args[:2] == ["api", "graphql"] and any("projectItems(" in a for a in args):
+            items = [{"id": f"PVTI_{u.rsplit('/', 1)[1]}", "content": {"url": u},
+                      self.project.field[:1].lower() + self.project.field[1:]: self.status.get(u)}
+                     for u in sorted(self.present)]
+            return project_answer(args, self.project, items)
         if args[:2] == ["project", "item-list"]:
             items = [{"id": f"PVTI_{u.rsplit('/', 1)[1]}", "content": {"url": u},
                       self.project.field[0].lower() + self.project.field[1:]: self.status.get(u)}
@@ -1494,6 +1520,11 @@ class GitHubProjectWriteTest(unittest.TestCase):
                 [{"id": f"option_{x}", "name": x} for x in opts]}]}), ""
         if args[:2] == ["project", "view"]:
             return 0, json.dumps({"id": "PVT_board"}), ""
+        if args[:2] == ["api", "graphql"]:
+            project = self.config.github_project
+            items = ([{"id": "PVTI_issue", "content": {"url": self.item_url},
+                       project.field[:1].lower() + project.field[1:]: self.status}] if self.present else [])
+            return project_answer(args, project, items)
         if args[:2] == ["project", "item-list"]:
             field = self.config.github_project.field
             items = ([{"id": "PVTI_issue", "content": {"url": self.item_url},
@@ -1720,9 +1751,9 @@ class GitHubProjectWriteTest(unittest.TestCase):
         got = forge._sync_github(self.ref, self.config, "implement", gh=self.gh)
         self.assertTrue(got.ok, got.error)
         self.assertEqual(got.current_status, "Plan")
-        call = next(a for a in self.calls if a[:2] == ["project", "item-list"])
-        self.assertEqual(call, ["project", "item-list", "3", "--owner", "example",
-                                "--format", "json", "--limit", "5000"])
+        call = next(a for a in self.calls if a[:2] == ["api", "graphql"])
+        self.assertTrue(any("projectItems(first: 20)" in a for a in call))
+        self.assertFalse(any(a[:2] == ["project", "item-list"] for a in self.calls))
 
     def test_project_commit_uses_node_ids(self):
         got = forge._sync_github(self.ref, self.config, "implement", gh=self.gh, commit=True,
@@ -1731,22 +1762,6 @@ class GitHubProjectWriteTest(unittest.TestCase):
         call = next(a for a in self.calls if a[:2] == ["project", "item-edit"])
         self.assertEqual(call, ["project", "item-edit", "--id", "PVTI_issue", "--project-id", "PVT_board",
                                 "--field-id", "PVTSSF_status", "--single-select-option-id", "option_Build"])
-
-    def test_project_item_list_at_limit_is_refused_unless_total_count_says_it_is_whole(self):
-        for total in (None, 5000, 5001):
-            row = {"items": [{"content": {"url": self.ref.url}, "status": "Plan"}] * 5000}
-            if total is not None:
-                row["totalCount"] = total
-            with self.subTest(total=total):
-                def gh(args):
-                    return (0, json.dumps(row), "") if args[:2] == ["project", "item-list"] else self.gh(args)
-
-                items, error = forge.project_items(gh, self.config.github_project)
-                if total == 5000:
-                    self.assertEqual((error, items), ("", {self.ref.url: "Plan"}))
-                else:
-                    self.assertEqual(items, {})
-                    self.assertIn("truncated", error)
 
     def test_project_reads_refuse_truncated_field_metadata(self):
         for total in (None, 100, 101):
@@ -1761,7 +1776,7 @@ class GitHubProjectWriteTest(unittest.TestCase):
                 return self.gh(args)
 
             with self.subTest(total=total):
-                statuses, error = forge.project_items(gh, self.config.github_project)
+                statuses, error = forge.project_items(gh, self.config.github_project, (self.ref,))
                 item, status, item_error = forge._project_item(gh, self.config.github_project, self.ref)
                 if total == 100:
                     self.assertEqual((statuses, error), ({self.ref.url: "Plan"}, ""))
@@ -1778,7 +1793,7 @@ class GitHubProjectWriteTest(unittest.TestCase):
                 return 0, json.dumps({"fields": [{"id": "PVTF_other", "name": "Other"}], "totalCount": 1}), ""
             return self.gh(args)
 
-        statuses, error = forge.project_items(gh, self.config.github_project)
+        statuses, error = forge.project_items(gh, self.config.github_project, (self.ref,))
         self.assertEqual(statuses, {})
         self.assertIn(f"no field named {self.config.github_project.field}", error)
 
@@ -1817,6 +1832,68 @@ class GitHubProjectWriteTest(unittest.TestCase):
                                  expected_stage="invented")
         self.assertIn("unmapped prior stage", got.error)
         self.assertFalse(self.calls)
+
+
+class ProjectMembershipTest(unittest.TestCase):
+    def test_a_large_project_uses_only_the_requested_issue_memberships(self):
+        refs = tuple(backlog.IssueRef("Example/App", n) for n in range(1, 28))
+        calls = []
+
+        def gh(args):
+            calls.append(args)
+            if args[:2] == ["project", "item-list"]:
+                return 0, json.dumps({"items": [], "totalCount": 5001}), ""
+            if args[:2] == ["project", "field-list"]:
+                return 0, json.dumps({"fields": [{"name": "Status"}]}), ""
+            query = next(a[6:] for a in args if a.startswith("query="))
+            self.assertIn('fieldValueByName(name: "Status")', query)
+            numbers = re.findall(r'n(\d+): issue', query)
+            nodes = {f"n{n}": {"projectItems": {"pageInfo": {"hasNextPage": False}, "nodes": [{
+                "id": f"item{n}", "project": {"number": 3, "owner": {"login": "EXAMPLE"}},
+                "fieldValueByName": {"__typename": "ProjectV2ItemFieldSingleSelectValue", "name": "Ready"}}]}}
+                for n in numbers}
+            return 0, json.dumps({"data": {"r0": nodes}}), ""
+
+        got, error = forge.project_items(gh, PROJECT, refs)
+        self.assertEqual(error, "")
+        self.assertEqual(got, {r.url.casefold(): "Ready" for r in refs})
+        self.assertEqual(sum(a[:2] == ["api", "graphql"] for a in calls), 2)
+        self.assertFalse(any(a[:2] == ["project", "item-list"] for a in calls))
+
+    def test_empty_refs_do_not_read_the_project(self):
+        self.assertEqual(forge.project_items(mock.Mock(side_effect=AssertionError), PROJECT, ()), ({}, ""))
+
+    def test_absent_unset_and_incomplete_memberships_are_distinct(self):
+        ref = backlog.IssueRef("example/app", 7)
+        member = {"project": {"number": 3, "owner": {"login": "example"}}, "fieldValueByName": None}
+        for nodes, next_page, expected, failed in (
+                ([], False, {}, False), ([member], False, {ref.url: None}, False),
+                ([{**member, "project": {"number": 9, "owner": {"login": "elsewhere"}}}], False, {}, False),
+                ([member], True, {}, True), ([member, member], False, {}, True),
+                ([{**member, "fieldValueByName": {"__typename": "ProjectV2ItemFieldTextValue"}}], False, {}, True),
+                ([{"project": None}], False, {}, True)):
+            with self.subTest(nodes=nodes, next_page=next_page):
+                body = {"data": {"r0": {"n7": {"projectItems": {
+                    "pageInfo": {"hasNextPage": next_page}, "nodes": nodes}}}}}
+                def gh(args):
+                    if args[:2] == ["project", "field-list"]:
+                        return 0, json.dumps({"fields": [{"name": "Status"}]}), ""
+                    return 0, json.dumps(body), ""
+                got, error = forge.project_items(gh, PROJECT, (ref,))
+                self.assertEqual(got, expected)
+                self.assertEqual(bool(error), failed)
+
+    def test_graphql_failures_are_not_absence(self):
+        ref = backlog.IssueRef("example/app", 7)
+        for code, body in ((1, {}), (0, {"errors": [{"message": "denied"}]}),
+                           (0, {"data": {"r0": {"n7": None}}}), (0, [])):
+            def gh(args):
+                if args[:2] == ["project", "field-list"]:
+                    return 0, json.dumps({"fields": [{"name": "Status"}]}), ""
+                return code, json.dumps(body), "denied" if code else ""
+            got, error = forge.project_items(gh, PROJECT, (ref,))
+            self.assertEqual(got, {})
+            self.assertTrue(error)
 
 
 class CommentTest(unittest.TestCase):
