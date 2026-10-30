@@ -491,7 +491,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
                         stage=item.stage, issue=item.issue_key)
             known = [task]
             mine = [task]
-            store_rows = [(s, r) for s, r in flow_chart.build_from_store(db, now, include_hold_bars=True)
+            store_rows = [(s, r) for _key, s, r in flow_chart.build_from_store(db, now, include_hold_bars=True)
                           if r.href == issue_href(item.issue_key)]
     if not mine:
         return None

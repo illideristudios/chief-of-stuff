@@ -1318,6 +1318,11 @@ def main(argv: list[str] | None = None) -> int:
                 _handoff(installed, python, root, args.interval, args.once)
                 return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
+            try:
+                supervisor.record_engine_start(
+                    root, datetime.now(timezone.utc).astimezone().isoformat(), os.getpid())
+            except OSError as exc:
+                print(f"engine: could not record start for bake: {exc}", file=sys.stderr, flush=True)
             prior = read_engine_status(root)
             mode = "once" if args.once else "service"
             release = str(supervisor.RELEASE)
