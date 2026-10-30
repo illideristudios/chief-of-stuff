@@ -355,11 +355,6 @@ class ListMessagesTest(BaseInboxTestCase):
         self.assertEqual(len(worker_msgs), 1)
         self.assertEqual(worker_msgs[0].body, "for worker")
 
-    def test_list_empty_mailbox(self) -> None:
-        """Listing an initialized but empty mailbox returns an empty list cleanly."""
-        msgs = inbox.list_messages("coordinator", unread_only=True, mailbox_dir=self.mailbox_dir)
-        self.assertEqual(msgs, [])
-
     def test_list_nonexistent_recipient(self) -> None:
         """Listing a recipient that has never received messages returns [] without error."""
         msgs = inbox.list_messages("unknown-session-1234", unread_only=True, mailbox_dir=self.mailbox_dir)

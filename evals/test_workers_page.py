@@ -48,6 +48,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parent.parent / "scripts"), str(Pat
 import board_sources as bs  # noqa: E402
 import one_shot  # noqa: E402
 import pages as pg  # noqa: E402
+import workers_page  # noqa: E402
 from test_pages import get  # noqa: E402
 from test_tab_bar import TABS, VOID, Node, name, parse  # noqa: E402
 
@@ -87,10 +88,11 @@ YESTERDAY_TRACKER = "# Tracker\n\n## Log\n\n- 23:10 one-shot impl-z9: HUMAN REVI
 USAGE = ({"input_tokens": 100, "output_tokens": 200, "cache_creation_input_tokens": 3000, "cache_read_input_tokens": 40000},
          {"input_tokens": 20, "output_tokens": 180, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 12000})
 TOKENS = 56000
-# Today's launcher end lines: worker -> (Log time, what the line says, how it ended as the page words it, task ref).
-ENDED = {"impl-c3": ("00:20", "done", "completed", "120"),
-         "impl-d4": ("00:30", "human_review", "human review", "121"),
-         "impl-e5": ("00:40", "relaunch", "relaunch", "122")}
+# Today's launcher end lines: worker -> (Log time, what the line says, state chip, summary, task ref).
+ENDED = {"impl-c3": ("00:20", "done", "DONE", "merged cleanly. Changes: x.py.", "120"),
+         "impl-d4": ("00:30", "human_review", "HUMAN REVIEW", "tests failed. Changes: x.py.", "121"),
+         "impl-e5": ("00:40", "relaunch", "CRASHED", "timed out.", "122")}
+REASON = {"impl-c3": "merged cleanly", "impl-d4": "tests failed", "impl-e5": "timed out"}
 TASK = {"impl-c3": "Review r1", "impl-d4": "Verify r1", "impl-e5": "Fix r1"}
 
 
@@ -120,7 +122,8 @@ def elapsed(start: datetime, now: datetime) -> set[str]:
 
 class Workspace:
     """A workspace on disk: today's tracker with two running one-shots (impl-a1 with a session log, impl-b2
-    without), a session (planner), today's three end lines, yesterday's tracker, and the sources cache."""
+    without), a session with a task (planner), a session with no task (chat), today's three end lines,
+    yesterday's tracker, and the sources cache."""
 
     def __init__(self, cap: int | None):
         self.root = Path(tempfile.mkdtemp()).resolve()
@@ -143,14 +146,15 @@ class Workspace:
         for worker, task, runtime, model in (("impl-a1", "Cap uploads", "claude", "opus"), ("impl-b2", "Warm the pool", "codex", "gpt-5.5")):
             (self.root / "trees" / worker).mkdir(parents=True)
             self.launch(task, worker, runtime, model, f"{self.started[worker]:%H:%M}")
-        for worker, (at, status, _, _) in ENDED.items():
+        for worker, (at, status, _, _, _) in ENDED.items():
             self.launch(TASK[worker], worker, "claude", "sonnet", "00:10")
-            one_shot.update_tracker(self.tracker, TASK[worker], worker, "Robin", status, "reason", "x.py", at)
+            one_shot.update_tracker(self.tracker, TASK[worker], worker, "Robin", status, REASON[worker], "x.py", at)
         self.pages = self.root / "pages"
         self.pages.mkdir()
         self.cache([bs.Worker("impl-a1", "one-shot", "claude", "opus", "Upload size limit", "impl-a1", self.started["impl-a1"], None),
                     bs.Worker("impl-b2", "one-shot", "codex", "gpt-5.5", "Cache warmup", "impl-b2", self.started["impl-b2"], None),
-                    bs.Worker("planner", "session", "claude", "", "Tidy config", "", self.started["planner"], None)])
+                    bs.Worker("planner", "session", "claude", "", "Tidy config", "", self.started["planner"], None),
+                    bs.Worker("chat", "session", "claude", "", "", "", self.started["planner"], None)])
         self.log = self.home / ".claude" / "projects" / claude_dir(self.root / "trees" / "impl-a1") / "0a1b2c3d.jsonl"
         self.log.parent.mkdir(parents=True)
         self.last = self.now - timedelta(minutes=2)
@@ -271,13 +275,22 @@ def row(t: Node, worker: str) -> Node:
     return hits[0]
 
 
-def column(t: Node, tr: Node, head: str) -> str:
-    """The text of `tr`'s cell under the column head containing `head`."""
+def cell(t: Node, tr: Node, head: str) -> Node:
+    """`tr`'s cell under the column head containing `head`."""
     heads = next((cells(r) for r in (n for n in t.walk() if n.tag == "tr") if all(c.tag == "th" for c in cells(r)) and cells(r)), [])
     at = [i for i, c in enumerate(heads) if head in words(c).casefold()]
     if len(at) != 1:
         raise AssertionError(f"{len(at)} column heads contain {head!r}: {[words(c) for c in heads]}")
-    return words(cells(tr)[at[0]])
+    return cells(tr)[at[0]]
+
+
+def column(t: Node, tr: Node, head: str) -> str:
+    """The text of `tr`'s cell under the column head containing `head`."""
+    return words(cell(t, tr, head))
+
+
+def chips(node: Node) -> list[str]:
+    return [words(n) for n in node.walk() if "chip" in n.attrs.get("class", "").split()]
 
 
 def links(node: Node) -> list[str]:
@@ -289,7 +302,7 @@ def box(html: str, label: str) -> str | None:
     header = next((n for n in doc(html).walk() if n.tag == "header"), None)
     if header is None:
         raise AssertionError("the page has no <header>")
-    found = sorted((len(t), t) for n in header.walk() if label in (t := words(n).casefold())
+    found = sorted((len(t), t) for n in header.walk() if label in (t := words(n))
                    and re.search(r"\d", t.replace(label, "", 1)))
     return found[0][1].replace(label, "", 1).strip() if found else None
 
@@ -308,43 +321,58 @@ class TabsTest(unittest.TestCase):
         tab = {name(t): t for t in parse(page()).navs[0].children}["Workers"]
         self.assertEqual([n.attrs["href"] for n in tab.walk() if "href" in n.attrs], ["/workers"])
 
-    def test_the_board_workers_panel_title_links_to_the_page(self):
-        panel = next((n for n in doc(page(path="/")).walk() if n.tag == "section" and n.attrs.get("id") == "workers"), None)
-        self.assertIsNotNone(panel, "the board has no WORKERS panel")
-        titled = [n for n in panel.walk() if n.tag == "a" and n.attrs.get("href") == "/workers"
-                  and words(n).casefold() == "workers"]
-        self.assertTrue(titled, "the board's WORKERS panel title is not a link to /workers")
+    def test_the_board_keeps_the_workers_tab_without_a_workers_panel(self):
+        board = doc(page(path="/"))
+        self.assertTrue(any(n.tag == "a" and n.attrs.get("href") == "/workers"
+                            and name(n).casefold() == "workers" for n in board.walk()))
+        self.assertFalse(any(n.tag == "section" and n.attrs.get("id") == "workers" for n in board.walk()))
 
 
 class RunningTest(unittest.TestCase):
-    """(#195) RUNNING: a row per running worker: name, runtime and model, one-shot or session, task ref linked to its
-    task page, task name, stage, time running."""
+    """(#195, #235) RUNNING: a row per running worker with a task (sessions with no task are omitted): leading state
+    chip (`RUNNING`, `LOOPING`) and worker name over `runtime model · kind`, task ref and name followed by the stage
+    as a chip, and time running."""
 
-    def test_a_row_per_running_worker(self):
+    def test_a_row_per_running_worker_and_taskless_sessions_omitted(self):
         t = table(page(), "running")
         for worker in ("impl-a1", "impl-b2", "planner"):
             with self.subTest(worker=worker):
                 row(t, worker)
+        self.assertNotIn("chat", words(t))
         self.assertEqual(len(rows(t)), 3, [words(tr) for tr in rows(t)])
 
-    def test_a_one_shot_row_names_its_runtime_task_stage_and_time(self):
+    def test_a_one_shot_row_leads_with_a_state_chip_stacks_runtime_and_kind_and_chips_its_stage(self):
         ws = served(CAP)[0]
+        t = table(page(), "running")
         for worker, runtime, model, ref, task, stage in (("impl-a1", "claude", "opus", "109", "Upload size limit", "implement"),
                                                          ("impl-b2", "codex", "gpt-5.5", "111", "Cache warmup", "review")):
             with self.subTest(worker=worker):
-                tr = row(table(page(), "running"), worker)
+                tr = row(t, worker)
+                lead = cell(t, tr, "worker")
+                self.assertEqual(chips(lead), ["RUNNING"])
+                self.assertEqual(words(lead), f"RUNNING {worker} {runtime} {model} · one-shot")
+                stack = next((n for n in lead.walk() if "stack" in n.attrs.get("class", "").split()), None)
+                self.assertIsNotNone(stack, f"{worker} has no stacked worker cell")
+                self.assertEqual([words(c) for c in stack.children if words(c)], [worker, f"{runtime} {model} · one-shot"])
+                task_cell = cell(t, tr, "task")
+                self.assertEqual(chips(task_cell), [stage])
+                self.assertTrue(words(task_cell).endswith(f"{task} {stage}"), words(task_cell))
+                self.assertIn(f"/issues/{ref}", links(task_cell))
                 text = words(tr)
-                for want in (runtime, model, "one-shot", task, stage):
-                    self.assertIn(want, text)
-                self.assertIn(f"/issues/{ref}", links(tr))
                 self.assertTrue(elapsed(ws.started[worker], ws.now) & set(text.split()),
                                 f"{worker}'s row shows no time running of {sorted(elapsed(ws.started[worker], ws.now))}: {text}")
 
     def test_a_session_row_names_its_runtime_task_and_time(self):
         ws = served(CAP)[0]
-        text = words(row(table(page(), "running"), "planner"))
-        for want in ("claude", "session", "Tidy config"):
-            self.assertIn(want, text)
+        t = table(page(), "running")
+        tr = row(t, "planner")
+        lead = cell(t, tr, "worker")
+        self.assertEqual(chips(lead), ["RUNNING"])
+        self.assertEqual(words(lead), "RUNNING planner claude · session")
+        task_cell = cell(t, tr, "task")
+        self.assertEqual(chips(task_cell), [])
+        self.assertIn("Tidy config", words(task_cell))
+        text = words(tr)
         self.assertTrue(elapsed(ws.started["planner"], ws.now) & set(text.split()), f"planner's row shows no time running: {text}")
 
 
@@ -368,47 +396,111 @@ class ActivityTest(unittest.TestCase):
 
 
 class EndedTodayTest(unittest.TestCase):
-    """(#195) ENDED TODAY: a row per launcher end line today: time, how it ended, worker, task, linked to the task page."""
+    """(#195, #235) ENDED TODAY: a row per launcher end line today: outcome chip (`DONE`, `HUMAN REVIEW`, `CRASHED`),
+    time, worker, task, one-line summary, and a link to the task (a relaunch line says `relaunch requested`)."""
 
     def test_a_row_per_end_line_today_and_none_from_yesterday(self):
         t = table(page(), "ended today")
         self.assertEqual(len(rows(t)), len(ENDED), [words(tr) for tr in rows(t)])
         self.assertNotIn("impl-z9", words(t))
 
-    def test_each_row_names_its_time_how_it_ended_and_links_its_task(self):
+    def test_each_row_shows_its_state_chip_summary_and_link_or_redispatch(self):
         t = table(page(), "ended today")
-        for worker, (at, _, how, ref) in ENDED.items():
+        for worker, (at, _, state, summary, ref) in ENDED.items():
             with self.subTest(worker=worker):
                 tr = row(t, worker)
                 text = words(tr)
                 self.assertIn(at, text.split())
-                self.assertIn(how, text.casefold())
+                self.assertIn(state, chips(tr))
+                self.assertIn(summary, text)
                 self.assertIn(f"/issues/{ref}", links(tr))
+                self.assertNotIn("re-dispatch", text)  # #997: no inert control, no unverified promise
+                if state == "CRASHED":
+                    self.assertEqual(words(cells(tr)[-1]), "relaunch requested")  # the tracker's own record
+                else:
+                    self.assertIn(f"/issues/{ref}", links(cells(tr)[-1]))
+
+    def test_rows_run_newest_end_first(self):
+        times = [column(table(page(), "ended today"), tr, "at") for tr in rows(table(page(), "ended today"))]
+        self.assertEqual(times, sorted(times, reverse=True))
+
+
+class StoreEndedTodayTest(unittest.TestCase):
+    """(#969, #997, #922) ENDED TODAY from the store: the chip names the stored outcome, no row offers `re-dispatch`,
+    and rows run by end time, newest first, however the segments were started."""
+
+    NOW = datetime(2026, 10, 9, 14, 0, tzinfo=ZONE)
+    # runner -> (stored outcome, minutes before NOW it ended, chip). Listed in start order, not end order.
+    SEGMENTS = {"s-done": ("done", 50, "DONE"), "s-failed": ("failed", 5, "CRASHED"),
+                "s-review": ("human_review", 30, "HUMAN REVIEW"), "s-blocked": ("blocked", 40, "BLOCKED"),
+                "s-quota": ("quota", 10, "QUOTA"), "s-unknown": ("unknown", 20, "UNKNOWN")}
+
+    def setUp(self):
+        import store
+        import task_forge
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        store.migrate(self.dir / "store.db")
+        db = store.Store(self.dir / "store.db")
+        self.addCleanup(db.engine.dispose)
+        key = "github:example/repo#12"
+        db.upsert_item(key, workflow="build", stage="implement", forge_state="open", title="Upload size limit")
+        for n, (runner, (outcome, ago, _)) in enumerate(self.SEGMENTS.items(), 1):
+            ended = (self.NOW - timedelta(minutes=ago)).isoformat()
+            db.record_segment(key, "implement", n, started_at=(self.NOW - timedelta(hours=1)).isoformat(), ended_at=ended,
+                              outcome=outcome, runner=runner)
+        self.html = workers_page.render("", bs.EMPTY, self.NOW, self.dir / "trees", 4, db=task_forge.page_data(db))
+        self.table = table(self.html, "ended today")
+
+    def test_every_outcome_class_is_named_and_none_offers_redispatch(self):
+        for runner, (_, _, chip) in self.SEGMENTS.items():
+            with self.subTest(runner=runner):
+                tr = row(self.table, runner)
+                self.assertEqual(chips(tr), [chip])
+                self.assertIn("/issues/", " ".join(links(cells(tr)[-1])))
+        self.assertNotIn("redispatch", self.html)
+        self.assertNotIn("re-dispatch", self.html)
+
+    def test_only_a_failure_is_drawn_as_a_crash(self):
+        crashed = [r for r in self.SEGMENTS if "CRASHED" in chips(row(self.table, r))]
+        self.assertEqual(crashed, ["s-failed"])
+
+    def test_unrecognized_outcome_cannot_inject_markup(self):
+        chip = workers_page._end_chip('other"><script>alert(1)</script>')
+        self.assertNotIn("<script>", chip)
+        self.assertIn("&lt;SCRIPT&gt;", chip)
+        self.assertIn("&quot;", chip)
+
+    def test_rows_run_by_end_time_newest_first(self):
+        order = [next(r for r in self.SEGMENTS if re.search(rf"(?<![\w-]){r}(?![\w-])", words(tr))) for tr in rows(self.table)]
+        self.assertEqual(order, sorted(self.SEGMENTS, key=lambda r: self.SEGMENTS[r][1]))
+        times = [column(self.table, tr, "at") for tr in rows(self.table)]
+        self.assertEqual(times, sorted(times, reverse=True))
 
 
 class HeaderTest(unittest.TestCase):
-    """(#195) Header boxes: need you (today's human-review ends), running, and slots free `k of N` when the workspace
-    caps one-shots."""
+    """(#195, #235) Header tiles: `NEEDS INPUT` (today's human-review ends), `RUNNING`, and `SLOTS FREE` `n of cap`
+    when the workspace caps one-shots."""
 
     def test_no_header_prints_a_rendered_clock(self) -> None:
         # #215: the eyebrow keeps the board link and the sources' errors, not a render clock.
         self.assertNotRegex(page(), r"\brendered \d{1,2}:\d{2}")
 
-    def test_need_you_counts_todays_human_review_ends(self):
-        self.assertEqual(box(page(), "need you"), "1")
+    def test_needs_input_counts_todays_human_review_ends(self):
+        self.assertEqual(box(page(), "NEEDS INPUT"), "1")
 
     def test_running_counts_the_running_workers(self):
-        self.assertEqual(box(page(), "running"), "3")
+        self.assertEqual(box(page(), "RUNNING"), "3")
 
     def test_slots_free_is_the_cap_less_the_running_one_shots(self):
-        self.assertEqual(box(page(), "slots free"), f"{CAP - 2} of {CAP}")
+        self.assertEqual(box(page(), "SLOTS FREE"), f"{CAP - 2} of {CAP}")
 
     def test_an_uncapped_workspace_has_no_slots_box(self):
-        self.assertIsNone(box(page(None), "slots free"))
+        self.assertIsNone(box(page(None), "SLOTS FREE"))
 
 
 class OnRequestTest(unittest.TestCase):
-    """(#195) The page renders from the sources cache and logs on request; no agent writes it."""
+    """(#195, #235) The page renders from the sources cache and logs on request; no agent writes it."""
 
     def setUp(self):
         self.ws = Workspace(CAP)
@@ -420,6 +512,17 @@ class OnRequestTest(unittest.TestCase):
         self.assertEqual(resp.status, 200, f"GET /workers answered {resp.status}")
         return resp.body.decode()
 
+    def test_activity_uses_the_workspace_claude_profile(self):
+        ws = self.ws
+        (ws.root / "cos.toml").write_text(f'[workers]\nmax_concurrency = {CAP}\nclaude_as_profile = "secondary"\n')
+        profiles = ws.home / "profiles"
+        profile_log = profiles / "secondary/projects" / ws.log.parent.name / ws.log.name
+        profile_log.parent.mkdir(parents=True)
+        profile_log.write_text(transcript_line("assistant", ws.last, {"input_tokens": 789}))
+        with mock.patch.dict(os.environ, {"CLAUDE_AS_PROFILES_DIR": str(profiles)}):
+            running = table(self.fetch(), "running")
+        self.assertEqual(column(running, row(running, "impl-a1"), "token"), "789")
+
     def test_the_next_request_shows_what_the_cache_and_logs_say_now(self):
         self.fetch()
         ws = self.ws
@@ -428,6 +531,10 @@ class OnRequestTest(unittest.TestCase):
         ws.touch(ws.pages / bs.CACHE)
         ws.launch("Docs p1", "impl-f6", "claude", "sonnet", "00:50")
         one_shot.update_tracker(ws.tracker, "Docs p1", "impl-f6", "Robin", "done", "reason", "y.py", "01:00")
+        with ws.tracker.open("a") as f:
+            f.write("- 01:01 stage: Upload size limit → fix\n"
+                    "- 01:02 stage: Upload size limit → review\n"
+                    "- 01:03 stage: Upload size limit → fix\n")
         ws.touch(ws.tracker)
         with ws.log.open("a") as f:
             f.write(transcript_line("assistant", ws.now - timedelta(minutes=1), {"input_tokens": 1000}))
@@ -435,12 +542,13 @@ class OnRequestTest(unittest.TestCase):
         html = self.fetch()
         running, ended = table(html, "running"), table(html, "ended today")
         self.assertIn("Docs pass", words(row(running, "impl-g7")))
+        self.assertEqual(chips(cell(running, row(running, "impl-a1"), "worker")), ["LOOPING"])
         self.assertIn("01:00", words(row(ended, "impl-f6")).split())
         self.assertIn(column(running, row(running, "impl-a1"), "token"), token_forms(TOKENS + 1000))
 
     def test_a_human_review_end_with_a_cause_shows_its_cause_and_need_you_counts_both(self):
-        # #203: a classified review end shows `human review · <cause>`, an old class-less line stays `human review`,
-        # and the `need you` header box counts both.
+        # #203: a classified review end shows `HUMAN REVIEW · <cause>`, an old class-less line stays `HUMAN REVIEW`,
+        # and the `NEEDS INPUT` header box counts both.
         ws = self.ws
         ws.launch("Docs p1", "impl-f6", "claude", "sonnet", "00:50")
         one_shot.update_tracker(ws.tracker, "Docs p1", "impl-f6", "Robin", "human_review", "timed out", "y.py",
@@ -448,11 +556,9 @@ class OnRequestTest(unittest.TestCase):
         ws.touch(ws.tracker)
         html = self.fetch()
         ended = table(html, "ended today")
-        self.assertIn("human review · timeout", words(row(ended, "impl-f6")).casefold())
-        d4 = words(row(ended, "impl-d4")).casefold()
-        self.assertIn("human review", d4)
-        self.assertNotIn("human review ·", d4)
-        self.assertEqual(box(html, "need you"), "2")
+        self.assertEqual(chips(row(ended, "impl-f6")), ["HUMAN REVIEW · timeout"])
+        self.assertEqual(chips(row(ended, "impl-d4")), ["HUMAN REVIEW"])
+        self.assertEqual(box(html, "NEEDS INPUT"), "2")
 
 
 if __name__ == "__main__":

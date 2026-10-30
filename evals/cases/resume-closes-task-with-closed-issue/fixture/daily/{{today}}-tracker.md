@@ -27,8 +27,6 @@ Coordinator: gauntlet-91. Board: board-known.
 | ref | name | state | doing | waiting on | free at | constraints | children | last reply |
 |---|---|---|---|---|---|---|---|---|
 
-## File ownership
-
 ## Log
 
 - 09:00 opened the day

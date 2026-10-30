@@ -321,17 +321,22 @@ class ReviewCausesTest(unittest.TestCase):
                 self.assertEqual(tl.review_causes(tl.moves(text, DAY, CT), lambda n: names.get(n.casefold())), {})
 
     def test_moves_are_ordered_by_timestamp_and_unresolved_tasks_are_skipped(self):
+        # Out-of-order Log lines: 10:00 stage move placed before 09:15/09:45 clears Security audit only when sorted,
+        # while 09:00 stage move placed after 09:25/09:55 keeps Cap uploads only when sorted.
         text = "\n".join((
             "## Log", "",
+            tl.stage_line("10:00", "Security audit", "implement"),
             tl.started_line("09:15", "worker01", "codex", "", TREE, "Security audit"),
             tl.ended_line("09:45", "worker01", "human_review", "crashed", "none", cause="runtime exit"),
-            tl.stage_line("10:00", "Security audit", "implement"),
+            tl.started_line("09:25", "worker03", "codex", "", TREE, "Cap uploads"),
+            tl.ended_line("09:55", "worker03", "human_review", "timed out", "none", cause="timeout"),
+            tl.stage_line("09:00", "Cap uploads", "implement"),
             tl.started_line("09:20", "worker02", "codex", "", TREE, "Gone task"),
             tl.ended_line("09:50", "worker02", "human_review", "missing", "none", cause="no result file"),
             ""))
-        moves = list(reversed(tl.moves(text, DAY, CT)))
-        known = {"Security audit": "Security audit"}
-        self.assertEqual(tl.review_causes(moves, lambda n: known.get(n)), {})
+        moves = tl.moves(text, DAY, CT)
+        known = {"Security audit": "Security audit", "Cap uploads": "Cap uploads"}
+        self.assertEqual(tl.review_causes(moves, lambda n: known.get(n)), {"Cap uploads": "timeout"})
 
 
 if __name__ == "__main__":
