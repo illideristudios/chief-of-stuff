@@ -964,6 +964,7 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
         meta.append(f"{unread} unreadable")
     meta.append(f"{len(done)} completed today")
     meta += [f"{escape(k)}: {escape(why)}" for k, why in ctx.sources.errors.items()]
+    meta.append('<a href="/decisions/graph">decision graph</a>')
     meta.append('<a href="/">board</a>')
     words = f"{escape(ctx.user)}'s words" if ctx.user else "words"
     none = '      <div class="row"><span class="none">none</span></div>'
