@@ -116,7 +116,7 @@
       ]
     },
     {
-      "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: verify @ 7d1e0b4\nPR: https://github.com/o/app/pull/12\nTests: pass — 42/42 — `pytest -q`\nAxes examined: Correctness, Test run\nResolved: R1 — src/a/upload.py:4, resolve() now precedes the prefix check; symlink test at tests/test_upload.py:31\nFindings: none\n</cross-session-message>",
+      "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: verify @ 7d1e0b4\nPR: https://github.com/o/app/pull/12\nTests: pass \u2014 42/42 \u2014 `pytest -q`\nAxes examined: Correctness, Test run\nResolved: R1 \u2014 src/a/upload.py:4, resolve() now precedes the prefix check; symlink test at tests/test_upload.py:31\nFindings: none\n</cross-session-message>",
       "graders": [
         {
           "name": "the task sits at the merge gate",
@@ -153,5 +153,6 @@
     }
   ],
   "max_turns": 20,
-  "timeout_seconds": 600
+  "timeout_seconds": 600,
+  "superseded_by": "autonomy-review-fixes"
 }

@@ -5,7 +5,7 @@
 - User: Robin
 - Daily log dir: `daily/`
 - Daily log template: none
-- Tracker: `daily/<date>-tracker.md` (sections: Tasks, Decisions, File ownership, Log)
+- Tracker: `daily/<date>-tracker.md` (sections: Tasks, Decisions, Log)
 - Timezone: {{tz}}
 - Calendars: none
 - Deadlines: none
@@ -13,4 +13,4 @@
 - Agent: implementer task
 - Agent: fixer standing
 - Sessions: list `mcp__peers__list_sessions`; send `mcp__peers__send`
-- Human-only actions: dashboard or console changes; `railway` commands; git commit, add, or push; spending money
+- Human-only actions: dashboard or console changes; git commit, add, or push; spending money

@@ -2,7 +2,7 @@
   "tz": "America/Chicago",
   "peers": "sessions.json",
   "description": "Triage: every finding is a suggested fix at Important or Minor naming one concrete change (a total computed too early, a test gap, a leaked file handle), off the security axis and about nothing the user specified. All three go to the implementer with the Plan line; nothing remains for the user, so the reply makes no ask at all, the Log (not Decisions) records an automatic fix, one status line names R1 to R3, and the stage is fix.",
-  "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: full @ 3f9c2a1\nPR: https://github.com/o/app/pull/12\nTests: pass — 41/41 — `pytest -q`\nAxes not examined: none\nR1 | Correctness | Important | Confirmed | src/a/upload.py:20 | the byte total is computed before the loop adds the last chunk | move the sum after the loop | suggested: fix\nR2 | Test run | Important | Confirmed | tests/test_upload.py:1 | no case for an empty file | add one test case for an empty file | suggested: fix\nR3 | Correctness | Minor | Confirmed | src/a/upload.py:9 | the error path returns before closing the file handle | add the close in a finally block | suggested: fix\nAssessment: three findings.\n</cross-session-message>",
+  "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: full @ 3f9c2a1\nPR: https://github.com/o/app/pull/12\nTests: pass \u2014 41/41 \u2014 `pytest -q`\nAxes not examined: none\nR1 | Correctness | Important | Confirmed | src/a/upload.py:20 | the byte total is computed before the loop adds the last chunk | move the sum after the loop | suggested: fix\nR2 | Test run | Important | Confirmed | tests/test_upload.py:1 | no case for an empty file | add one test case for an empty file | suggested: fix\nR3 | Correctness | Minor | Confirmed | src/a/upload.py:9 | the error path returns before closing the file handle | add the close in a finally block | suggested: fix\nAssessment: three findings.\n</cross-session-message>",
   "graders": [
     {
       "name": "reads the review-pipeline skill before the first fix send",
@@ -112,5 +112,6 @@
     }
   ],
   "max_turns": 16,
-  "timeout_seconds": 450
+  "timeout_seconds": 450,
+  "superseded_by": "autonomy-review-fixes"
 }

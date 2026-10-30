@@ -18,7 +18,8 @@ server thing"). The JSON holds:
 What the JSON leaves out the page reads from the workspace (decision_context): `asked` from the first
 Log line naming `decision-<slug>`, else the file's mtime; the answer and its chip from the latest Decisions row naming
 it, the key being the option its words name; a reference's status from the tracker's stage and board_sources. Rendering
-the board re-renders every page, and `decisions.html` lists them (Decisions.dc.html). MODULE GRAPH (module_graph.py)
+the board re-renders every page, and `decisions.html` lists them (Decisions.dc.html); on engine workspaces (`store.db`
+present) `decisions.html` also lists open and today's completed store decisions. MODULE GRAPH (module_graph.py)
 is drawn for the first change the references name that board_sources knows.
 
 A timeline `kind` colours its dot: a lane stage (implement, pr, review, triage, fix, verify, merge), `hot` or
@@ -34,22 +35,29 @@ copy under `--root` when there is one. With no forge, or a reference it cannot p
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import re
+import stat
 import sys
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from html import escape, unescape
+from html import escape
 from pathlib import Path
 
 import board_sources
-from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config
+from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
 from clock import leading
-from fragment import FONTS, TAB_CSS, href, tab_bar, theme
+from decision_actions import DecisionState, OPEN_STATES, addresses, state_of, states, tab_counts as store_tab_counts
+from fragment import DECISIONS_ANCHOR, FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
+from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
 from module_graph import section as _graph
 from notify_service import atomic_write
 from settings import Graph, SettingsError, load as load_settings
+from task_forge import PageData
 from tracker import decision_rows, issue_key, parse_tracker
 from workspace import ConfigError, daily_trackers, pages_address, read_config
 
@@ -59,6 +67,19 @@ NODE = {"deployed": "n", "inflight": "n-inflight", "designed": "n-designed", "ex
 EDGE = {"deployed": "e", "inflight": "e-inflight", "designed": "e-designed"}
 CHIPS = (("deployed", "DEPLOYED"), ("inflight", "IN FLIGHT"), ("designed", "DESIGNED"), ("hot", "WAITING ON THIS"),
          ("external", "EXTERNAL"))
+
+
+@contextmanager
+def page_render_lock(root: Path, *, shared: bool = False):
+    """Coordinate CLI publication with server reads across processes."""
+    path = root.resolve() / ".chief-of-stuff" / "pages-render.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def write_if_changed(path: Path, text: str) -> None:
@@ -126,18 +147,8 @@ GITHUB = {"issue": "issues/{}", "MR": "pull/{}", "commit": "commit/{}", "blob": 
           "pipeline": "actions/runs/{}"}
 GITLAB = {"issue": "-/issues/{}", "MR": "-/merge_requests/{}", "commit": "-/commit/{}", "blob": "-/blob/{at}/{}",
           "tree": "-/tree/{at}/{}", "pipeline": "-/pipelines/{}"}
-# One pass over escaped text, so nothing already linked is read again. Order is precedence.
-TOKEN = re.compile(r"""
-    (?P<tag><[^>]+>)
-  | `(?P<code>[^`]+)`
-  | (?<![\w/>])(?P<url>https?://[^\s<`]*[^\s<`.,;:)])
-  | \b(?:[Pp]ipeline|[Rr]un)\ \#(?P<pid>\d+)\b
-  | (?<![\w&/!\#])(?P<sigil>[!\#])(?P<num>\d+)(?:\#(?P<note>note_\d+|issuecomment-\d+|discussion_r\d+))?\b
-  | (?<![\w/.-])(?P<path>(?:[\w.-]+/)+(?![\w.-])|(?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z]\w*)
-    (?::(?P<line>\d+)(?:[-–](?P<end>\d+))?\b|:(?P<sym>[A-Za-z_]\w*)\b|\ §\ ?(?P<sec>\d+(?:\.\d+)*)|\#(?P<anchor>[\w-]+))?
-  | (?<![\w\#&-])(?P<sha>(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40})\b
-""", re.X)
 DOCS = (".md", ".markdown", ".rst", ".adoc", ".txt")
+REFERENCE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -148,6 +159,7 @@ class Linker:
     forge: Backlog | GitHubBacklog | None = None
     root: Path | None = None
     at: str | None = None
+    _files: dict[str, tuple[str, ...]] = field(default_factory=dict, compare=False, repr=False)
 
     def _url(self, what: str, target: str) -> str:
         gh = isinstance(self.forge, GitHubBacklog)
@@ -158,10 +170,22 @@ class Linker:
         """The `#` fragment for a section heading or a symbol's definition in a local copy, or "" (never guessed)."""
         if not self.root:
             return ""
-        f = (self.root / path).resolve()
-        if not f.is_relative_to(self.root.resolve()) or not f.is_file():
-            return ""
-        lines = f.read_text(errors="replace").splitlines()
+        if path not in self._files:
+            lines = ()
+            try:
+                f = (self.root / path).resolve()
+                if f.is_relative_to(self.root.resolve()):
+                    # Nonblocking open plus fstat covers a file replaced by a FIFO after resolution.
+                    with open(f, 'rb', opener=lambda p, flags: os.open(p, flags | os.O_NONBLOCK)) as source:
+                        info = os.fstat(source.fileno())
+                        if stat.S_ISREG(info.st_mode) and info.st_size <= REFERENCE_BYTES:
+                            data = source.read(REFERENCE_BYTES + 1)
+                            if len(data) <= REFERENCE_BYTES:
+                                lines = tuple(data.decode('utf-8', errors='replace').splitlines())
+            except OSError:
+                pass  # Unreadable or removed local copies still link to the forge without a fragment.
+            self._files[path] = lines
+        lines = self._files[path]
         if sym:
             hit = re.compile(rf"^\s*(?:(?:async\s+)?def|class|function|func|fn|const|let|var)\s+{sym}\b|^\s*{sym}\s*=")
             n = next((i for i, text in enumerate(lines, 1) if hit.search(text)), None)
@@ -206,24 +230,8 @@ class Linker:
 
 
 def _md(text: str, linker: Linker = Linker()) -> str:
-    """Escape, then mark up **bold**, `code`, URLs and references the forge can place."""
-    out = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", escape(str(text), quote=False))
-
-    def chip(m: re.Match) -> str | None:
-        r = linker.resolve(m)
-        return f'<a class="ref" data-k="{r[0]}" {href(r[2])}>{r[1]}</a>' if r else None
-
-    def one(m: re.Match) -> str:
-        if m["tag"]:
-            return m[0]
-        if m["code"] is not None:
-            whole = TOKEN.fullmatch(m["code"])
-            return (whole and chip(whole)) or f"<code>{m['code']}</code>"
-        if m["url"]:
-            return f'<a {href(unescape(m["url"]))}>{m["url"]}</a>'
-        return chip(m) or m[0]
-
-    return TOKEN.sub(one, out)
+    """Compatibility name for the shared inline prose renderer."""
+    return markdown_inline(text, linker.resolve)
 
 
 def _section(heading: str, body: str) -> str:
@@ -334,7 +342,7 @@ def _saved_html(d: dict, when) -> str:
     a = saved(d)
     title = next((o.get("title", "") for o in d["options"] if o["key"] == a.get("key")), "")
     key = f'<span><span class="key">{escape(a["key"])}</span>{escape(title)}</span>' if a.get("key") else ""
-    words = f'<span class="words">“{escape(a["words"].strip())}”</span>' if str(a.get("words") or "").strip() else ""
+    words = f'<span class="words">“{markdown_inline(str(a["words"]).strip())}”</span>' if str(a.get("words") or "").strip() else ""
     return f'{key}{words}<span class="saved">answered, saved {when(datetime.fromisoformat(a["at"]))}</span>'
 
 
@@ -346,9 +354,11 @@ def _answer_form(slug: str, cls: str, opts: str, back: str = "") -> str:
 
 
 def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root: Path | None = None,
-           ctx: Context | None = None, slug: str = "", mtime: float | None = None, pending: int = 0) -> str:
+           ctx: Context | None = None, slug: str = "", mtime: float | None = None, pending: int = 0,
+           refusal: str = "", draft: str = "", selected: str = "", back: str = "",
+           navigation: dict | None = None) -> str:
     """The page. With a context, what the JSON leaves out is read from it: when it was asked, the answer and the
-    chip, and each reference's status."""
+    chip, and each reference's status. `navigation` is the shared tab lead counts (#965)."""
     link = Linker(forge, root)
 
     def md(text: str) -> str:
@@ -357,10 +367,10 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     left, right = [], []
     for s in d.get("sections", []):
         paras = [s["text"]] if isinstance(s.get("text"), str) else s.get("text", [])
-        left.append(_section(s["heading"], '    <div class="card">\n' + "\n".join(f"      <p>{md(p)}</p>" for p in paras) + "\n    </div>"))
+        left.append(_section(s["heading"], '    <div class="card prose">\n' + "\n".join(markdown_blocks(p, link.resolve) for p in paras) + "\n    </div>"))
     if d.get("sides"):
         sides = "\n".join(f'      <div class="card side">\n        <span class="pill {s["status"]}">{escape(s["status"].upper())}</span>\n'
-                          f'        <p><b>{escape(s["label"])}</b>: {md(s["text"])}</p>\n      </div>' for s in d["sides"])
+                          f'        <b>{escape(s["label"])}</b><div class="prose">{markdown_blocks(s["text"], link.resolve)}</div>\n      </div>' for s in d["sides"])
         left.append(_section("Where it stands", f'    <div class="compare">\n{sides}\n    </div>'))
     if d.get("timeline"):
         steps = "\n".join(
@@ -372,25 +382,26 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     opts = []
     for o in d["options"]:
         tag = '<span class="tag">recommended</span>' if o["key"] == d["recommended"] else ""
-        on = " checked" if page and page.get("key") == o["key"] else ""
+        on = " checked" if (selected == o["key"] if refusal else page and page.get("key") == o["key"]) else ""
         opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value="{escape(o["key"])}"{on}> {escape(o["key"])}</span>'
                     f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </label>')
     # The write-in is the next option: same look, key "" (a words-only save), the next letter after the real ones.
     wi_key = chr(ord("A") + len(d["options"]))
-    on = " checked" if page and page.get("key") == "" else ""
+    on = " checked" if (not selected if refusal else page and page.get("key") == "") else ""
+    draft_value = f' value="{escape(draft)}"' if refusal else ""
     opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value=""{on}> {wi_key}</span>'
-                f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer">'
+                f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer"{draft_value}>'
                 f'<button type="submit">save</button></span>\n      </label>')
     fmt = (lambda t: ctx.when(t)) if ctx else (lambda t: f"{t:%H:%M}")
     done = f'    <div class="card answered">{_saved_html(d, fmt)}</div>\n' if page else ""
-    right.append(_section("Options", done + "    " + _answer_form(slug, "options", "\n" + "\n".join(opts)) + "\n    </form>"))
-    right.append(_section("Recommendation", f'    <div class="card"><p>{md(d["why"])}</p></div>'))
-    right.append(_section("If you don't answer", f'    <div class="card default"><p>{md(d["default"])}</p></div>'))
+    right.append(_section("Options", done + "    " + _answer_form(slug, "options", "\n" + "\n".join(opts), back) + "\n    </form>"))
+    right.append(_section("Recommendation", f'    <div class="card prose">{markdown_blocks(d["why"], link.resolve)}</div>'))
+    right.append(_section("If you don't answer", f'    <div class="card default prose">{markdown_blocks(d["default"], link.resolve)}</div>'))
     if d.get("references"):
         rows = []
         for r in d["references"]:
             pin = Linker(forge, root, r.get("at"))
-            label = f" {md(r['label'])}" if r.get("kind") and r.get("label") else ""
+            label = f" {escape(r['label'])}" if r.get("kind") and r.get("label") else ""
             one = TOKEN.fullmatch(escape(r["value"], quote=False))
             one = one and pin.resolve(one)
             # A row that is one reference is one plain link: the row's kind already labels it.
@@ -411,21 +422,22 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     eyebrow = " · ".join([escape(x) for x in ("Decision", d.get("topic"), _day(day), asked) if x]
                          + ['<a href="/decisions">decisions</a>', '<a href="/">board</a>'])
     chip = f"ANSWERED · {escape(chosen)}" if chosen else "ANSWERED" if answered else "PENDING"
-    yes = f"\n    <p>{md(d['yes'])}</p>" if d.get("yes") else ""
+    yes = f'\n    <div class="prose">{markdown_blocks(d["yes"], link.resolve)}</div>' if d.get("yes") else ""
     where = _figure(d["architecture"], link) if d.get("architecture") else ""
     where = _section("Where it sits", where) if where else ""
     # The first change the references name that the forge knows.
     change = next((c for r in d.get("references") or [] for ref in refs_in(str(r.get("value", "")))
                    if ctx and (c := ctx.change(ref))), None)
     where += _graph(change, ctx and ctx.graph, ctx and ctx.pages, root)
+    alert = f'<div class="card ask" role="alert">{escape(refusal)}</div>' if refusal else ""
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True)}"
+            f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True, **(navigation or {}))}{alert}"
             f'  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
-            f"      <h1>{md(d['headline'])}</h1>\n    </div>\n"
+            f"      <h1>{escape(d['headline'])}</h1>\n    </div>\n"
             f'    <span class="chip{" answered" if answered else ""}">{chip}</span>\n  </header>\n\n'
             f'  <div class="card ask">\n    <span class="cap">ask</span>\n'
-            f"    <strong>{md(d['ask'])}</strong>{yes}\n  </div>\n\n"
+            f"    <div class=\"prose\">{markdown_blocks(d['ask'], link.resolve)}</div>{yes}\n  </div>\n\n"
             + where
             + '  <div class="cols">\n  <div class="col">\n' + "".join(left) + '  </div>\n  <div class="col">\n'
             + "".join(right) + "  </div>\n  </div>\n"
@@ -462,7 +474,8 @@ def decision_context(root: Path, day: date, now: datetime | None = None) -> Cont
         settings = None
     kanban = settings and settings.kanban
     pages = root / cfg.pages_dir if cfg.pages_dir else tracker.parent
-    return Context(now, tuple(rows), tuple(sorted(log, key=lambda x: x[0])), tasks, board_sources.load(pages),
+    return Context(now, tuple(rows), tuple(sorted(log, key=lambda x: x[0])), tasks,
+                   board_sources.for_home(board_sources.load(pages), cfg.backlog),
                    kanban.human_review_label if kanban else "", cfg.user, cfg.backlog,
                    settings and settings.graph, pages)
 
@@ -485,13 +498,17 @@ def main(argv: list[str] | None = None) -> int:
     if not NAME.fullmatch(args.name):
         print(f"decision: name {args.name!r} is not lowercase letters, digits and dashes", file=sys.stderr)
         return 2
+    if args.name.isdigit():  # /decisions/<digits> is a store decision's page (#945)
+        print(f"decision: name {args.name!r}: digit-only names are reserved for store decision ids", file=sys.stderr)
+        return 2
     try:
         pages_dir, port = pages_address(Path(args.root))
     except (OSError, ConfigError) as e:
         print(f"decision: no page — {e}", file=sys.stderr)
         return 1
     try:
-        write(Path(args.root), pages_dir, args.name, args.date, Path(args.source) if args.source else None)
+        with page_render_lock(Path(args.root)):
+            write(Path(args.root), pages_dir, args.name, args.date, Path(args.source) if args.source else None)
     except (OSError, json.JSONDecodeError, DecisionError, KeyError, TypeError, AttributeError) as e:
         print(f"decision: {e}", file=sys.stderr)
         return 2
@@ -499,12 +516,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def write(root: Path, pages_dir: Path, name: str, day: str, source: Path | None = None) -> Path:
+def write(root: Path, pages_dir: Path, name: str, day: str, source: Path | None = None,
+          navigation: dict | None = None) -> Path:
     """Render `decision-<name>.json` (or `source`) to `decision-<name>.html`; the page server calls this in process."""
     source = source or pages_dir / f"decision-{name}.json"
     ctx = context(root, day)
     page = render(parse(json.loads(source.read_text())), day, forge(root), root, ctx, name, source.stat().st_mtime,
-                  pending_count(pages_dir, ctx))
+                  pending_count(pages_dir, ctx), navigation=navigation)
     pages_dir.mkdir(parents=True, exist_ok=True)
     out = pages_dir / f"decision-{name}.html"
     write_if_changed(out, page)
@@ -675,6 +693,15 @@ def pending_count(pages_dir: Path, ctx: Context | None) -> int:
     return sum(d is not None for _, d, _, _ in entries(pages_dir, ctx)) if ctx else 0
 
 
+def store_navigation(db: PageData, pending: list, navigation: dict | None = None) -> dict:
+    """Store lead counts with the readable authored decisions included exactly once."""
+    counts = store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
+    nav = dict(navigation) if navigation is not None else counts
+    store_count = counts["decisions"]
+    nav["decisions"] = store_count + sum(d is not None for _, d, _, _ in pending)
+    return nav
+
+
 def held_refs(pending: list[tuple[str, dict | None, datetime | None, str]], ctx: Context) -> dict[str, datetime | None]:
     """The issues and changes the pending decisions (`entries`) hold, keyed as the board files them (`ref_keys`): what a
     task's hold names as `decision` (#228), and what decisions.html counts as held. Each maps to when the first
@@ -687,11 +714,176 @@ def held_refs(pending: list[tuple[str, dict | None, datetime | None, str]], ctx:
     return out
 
 
-def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) -> tuple[str, list[tuple[str, dict | None, datetime | None, str]]]:
+def _stamp(raw: str | None, now: datetime) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if not now.tzinfo:
+        return dt
+    return dt.replace(tzinfo=now.tzinfo) if dt.tzinfo is None else dt.astimezone(now.tzinfo)
+
+
+def store_decision_badge(d: DecisionState) -> str:
+    if d.status == "blocked":
+        why = d.blocked_reason or "action blocked"
+        return f'<span class="decision-badge blocked">BLOCKED · {escape(why)}</span>'
+    return f'<span class="decision-badge {escape(d.status)}">{escape(d.status.upper())}</span>'
+
+
+def store_decision_form(d: DecisionState, back: str = "") -> str:
+    """The store's answer form; `back` is the page a POST returns to. An answered decision keeps only Reverse, which
+    takes the person's reason and appends a reversal intent (§6, #971)."""
+    head = (f'<form method="post" action="/" class="decision-form">'
+            f'<input type="hidden" name="decision_id" value="{d.id}">'
+            + (f'<input type="hidden" name="back" value="{escape(back)}">' if back else ""))
+    if d.status not in OPEN_STATES:
+        return (head + '<input type="text" name="answer" aria-label="why reverse it" placeholder="why reverse it">'
+                '<button type="submit" name="action" value="reverse">Reverse</button></form>')
+    return (
+        head + f'<input type="text" name="answer" value="{escape(d.answer or "")}">'
+        f'<input type="text" name="target_stage" value="{escape(d.rerouted_to or "")}">'
+        f'<button type="submit" name="action" value="answer">Answer</button>'
+        f'<button type="submit" name="action" value="reverse">Reverse</button>'
+        f'<button type="submit" name="action" value="reroute">Re-route</button>'
+        f'</form>'
+    )
+
+
+def _fallback(d: DecisionState) -> str:
+    """What happens if nobody answers: the default recorded with the decision (§6, #1128)."""
+    return escape(str((d.record or {}).get("default") or "default not recorded"))
+
+
+def _store_pending_row(d: DecisionState, asked: datetime | None, ctx: Context, page: int) -> str:
+    when = f'<span class="when">{ctx.when(asked)}</span>' if asked else ""
+    age = f'<span class="age">{span(ctx.now - asked)}</span>' if asked else ""
+    topic = f'<span class="topic">{escape(d.gate)}</span>' if d.gate else ""
+    badge = store_decision_badge(d)
+    ans = f' <span class="decision-answer">({escape(d.answer)})</span>' if d.answer else ""
+    link = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(store_label(d.issue_key, ctx.forge))}</a>'
+    fallback = _fallback(d)
+    return (f'      <div class="row pend" data-status="{escape(d.status)}">\n        <span class="stack">{when}{age}</span>\n'
+            f'        <span class="stack"><span class="line"><a class="headline" href="/decisions/{page}">{escape(d.prompt)}</a>{topic} {badge}{ans}</span></span>\n'
+            f'        {store_decision_form(d)}\n        <span class="stack holds"><span>{link}</span></span>\n'
+            f'        <span class="fallback">{fallback}</span>\n      </div>')
+
+
+def _store_done_row(d: DecisionState, when: datetime, ctx: Context, page: int) -> str:
+    asked = _stamp(d.asked_at, ctx.now)
+    took = f"in {span(when - asked)}" if asked and when >= asked and when != asked else ""
+    head = f'<a class="headline" href="/decisions/{page}">{escape(d.prompt)}</a><span class="page">{escape(d.gate or d.status)}</span>'
+    by = d.decided_by or d.status
+    keyed = f'<span class="key">{escape(by)}</span>' if by else ""
+    ans = d.answer or (f"→ {d.rerouted_to}" if d.rerouted_to else d.status)
+    words = escape(d.answer or d.note or d.status)
+    since = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(store_label(d.issue_key, ctx.forge))}</a>'
+    return (f'      <div class="row done" data-status="{escape(d.status)}">\n'
+            f'        <span class="stack"><span class="when">{ctx.when(when)}</span><span class="took">{took}</span></span>\n'
+            f'        <span class="stack">{head}</span>\n        <span>{keyed}{escape(ans)}</span>\n'
+            f'        <span class="words">{words}</span>\n        <span class="since">{since}</span>\n      </div>')
+
+
+def _trio(record: dict) -> str:
+    """The trio's outcome: what it adopted, or why it fell to a person, and each member's vote."""
+    verdicts = [v for v in record.get("verdicts") or [] if isinstance(v, dict)]
+    if not verdicts:
+        return "<p>No trio consult.</p>"
+    head = f"trio adopted {record.get('recommendation')}" if record.get("unanimous") else record.get("error") or "the trio did not agree"
+    votes = "".join(f'<li><b>{escape(str(v.get("persona", "")))}</b> {escape(str(v.get("vote", "")))}'
+                    + (f' · {escape(str(v["choice"]))}' if v.get("choice") else "")
+                    + f': {escape(str(v.get("reasoning", "")))}</li>' for v in verdicts)
+    return f"<p>{escape(str(head))}</p><ul>{votes}</ul>"
+
+
+def store_page(rows, row_id: int, ctx: Context, navigation: dict | None = None) -> str | None:
+    """`/decisions/<id>` from the store (§6, #945): the decision whose identity holds row `row_id`, or None when no row
+    has that id. Its newest row is its state; every row of the identity is its history, newest first."""
+    ids = addresses(rows)
+    if row_id not in ids:
+        return None
+    page = ids[row_id]
+    history = sorted((r for r in rows if ids[r.id] == page), key=lambda r: -r.id)
+    d = state_of(history[0])
+    evidence = next((r.record for r in history if isinstance(getattr(r, "record", None), dict)
+                     and ("decision" in r.record or "verdicts" in r.record)), {})
+    asked = evidence.get("decision") if isinstance(evidence.get("decision"), dict) else {}
+    rec = evidence.get("recommendation")
+
+    def when(raw: str | None) -> str:
+        at = _stamp(raw, ctx.now)
+        return ctx.when(at) if at else ""
+
+    tag = '<span class="tag">recommended</span>'
+    options = "".join(f'<span class="o"><span class="key">{escape(str(o))}</span>{tag if o == rec else ""}</span>'
+                      for o in asked.get("options") or []) or '<span class="none">a free answer</span>'
+    done = ""
+    if d.status not in OPEN_STATES:
+        done = (f'<div class="card answered"><span><span class="key">{escape(d.decided_by or "—")}</span>'
+                f'{escape(d.answer or d.note or d.status)}</span><span class="saved">{escape(d.status)} {when(d.answered_at or d.asked_at)}</span></div>')
+    form = store_decision_form(d, f"/decisions/{page}") if d.status in OPEN_STATES | {"answered"} else ""
+    waits = escape(ctx.user or "the owner") if d.status in OPEN_STATES else f"no one: answered by {escape(d.decided_by or 'the engine')}"
+    steps = []
+    for r in history:
+        st = state_of(r)
+        what = " · ".join(escape(x) for x in (st.status, st.answer or st.note, st.decided_by) if x)
+        steps.append(f'      <div class="step"><span class="when">{when(st.asked_at)}</span><span class="dot"></span>'
+                     f'<span>#{r.id} {what}</span></div>')
+    link = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(store_label(d.issue_key, ctx.forge))}</a>'
+    first = when(state_of(history[-1]).asked_at)
+    eyebrow = " · ".join(["Decision", *([escape(d.gate)] if d.gate else []), *([f"asked {first}"] if first else []), link,
+                          '<a href="/decisions">decisions</a>', '<a href="/">board</a>'])
+    context_text = f'\n    <div class="prose">{markdown_blocks(str(asked["context"]))}</div>' if asked.get("context") else ""
+    right = (_section("Options", f'    <div class="card">{done}<div class="stack">{options}</div>{form}</div>')
+             + _section("Recommendation", f'    <div class="card prose"><p>{escape(str(rec)) if rec else "none"}</p>{_trio(evidence)}</div>')
+             + _section("If you don't answer", f'    <div class="card default prose"><p>{_fallback(d)}</p></div>')
+             + _section("Waits on", f'    <div class="card"><p>{waits}</p></div>'))
+    return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+            f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+            f"<title>{escape(d.prompt)}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n"
+            f"{tab_bar('Decisions', 0, True, **(navigation or {}))}"
+            f'  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
+            f"      <h1>{escape(d.prompt)}</h1>\n    </div>\n    {store_decision_badge(d)}\n  </header>\n\n"
+            f'  <div class="card ask">\n    <span class="cap">ask</span>\n    <div class="prose"><p>{escape(d.prompt)}</p></div>{context_text}\n  </div>\n\n'
+            '  <div class="cols">\n  <div class="col">\n'
+            + _section("History", '    <div class="card timeline">\n' + "\n".join(steps) + "\n    </div>")
+            + '  </div>\n  <div class="col">\n' + right + "  </div>\n  </div>\n</main>\n</body>\n</html>\n")
+
+
+def write_store(root: Path, pages_dir: Path, row_id: int, day: str, *, db: PageData | None = None,
+                navigation: dict | None = None) -> Path | None:
+    """Render `decision-<row_id>.html` from the store; with no such row, remove the file and return None (a 404). The
+    page server calls this in process."""
+    out = pages_dir / f"decision-{row_id}.html"
+    ctx = context(root, day) or Context(datetime.now().astimezone())
+    page = store_page(db.decision_rows, row_id, ctx, navigation) if db is not None else None
+    if page is None:
+        out.unlink(missing_ok=True)
+        return None
+    write_if_changed(out, page)
+    return out
+
+
+def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, *,
+          db: PageData | None = None, navigation: dict | None = None) -> tuple[str, list[tuple[str, dict | None, datetime | None, str]]]:
     """`decisions.html` (Decisions.dc.html) and its pending entries (`entries`, read here unless given), which the
     board's DECISIONS panel lists too."""
     pending = entries(pages_dir, ctx) if pending is None else pending
     rows, held = [], held_refs(pending, ctx)
+    store_states: list[DecisionState] = []
+    pending_store: list[tuple[DecisionState, datetime | None]] = []
+    ids = addresses(db.decision_rows) if db is not None else {}
+    if db is not None:
+        opened = {i.issue_key for i in db.items() if getattr(i, "forge_state", "open") != "closed"}
+        store_states = states(db.decisions())
+        pending_store = sorted(
+            ((d, _stamp(d.asked_at, ctx.now)) for d in store_states if d.status in OPEN_STATES and d.issue_key in opened),
+            key=lambda item: (-(item[1].timestamp() if item[1] else 0), -item[0].id),
+        )
+        rows.extend(_store_pending_row(d, asked, ctx, ids.get(d.id, d.id)) for d, asked in pending_store)
+    linker = Linker(ctx.forge)
     for slug, d, asked, why in pending:
         when = f'<span class="when">{ctx.when(asked)}</span>' if asked else ""
         if d is None:
@@ -714,14 +906,19 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
         refs = "".join(f"<span>{ctx.ref(r)} {escape(ctx.where(r))}</span>" for r in holds)
         rows.append(f'      <div class="row pend{" saved" if saved(d) else ""}">\n        <span class="stack">{when}{age}</span>\n'
                     f'        <span class="stack"><span class="line"><a class="headline" href="/decisions/{escape(slug)}">{escape(d["headline"])}</a>{topic}</span>'
-                    f'<span class="q">{_md(d["ask"])}</span></span>\n        {opts}\n'
-                    f'        <span class="stack holds">{refs}</span>\n        <span class="fallback">{_md(d["default"])}</span>\n      </div>')
+                    f'<span class="q">{_md(d["ask"], linker)}</span></span>\n        {opts}\n'
+                    f'        <span class="stack holds">{refs}</span>\n        <span class="fallback">{_md(d["default"], linker)}</span>\n      </div>')
     try:
         today = date.fromisoformat(day)
     except ValueError:
         today = ctx.now.date()
-    done = []
-    for row in sorted((r for r in ctx.rows if r.day == today), key=lambda r: (r.when is None, -(r.when.timestamp() if r.when else 0))):
+    done_items: list[tuple[datetime | None, str]] = []
+    for d in store_states:
+        if d.status not in OPEN_STATES and d.status != "superseded":
+            when = _stamp(d.answered_at or d.asked_at, ctx.now)
+            if when is not None and when.date() == today:
+                done_items.append((when, _store_done_row(d, when, ctx, ids.get(d.id, d.id))))
+    for row in (r for r in ctx.rows if r.day == today):
         page = next(iter(PAGE_REF.findall(row.item)), None)
         source = pages_dir / f"{page}.json" if page else None
         try:
@@ -741,22 +938,26 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
             first, _, rest = re.sub(r'^\(via [^)]*\)\s*', "", row.words).strip(' "“”').partition(" ")
             if first.rstrip(",.;:").lower() in ("yes", "no"):
                 key, answer = first.rstrip(",.;:").lower(), rest.strip(' "“”')
-            head = f'<span class="headline">{_md(row.item)}</span><span class="page">{escape(page) if page else "Decisions row"}</span>'
+            head = f'<span class="headline">{_md(row.item, linker)}</span><span class="page">{escape(page) if page else "Decisions row"}</span>'
         ref = refs[0] if refs else ""
         since = f"{ctx.ref(ref)} {escape(ctx.where(ref))}" if ref else ""
         keyed = f'<span class="key">{escape(key)}</span>' if key else ""
-        done.append(f'      <div class="row done">\n        <span class="stack"><span class="when">{ctx.when(row.when) if row.when else ""}</span>'
-                    f'<span class="took">{took}</span></span>\n        <span class="stack">{head}</span>\n'
-                    f"        <span>{keyed}{escape(answer)}</span>\n        <span class=\"words\">{escape(row.words)}</span>\n"
-                    f'        <span class="since">{since}</span>\n      </div>')
+        done_items.append((row.when,
+                           f'      <div class="row done">\n        <span class="stack"><span class="when">{ctx.when(row.when) if row.when else ""}</span>'
+                           f'<span class="took">{took}</span></span>\n        <span class="stack">{head}</span>\n'
+                           f"        <span>{keyed}{escape(answer)}</span>\n        <span class=\"words\">{_md(row.words, linker)}</span>\n"
+                           f'        <span class="since">{since}</span>\n      </div>'))
+    done = [html_row for _, html_row in sorted(done_items, key=lambda r: (r[0] is None, -(r[0].timestamp() if r[0] else 0)))]
     ready = [a for _, d, a, _ in pending if d is not None]
+    total_pending = len(ready) + len(pending_store)
+    asked_times = [a for a in [*ready, *(a for _, a in pending_store)] if a is not None]
     mrs = sum(1 for r in held if ctx.is_change(r))
     unread = len(pending) - len(ready)
-    meta = [f"{len(ready)} pending"]  # (#215) no render clock: the sources' read times and counts stay
+    meta = [f"{total_pending} pending"]  # (#215) no render clock: the sources' read times and counts stay
     if n_saved := sum(1 for _, d, _, _ in pending if d is not None and saved(d)):
         meta.append(f"{n_saved} saved")
-    if any(ready):
-        meta.append(f"oldest {span(ctx.now - min(a for a in ready if a))}")
+    if asked_times:
+        meta.append(f"oldest {span(ctx.now - min(asked_times))}")
     if held:
         meta.append(f"holding {_plural(len(held) - mrs, 'issue')}, {_plural(mrs, 'merge request')}")
     if unread:
@@ -766,32 +967,36 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
     meta.append('<a href="/">board</a>')
     words = f"{escape(ctx.user)}'s words" if ctx.user else "words"
     none = '      <div class="row"><span class="none">none</span></div>'
-    body = (f'  <section>\n    <h2 class="pend">PENDING · {len(ready)}</h2>\n    <div class="list">\n'
+    body = (f'  <section aria-labelledby="{DECISIONS_ANCHOR}">\n    <h2 id="{DECISIONS_ANCHOR}" class="pend">PENDING · {total_pending}</h2>\n    <div class="list">\n'
             '      <div class="row pend head cap"><span>asked</span><span>decision</span><span>options</span><span>holding</span><span>if unanswered</span></div>\n'
             + ("\n".join(rows) or none) + "\n    </div>\n  </section>\n"
             f'  <section>\n    <h2>COMPLETED · {len(done)}</h2>\n    <div class="list fin">\n'
             f'      <div class="row done head cap"><span>answered</span><span>decision</span><span>answer</span><span>{words}</span><span>since</span></div>\n'
             + ("\n".join(done) or none) + "\n    </div>\n  </section>\n")
+    nav = (store_navigation(db, pending, navigation) if db is not None else (navigation or {}))
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>Decisions · {escape(_day(day))}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decisions\">\n{tab_bar('Decisions', len(ready))}"
+            f"<title>Decisions · {escape(_day(day))}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decisions\">\n{tab_bar('Decisions', total_pending, **nav)}"
             f'  <header class="top">\n    <div>\n      <h1>Decisions · {escape(_day(day))}</h1>\n'
             f'      <span class="eyebrow">{" · ".join(meta)}</span>\n    </div>\n  </header>\n'
             + body + "</main>\n" + ANSWER_JS + "</body>\n</html>\n"), pending
 
 
-def write_all(pages_dir: Path, ctx: Context, day: str, root: Path | None = None) -> list[tuple[str, dict | None, datetime | None, str]]:
+def write_all(pages_dir: Path, ctx: Context, day: str, root: Path | None = None, *,
+              db: PageData | None = None, navigation: dict | None = None) -> list[tuple[str, dict | None, datetime | None, str]]:
     """Re-render every readable decision's page from its JSON and the context, and `decisions.html`; the pending entries."""
     pending = entries(pages_dir, ctx)
     count = sum(d is not None for _, d, _, _ in pending)
+    if db is not None:
+        navigation = store_navigation(db, pending, navigation)
     for source in pages_dir.glob("decision-*.json"):
         try:
             page = render(parse(json.loads(source.read_text())), day, ctx.forge, root, ctx, source.stem.removeprefix("decision-"),
-                          source.stat().st_mtime, count)
+                          source.stat().st_mtime, count, navigation=navigation)
         except BAD:
             continue
         write_if_changed(source.with_suffix(".html"), page)
-    html, pending = index(pages_dir, ctx, day, pending)
+    html, pending = index(pages_dir, ctx, day, pending, db=db, navigation=navigation)
     write_if_changed(pages_dir / "decisions.html", html)
     return pending
 
@@ -828,8 +1033,9 @@ header.top>div{flex:1 1 auto;min-width:0}
 header .chip{color:var(--link);border:1px solid var(--brass);margin-bottom:4px}
 header .chip.answered{color:var(--surface);background:#009E73;border-color:#009E73}
 .ask{border-top:3px solid var(--brass);display:flex;flex-direction:column;gap:4px}
-.ask strong{font-size:16px}
+.ask b{font-size:16px}
 .ask p{color:var(--muted)}
+.ask>.prose:first-of-type p{color:var(--fg);font-size:16px}
 code{font-family:ui-monospace,monospace;font-size:.88em;background:var(--ref-bg);padding:0 3px;border-radius:3px;overflow-wrap:normal}
 .ref{font-family:ui-monospace,monospace;font-size:.88em;color:var(--link);text-decoration:none;border-bottom:1px dotted var(--brass);background:var(--ref-bg);padding:0 3px;border-radius:3px;white-space:nowrap}
 .ref::before{content:attr(data-k);font-size:.8em;color:var(--muted);margin-right:3px}
@@ -929,11 +1135,18 @@ h2.pend{color:var(--link)}
 .row .wi button{padding:0 8px;font-size:12px}
 .words{font-style:italic}
 .holds>span,.fallback,.since,.none{font-size:12.5px;color:var(--muted)}
+.decision-badge{font-size:11px;letter-spacing:.06em;padding:1px 6px;border-radius:3px;border:1px solid var(--line);color:var(--muted)}
+.decision-badge.open,.decision-badge.blocked{border-color:var(--dl);color:var(--dl)}
+.decision-answer{color:var(--muted)}
+.decision-form{display:flex;flex-wrap:wrap;gap:6px}
+.decision-form :is(input,button){font:13px/1.4 "Alegreya Sans","Gill Sans",system-ui,sans-serif}
+.decision-form input[type=text]{flex:1 1 120px;min-width:0;padding:1px 6px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:3px}
+.decision-form button{padding:0 8px;background:var(--ref-bg);color:var(--link);border:1px solid var(--brass);border-radius:3px;cursor:pointer}
 .unread{border-left:3px dashed var(--dl)} .unread .why{color:var(--dl)} .unread .when{color:var(--muted)}
 @media (max-width:760px){.row.pend,.row.done{grid-template-columns:minmax(0,1fr);gap:4px}.row.head{display:none}.row .stack:first-child{flex-direction:row;gap:8px}.unread .none{display:none}}
 @media (max-width:900px){.cols{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:480px){header.top{flex-direction:column;align-items:flex-start;gap:6px}.refs{grid-template-columns:minmax(0,1fr)}}
-""" + TAB_CSS + "</style>\n"
+""" + TAB_CSS + PROSE_CSS + "</style>\n"
 HEAD = HEAD_OPEN + PAGE_CSS
 
 # Picking an option saves it at once; the write-in saves on its button. Without JS the form posts and the server

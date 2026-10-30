@@ -14,6 +14,7 @@ from pathlib import Path
 
 from _vendor.toon_format import encode as toon_encode
 from dispatch_prompt import CONTROL, REPORT_KEYS, REPORTS_DIR, TRACKER_ERROR
+from git_trees import read_regular
 from one_shot_report import UNREADABLE, read_report
 from process_status import shown_tree, tracker_texts
 from tracker import parse_tracker
@@ -35,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     runs, skipped = [], 0  # (mtime, tree name, report) of each report that can be read
     for path in sorted((args.root / REPORTS_DIR).glob("*.toon")):
         try:
-            runs.append((path.stat().st_mtime, path.stem, read_report(path)))
+            runs.append((path.stat().st_mtime, path.stem, read_report(path, read_regular)))
         except UNREADABLE:
             skipped += 1
     if skipped:
