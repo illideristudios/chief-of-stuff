@@ -19,10 +19,6 @@
 |---|---|---|
 | 06:00 | Cache warmup | "yes, dispatch it" |
 
-## File ownership
-
-- impl-cache: `trees/cache` (branch `cache-warmup`)
-
 ## Log
 
 - 06:00 opened the day

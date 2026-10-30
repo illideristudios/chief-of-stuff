@@ -22,11 +22,6 @@ Coordinator: coordinator. Board: self-hosted.
 |---|---|---|
 | 09:10 | Release workers standing approval ({{today}}) | "For all release workers today, I approve committing on your own branch, pushing, and redeploying your own task. Do not ask me per session." |
 
-## File ownership
-
-- Security audit: src/a/
-- Draft release notes: docs/release.md
-
 ## Log
 
 - 09:00 opened the day

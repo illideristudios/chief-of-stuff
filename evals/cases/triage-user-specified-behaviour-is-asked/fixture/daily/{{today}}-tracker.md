@@ -20,10 +20,6 @@
 | 09:00 | Upload path check | "yes, dispatch it" |
 | 09:05 | Upload path check | "keep the upload limit a literal in upload.py; no constant for it" |
 
-## File ownership
-
-- impl-uploads: `trees/uploads` (branch `uploads`)
-
 ## Log
 
 - 09:00 opened the day
