@@ -109,7 +109,7 @@ def prompt(runtime: str, release: Path, root: Path) -> str:
                  "every five minutes, notifying on new findings without editing tracker or board. "
                  "Next turn, read clock, inbox, "
                  "audit and worker registry; reconcile task state; board renders itself. "
-                 "Dispatch ready one-shot tasks automatically under Dispatch authority. New interactive sessions need approval.\n\n"
+                 "Dispatch ready tasks automatically under Dispatch authority, including interactive sessions.\n\n"
                  + host_schedule + "\n\n" + silence + "\n\n")
         rules = re.sub(r"## Check\n.*?(?=## Sessions\n)", check, rules, flags=re.S)
         sessions = ("## Sessions\n\nThe workspace `Sessions:` line may name Claude native list and send tools; "
@@ -238,6 +238,16 @@ def main(argv: list[str] | None = None) -> int:
             print(notifications.stderr.strip() or "notify: service setup failed", file=sys.stderr)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"notify: service setup failed: {exc}", file=sys.stderr)
+    if (root / "store.db").is_file():
+        try:
+            engine_service = subprocess.run(
+                [sys.executable, "-I", str(release / "scripts" / "supervisor.py"), "--root", str(root), "ensure-background"],
+                capture_output=True, text=True, timeout=10,
+                env={key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")})
+            if engine_service.returncode:
+                print(engine_service.stderr.strip() or "engine: service setup failed", file=sys.stderr)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"engine: service setup failed: {exc}", file=sys.stderr)
     child_env = dict(os.environ, CHIEF_OF_STUFF_RELEASE=str(release), CHIEF_OF_STUFF_WORKSPACE=str(root))
     stop = threading.Event()
     monitor = None

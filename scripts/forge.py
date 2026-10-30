@@ -666,17 +666,32 @@ class Forge:
     def _open_closers(self, base: str) -> list[dict]:
         """One bounded list of open closing identities, without CI, reviews or discussions."""
         try:
-            limit = backlog.GH_LIMIT if self.github else forge_review.REQUEST_LIMIT
+            limit = backlog.GH_LIMIT
             if self.github:
                 rows, error = _gh_json(self.gh, [
                     "pr", "list", "-R", self.home.repo, "--state", "open", "--base", base,
                     "--limit", str(limit), "--json",
-                    "number,headRefOid,baseRefName,closingIssuesReferences"])
+                    "number,body,headRefOid,baseRefName,closingIssuesReferences"])
                 if error:
                     raise ForgeError(error)
             else:
-                rows = self._pipeline_read("merge_requests?" + urlencode({
-                    "state": "opened", "target_branch": base, "per_page": limit}))
+                token = self._token()
+                if not token:
+                    raise ForgeError(self.home.missing_token)
+                rows = []
+                for page in range(1, backlog.MAX_PAGES + 1):
+                    batch, _, error = backlog._call("GET", f"{self.home.api()}/merge_requests?" + urlencode({
+                        "state": "opened", "target_branch": base, "per_page": backlog.PER_PAGE, "page": page}),
+                        token, backlog.TIMEOUT)
+                    if error:
+                        raise ForgeError(error)
+                    if not isinstance(batch, list) or any(not isinstance(row, dict) for row in batch):
+                        raise ValueError("expected a complete list of open closing identities")
+                    rows.extend(batch)
+                    if len(batch) < backlog.PER_PAGE:
+                        break
+                else:
+                    raise ValueError("expected a complete list of open closing identities")
             if (not isinstance(rows, list) or len(rows) >= limit
                     or any(not isinstance(row, dict) for row in rows)):
                 raise ValueError("expected a complete list of open closing identities")
@@ -1008,15 +1023,12 @@ class Forge:
         outcome, _, error = result.partition(": ")
         return f"{outcome} {evidence}" + (f": {error}" if error else "")
 
-    def set_body(self, number: int, body: str, commit: bool = False) -> str:
-        """Replace an issue's body, as the approved file ownership section is written (#915). The error, or ""."""
-        if not commit:
-            return ""
-        if self.github:
-            _, repo = home_of(self.home)
-            code, _out, err = self.gh(["issue", "edit", str(number), "-R", repo, "--body-file", "-"], body)
-            return "" if code == 0 else f"gh: {err.strip() or f'exit {code}'}"
-        return backlog.set_description(self.home, number, body, token=self._token())
+    def comments(self, number: int) -> tuple[backlog.Note, ...]:
+        """Read the whole issue conversation; a failed read is never an empty consultation."""
+        found = backlog.comments(self.home, number, token=None if self.github else self._token(), gh=self.gh)
+        if not found.ok:
+            raise ForgeError(found.error)
+        return found.notes
 
     def comment(self, number: int, body: str, commit: bool = False) -> str:
         """Post or preview a comment on an issue."""

@@ -421,9 +421,7 @@ def counts(cfg: Backlog | GitHubBacklog, token: str | None = None, timeout: floa
 
 # ---- the write side -------------------------------------------------------------------------
 #
-# `--dry-run` is the default and `--commit` is required, because a write is outward-facing and the
-# GitLab *web UI* is on the coordinator's human-only list. The API is not the web UI, but the
-# caution transfers: the default has to be the mode that cannot do damage.
+# Forge writes preview unless the caller commits them explicitly.
 
 CREATE, CLOSE, COMMENT, LABEL = "create", "close", "comment", "label"
 LABEL_COLOR = "#428bca"
@@ -604,16 +602,6 @@ def close(cfg: Backlog | GitHubBacklog, iid: int, token: str | None = None, comm
         return Written(CLOSE, what)
     _got, _headers, error = _call("PUT", f"{cfg.issues_url}/{iid}", secret, timeout, {"state_event": "close"})
     return Written(CLOSE, what, done=not error, iid=iid, error=error)
-
-
-def set_description(cfg: Backlog, iid: int, description: str, token: str | None = None,
-                    timeout: float = TIMEOUT) -> str:
-    """Replace a GitLab issue's description, the ownership backfill's writer (#883). Returns the error, or ""."""
-    secret = _secret(cfg, token)
-    if not secret:
-        return cfg.missing_token
-    _got, _headers, error = _call("PUT", f"{cfg.issues_url}/{iid}", secret, timeout, {"description": description})
-    return error
 
 
 def comment(cfg: Backlog | GitHubBacklog, iid: int, body: str, token: str | None = None, commit: bool = False,

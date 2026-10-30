@@ -8,6 +8,7 @@ copy on the retiring tick. The other five signals belong to #236.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 
 
 def silence(started_at: datetime, last_progress_at: datetime | None, now: datetime, limit: timedelta) -> str:
@@ -26,3 +27,50 @@ def silence(started_at: datetime, last_progress_at: datetime | None, now: dateti
     if ran < limit:
         return "watch"
     return "act"
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """Plain observations. Missing liveness or a failed thread read never proves a stall."""
+    alive: bool | None = None
+    last_activity_at: datetime | None = None
+    launcher: str = "cli"
+    status: str = ""
+    pending_requests: int = 0
+    pending_since: datetime | None = None
+    decision_wait: bool = False
+    error: str = ""
+
+
+def stall(started_at: datetime, now: datetime, after: timedelta, evidence: Evidence) -> str:
+    """Silence is suspected, never proof. Architectural and split-trio waits do not expire.
+
+    Ordinary requests get a full threshold to be answered. Drivers retain their first-seen
+    time across passes and restarts; a missing first observation is conservatively waiting.
+    """
+    signal = silence(started_at, evidence.last_activity_at, now, after)
+    if evidence.decision_wait:
+        return "waiting"
+    if evidence.error or evidence.alive is None:
+        return "unknown"
+    if not evidence.alive:
+        return "gone"
+    if now - started_at < after:
+        return "ok"
+    if evidence.pending_requests:
+        if evidence.pending_since is None or silence(evidence.pending_since, None, now, after) != "act":
+            return "waiting"
+    return "suspected" if signal == "act" else signal
+
+
+FAILURES = ("failed", "human_review", "stalled")
+
+
+def failures(history, acknowledged=()) -> int:
+    """One budget per issue, across stages and agents. A stopped attempt is not yet a relaunch."""
+    return sum(bool(s.ended_at) and s.outcome in FAILURES and f"{s.stage}-{s.attempt}" not in acknowledged
+               for s in history)
+
+
+def failure_reason(count: int, limit: int) -> str:
+    return "park: two failures on this issue" if count == limit == 2 else f"park: {count} failures on this issue (limit {limit})"
