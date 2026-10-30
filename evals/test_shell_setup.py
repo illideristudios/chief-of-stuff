@@ -115,7 +115,7 @@ class ShellSetupTest(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory, \
                      mock.patch.object(shell, "login_shell", return_value="/bin/sh"), \
                      mock.patch.object(shell.subprocess, "Popen", return_value=child), \
-                     mock.patch.object(shell, "_unreaped_children", pending), \
+                     mock.patch.object(shell, "_unreaped_children", pending, create=True), \
                      mock.patch.object(shell.os, "killpg", side_effect=PermissionError("signal denied")) as kill:
                     root = Path(directory)
                     with self.assertRaises(subprocess.TimeoutExpired) as raised:

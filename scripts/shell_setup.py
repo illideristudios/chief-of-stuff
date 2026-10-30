@@ -93,11 +93,11 @@ def login_argv(command: list[str], *, path_prefix: str = "") -> list[str]:
 
 def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
                 timeout: int = 120, worktree: str = "") -> subprocess.CompletedProcess:
-    """Run workspace-authored shell source in the caller-supplied cwd with login setup.
+    """Run a trusted workspace command with shell setup, bounded separately from a worker's runtime.
 
-    Teardown uses this driver and supplies the trusted workspace as cwd. Workspace, worker and
-    optional worktree identity travel in the environment. Execution has its own timeout;
-    cleanup allows at most one additional second to reap the shell after a failure.
+    Teardown and stack discovery share this driver. Command text is workspace-authored shell source.
+    The process cwd is that trusted tree; worker and worktree identity travel in the environment.
+    Cleanup waits at most one second after SIGKILL.
     """
     # Popen.poll uses WNOHANG: a stuck child must not delay the next command either.
     _unreaped_children[:] = [child for child in _unreaped_children if child.poll() is None]
