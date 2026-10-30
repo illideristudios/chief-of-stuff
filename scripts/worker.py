@@ -289,9 +289,14 @@ def teardown_once(store: Any, root: Path, key: str, stage: str, attempt: int, co
     if isinstance(tree, str) and tree:
         for error in teardown(root, Path(tree), Path(tree).name, command):
             store.add_log(key, f"worker teardown failed: {error}", at)
-    record["torn_down"] = True
-    data["runs"] = {**runs, f"{stage}-{attempt}": record}
-    store.set_resume(key, data)
+    def mark(current: dict) -> None:
+        current_runs = current.get("runs")
+        current_runs = dict(current_runs) if isinstance(current_runs, dict) else {}
+        entry = dict(current_runs.get(f"{stage}-{attempt}") or record)
+        entry["torn_down"] = True
+        current["runs"] = {**current_runs, f"{stage}-{attempt}": entry}
+
+    store.update_resume(key, mark)
 
 
 def _clear_tree(root: Path, tree: Path, store: Any, key: str, at: str) -> None:
@@ -779,10 +784,12 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
+            # Durable exit evidence or confirmed death releases the workspace stack, even if completion waits.
+            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
+            data = _resume(store, key)  # Later quota/suite writes must retain the teardown marker.
             if not (run_dir / "exit.json").exists():
                 # The planner closes it from tree, report and orphan evidence.
                 continue
-            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
             code, exited_at = _exit_record(run_dir)
             runtime = record.get("runtime", "claude")
             stdout, stderr = (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text()
@@ -822,9 +829,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                         outcome = "human_review"
                         reason = reconcile.suite_reason(counts, reports[-1].summary)
                         store.set_human_review(key, True)
-                        data["suite_hold"] = {"stage": segment.stage, "attempt": segment.attempt,
-                                              "published": False}
-                        store.set_resume(key, data)
+                        hold = {"stage": segment.stage, "attempt": segment.attempt, "published": False}
+                        store.update_resume(key, lambda d, hold=hold: d.update(suite_hold=hold))
                     else:
                         outcome = "done"
                 else:
