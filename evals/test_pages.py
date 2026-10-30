@@ -1968,6 +1968,20 @@ class SuperviseTest(unittest.TestCase):
             except (OSError, ValueError):
                 pass
 
+    def wait_recorded_server(self, previous_pid=None):
+        # HTTP can answer before ensure publishes .pid; both observations are needed before reading it.
+        deadline = time.monotonic() + WAIT
+        while time.monotonic() < deadline:
+            try:
+                pid = int((self.pages / ".pid").read_text())
+            except (OSError, ValueError):
+                pass
+            else:
+                if pid > 0 and pid != previous_pid and pg._who(self.port) is not None:
+                    return pid
+            time.sleep(0.05)
+        self.fail("page server did not answer and publish its PID")
+
     def test_restarts_a_killed_page_server_without_an_agent_or_second_launch_agent(self):
         self.addCleanup(self.stop_server)
         stop = threading.Event()
@@ -1976,11 +1990,8 @@ class SuperviseTest(unittest.TestCase):
             thread.start()
             self.addCleanup(lambda: thread.join(timeout=5))
             self.addCleanup(stop.set)
-            deadline = time.monotonic() + WAIT
-            while time.monotonic() < deadline and pg._who(self.port) is None:
-                time.sleep(0.05)
+            first_pid = self.wait_recorded_server()
             self.assertEqual(get(self.port, "/").status, 200)
-            first_pid = int((self.pages / ".pid").read_text())
             os.kill(first_pid, signal.SIGTERM)
             deadline = time.monotonic() + WAIT
             while time.monotonic() < deadline and pg.is_pages_serve(first_pid, self.port):
@@ -2188,6 +2199,7 @@ class StandaloneBoardTest(unittest.TestCase):
     never substituted; and status tells a missing engine apart from a healthy board."""
 
     stop_server = SuperviseTest.stop_server
+    wait_recorded_server = SuperviseTest.wait_recorded_server
 
     def setUp(self):
         SuperviseTest.setUp(self)
@@ -2272,9 +2284,8 @@ class StandaloneBoardTest(unittest.TestCase):
             thread.start()
             self.addCleanup(lambda: thread.join(timeout=5))
             self.addCleanup(stop.set)
-            self.wait_serving()
+            pid = self.wait_recorded_server(previous_pid=stale)
             self.assertEqual(get(self.port, "/").status, 200)
-            pid = int((self.pages / ".pid").read_text())
             self.assertNotEqual(pid, stale)
             self.assertTrue(pg.is_pages_serve(pid, self.port))
 

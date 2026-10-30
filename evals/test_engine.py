@@ -116,6 +116,15 @@ class FakeForge:
 
 
 class EngineTest(unittest.TestCase):
+    def test_heartbeat_uses_the_same_facts_as_the_planner_without_a_second_gather(self):
+        known = reconcile.Facts(blockers=(), progress=((KEY, NOW),), stall_after=timedelta(minutes=17))
+        with mock.patch.object(engine.engine_facts, "gather", return_value=known) as gathered, \
+                mock.patch.object(engine.heartbeat_store, "beat", return_value=[]) as beat:
+            self.run_pass()
+        gathered.assert_called_once()
+        beat.assert_called_once_with(self.db, NOW, NOW, {KEY: NOW}, known.stall_after,
+                                     sinks=mock.ANY)
+
     def test_workspace_fix_round_limit_reaches_the_planner(self):
         self.forge.rows[0]["stage"] = "review"
         self.db.sync_from_forge(self.forge.snapshots())

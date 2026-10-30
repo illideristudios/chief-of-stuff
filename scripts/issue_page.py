@@ -24,9 +24,9 @@ from task_forge import (EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, PageData, change_issu
                         source_key, source_worker_tasks, tracker_issue_tasks)
 import tracker_log
 from decision_actions import addresses, state_of
-from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, store_decision_badge, write_if_changed
+from decision_page import Linker, _section, context, entries, held_refs, span, store_decision_badge
 from fragment import external_url, href, tab_bar, issue_href, issue_page_name, latest_thread_link
-from page_common import drop_html_comments, markdown_blocks, markdown_inline
+from page_common import HEAD, drop_html_comments, markdown_blocks, markdown_inline, write_if_changed
 from module_graph import section as _graph
 from clock import dur as _dur
 from task_forge import forge_ends, held_names, hold_causes

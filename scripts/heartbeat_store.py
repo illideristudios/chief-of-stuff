@@ -11,7 +11,7 @@ from typing import Any
 
 import heartbeat
 from heartbeat import Facts
-from workspace import ENGINE_STATE_DIR, _swap_in
+from workspace import ENGINE_STATE_DIR, swap_in
 
 HEARTBEAT_FILE = "heartbeat.json"
 THREAD_LINK = "t3code://threads/"
@@ -61,7 +61,7 @@ class FileSink:
 
     def deliver(self, status: heartbeat.Status) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        _swap_in(self.path, json.dumps({"line": status.line, "summary": status.summary,
+        swap_in(self.path, json.dumps({"line": status.line, "summary": status.summary,
                                         "now": status.now.isoformat(), "tick": status.tick.isoformat() if status.tick else None,
                                         "entries": [asdict(e) for e in status.entries]}, indent=2) + "\n")
 

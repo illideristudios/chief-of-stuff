@@ -1058,6 +1058,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True,
                        completed=completed):
         raise RuntimeError("cleanup failed; see the issue logs")
+    _beat(store, root, facts, clock())
     return actions
 
 
@@ -1173,13 +1174,11 @@ def _persist_launchd_handoff(root: Path, release: Path) -> bool:
     return True
 
 
-def _beat(db: Any, forge: Any, root: Path, trees: Path, workers: settings.Workers, tick: datetime) -> None:
+def _beat(db: Any, root: Path, facts: reconcile.Facts, tick: datetime) -> None:
     """Deliver the heartbeat after a pass (#1179). A failure is logged to the engine log and never stops the engine."""
     try:
-        now = datetime.now(timezone.utc)
-        limit = timedelta(minutes=workers.stall.after_minutes)
-        facts = engine_facts.gather(forge=forge, store=db, root=root, trees=trees, now=now, stall_after=limit)
-        failures = heartbeat_store.beat(db, now, tick, dict(facts.progress), limit, sinks=heartbeat_store.sinks(root))
+        failures = heartbeat_store.beat(db, tick, tick, dict(facts.progress), facts.stall_after,
+                                        sinks=heartbeat_store.sinks(root))
     except Exception as exc:
         failures = [f"heartbeat: {exc}"]
     for failure in failures:
@@ -1361,7 +1360,6 @@ def main(argv: list[str] | None = None) -> int:
                         error_kind = None
                     if args.once:
                         return 1 if failed else 0
-                    _beat(db, source, root, trees, config.workers, datetime.now(timezone.utc))
                     with contextlib.suppress(OSError):
                         write_engine_status(
                             root,
