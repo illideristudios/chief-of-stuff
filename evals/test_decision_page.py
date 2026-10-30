@@ -920,7 +920,7 @@ class StoreIndexTest(unittest.TestCase):
                                 asked_at="2026-09-26T01:45:00-05:00",
                                 record={"status": "blocked", "blocked_reason": "awaiting owner"})
         self.store.add_decision("github:example/repo#11", "scope", "Stale question on closed issue?",
-                                asked_at="2026-09-26T01:50:00-05:00")
+                                decided_by="owner", asked_at="2026-09-26T01:50:00-05:00")
         data = self.page_data()
         nav = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
         self.assertEqual(nav["decisions"], 2)
@@ -944,6 +944,14 @@ class StoreIndexTest(unittest.TestCase):
         self.assertNotIn("Stale question on closed issue?", page)
         self.assertIn("0 completed today", page)
         self.assertIn(" · 0</h2>", done)
+
+        # Closing the issue excludes an owner wait; reopening it makes the same decision pending again.
+        self.store.upsert_item("github:example/repo#11", forge_state="open")
+        data = self.page_data()
+        nav = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+        self.assertEqual(nav["decisions"], 3)
+        page, _ = dp.index(self.pages, dp.Context(NOW), "2026-09-26", db=data, navigation=nav)
+        self.assertIn("Stale question on closed issue?", page.split("COMPLETED")[0])
 
     def test_only_a_decision_needs_owner_names_waits_on_the_owner_or_counts_as_pending(self):
         """C30 (#1152): an unanswered newest row whose decided_by is empty (a trio retry, or an old permission row)

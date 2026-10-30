@@ -211,7 +211,7 @@ class PanelTest(unittest.TestCase):
 
     def test_closed_holds_are_ignored(self):
         self.db.upsert_item(OTHER, title="Closed repository", forge_state="closed", human_review=True)
-        self.db.add_decision(OTHER, "design", "Closed question")
+        self.db.add_decision(OTHER, "design", "Closed question", decided_by="owner")
         cfg = fixtures.parse_coordinator(fixtures.CLAUDE_MD, today=NOW.date())
         _, holds, _, _ = render_board._tasks_from_store(self.db, cfg, {}, None, NOW.date())
         self.assertFalse(holds)
