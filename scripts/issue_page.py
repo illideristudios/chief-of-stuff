@@ -456,17 +456,19 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     current_tasks = (latest_mine if item is not None else
                      list({(t.name.strip() or t.item.strip()).casefold(): t for t in known}.values()))
     header_live = header_live or bool(source_worker_tasks(sources, current_tasks).intersection(latest_mine))
-    # #886: a closed/merged forge end or a done tracker beats a hold chip (NEEDS INPUT) and a terminal-stage
-    # "merged" Flow bucket that only means the lane finished — match the board card and forge_ends word.
+    # #886: done / a closed issue's forge word beat a hold chip. A merged change alone must not while the issue is
+    # still open — store human_review and tracker holds keep NEEDS INPUT (#936 engine health).
     exhausted = db.exhaustion(item.issue_key) if item is not None and db is not None else None
     forge_word = next((word for word in ("merged", "closed")
                        if any(ended.get(t.name.strip(), (None, ""))[1] == word for t in mine)), None)
+    issue_closed = ((item is not None and item.forge_state == "closed")
+                    or (issue is not None and issue.state == "closed"))
     if exhausted is not None:
         status = EXHAUSTED_CHIP
     elif all(t.kind == "done" for t in current_tasks):
         status = "done"
-    elif forge_word:
-        status = forge_word
+    elif issue_closed:
+        status = forge_word or "closed"
     elif any(t in holds for t in mine):
         status = "needs input"
     else:

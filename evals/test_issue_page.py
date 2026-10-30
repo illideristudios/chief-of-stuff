@@ -1193,6 +1193,51 @@ class ClosedIssueHeaderTest(unittest.TestCase):
         refs = text(section(task_html, "References"))
         self.assertRegex(refs, r"(?i)\bclosed\b")
 
+    def test_an_open_held_issue_keeps_needs_input_even_when_a_change_merged(self):
+        # #886 must not treat forge_ends "merged" as a finished header while the issue is still open and held —
+        # the board and engine-health pages keep NEEDS INPUT (#936).
+        from datetime import timezone
+
+        merged_at = at(TODAY, "01:00").astimezone(timezone.utc)
+        src = sources(replace(MR, state="merged", merged_at=merged_at, approved=True, pipeline="passed"))
+        today = today_tracker()  # #109 waits on Robin (held)
+        chip = self.header_chip(page(109, src=src, today=today))
+        self.assertRegex(chip, r"(?i)^needs input$")
+        self.assertNotRegex(chip, r"(?i)^(merged|closed|done)$")
+
+    def test_open_store_human_review_keeps_needs_input_when_a_change_merged(self):
+        # Exact #936 / engine-health shape: open forge issue, human_review hold, PR already merged.
+        from datetime import timezone
+        from test_m6_store_board import KEY, make_store_workspace
+
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, True))
+        db.upsert_item(KEY, workflow="build", stage="review", forge_state="open",
+                       title="Upload size limit", human_review=True)
+        merged_at = (NOW - timedelta(minutes=15)).astimezone(timezone.utc)
+        src = bs.Sources(
+            fetched={"kanban": NOW, "merge requests": NOW, "workers": NOW},
+            issues={
+                KEY: bs.Issue("#12", "https://github.com/example/repo/issues/12",
+                              "Upload size limit", "open", ("Needs input",)),
+                "#12": bs.Issue("#12", "https://github.com/example/repo/issues/12",
+                                "Upload size limit", "open", ("Needs input",)),
+            },
+            changes={
+                "#21": bs.Change("#21", "https://github.com/example/repo/pull/21", "Upload size limit",
+                                 "merged", False, "passed", True, 1, merged_at,
+                                 "main", ("src/upload.py",), (KEY, "#12")),
+            },
+            workers=(),
+            errors={},
+            home=bs.backlog.GitHubBacklog("example/repo"),
+        )
+        html = ip.render(KEY, [], src, NOW, LANES, db=task_forge.page_data(db))
+        chip = self.header_chip(html)
+        self.assertRegex(chip, r"(?i)^needs input$")
+        self.assertNotRegex(chip, r"(?i)^(merged|closed|done)$")
+
 
 class DoneClockAfterMidnightTest(unittest.TestCase):
     """(#213) The task page's elapsed and waiting totals stop at the done clock's own latest occurrence at
