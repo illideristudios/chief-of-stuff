@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import store
 from alembic import command
-from alembic.script import ScriptDirectory
 
 
 class DecisionGraphMigrationTest(unittest.TestCase):

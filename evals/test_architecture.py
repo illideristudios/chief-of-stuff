@@ -19,14 +19,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
-PAGES = frozenset({"render_board", "decision_page", "issue_page", "source_page", "workers_page", "pages",
-                   "flow_chart", "gantt", "panels", "columns", "fragment", "page_common", "module_graph", "page_reload", "heartbeat_page"})
+PAGES = frozenset({"render_board", "decision_page", "decision_graph_page", "issue_page", "source_page", "workers_page",
+                   "pages", "flow_chart", "gantt", "panels", "columns", "fragment", "page_common", "module_graph",
+                   "page_reload", "heartbeat_page"})
 
 # The leaf page modules: each imports at most fragment (the shared escaping), so a chart or the reload check lifts out with it.
 LEAVES = ("fragment", "gantt", "columns", "panels", "page_reload")
 
 # Every script module that draws nothing. A new one belongs here unless it renders a page.
 DRAWS_NOTHING = (
+    "transcripts",
     "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "forge_review",
     "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "kanban_cli", "pipeline_cli", "audit_tasks",
     "one_shot", "spawn_session", "session_exec", "shell_setup", "process_status", "one_shot_result", "adopt_one_shots", "merge_approved", "merge_ready",
@@ -233,8 +235,11 @@ CIRCLES: dict[str, frozenset[str]] = {
         "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance", "heartbeat",
     }),
     "adapters": frozenset({
+        "transcripts",  # Claude transcript file ingestion and normalization.
+        "migrations/versions/0013_transcripts",  # Store schema, with its gateway.
         "fragment", "page_common", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
-        "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge", "private_state",
+        "decision_graph_page", "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store",
+        "forge", "private_state",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
         "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
         "architect_signal_store", "precedent_source", "heartbeat_store", "heartbeat_page",
@@ -276,7 +281,6 @@ OUTWARD_IMPORTS = frozenset({
     "dispatch_prompt→backlog_ref",
     "dispatch_prompt→settings",
     "dispatch_prompt→workspace",
-    "estimate→workspace",
     "kanban→backlog",
     "kanban→settings",
     "merge_approved→backlog",
