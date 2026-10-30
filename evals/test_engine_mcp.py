@@ -101,7 +101,7 @@ class MCPTest(unittest.TestCase):
                 async with ClientSession(read, write, read_timeout_seconds=10) as client:
                     await client.initialize()
                     tools = await client.list_tools()
-                    self.assertEqual({t.name for t in tools.tools}, {"report", "ask"})
+                    self.assertEqual({t.name for t in tools.tools}, {"report", "ask", "decisions"})
                     for tool in tools.tools:
                         self.assertNotIn("issue_key", tool.input_schema["properties"])
                     report = await client.call_tool("report", {"outcome": "done", "summary": "over stdio",

@@ -204,9 +204,7 @@ def _policy(where: str, value, personas: set[str], gates: set[str]) -> dict:
             if not isinstance(v, list):
                 raise PolicyError(f"{at} must be a list of tables")
             v = tuple(_approval(f"{at}[{i}]", x) for i, x in enumerate(v))
-        named = v if key == "zach_gates" else {a.gate for a in v} if key == "approvals" else ()
-        if unknown := sorted(set(named) - gates):
-            raise PolicyError(f"{at}: {', '.join(unknown)} is no gate on any workflow edge")
+        # Legacy gate names are inert and may outlive the workflow edges that named them.
         out[key] = v
     return out
 

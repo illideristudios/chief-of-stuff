@@ -277,7 +277,7 @@ class HeaderTest(unittest.TestCase):
         """Finding 56: the failure mode to design against is inventing plausible work, not stopping."""
         body = dp.compose(self.root, "2026-09-18", "Security audit")
         self.assertIn("hand it back", body)
-        self.assertIn("assumption", body)
+        self.assertIn("reversible default", body)
 
     def test_it_resolves_the_tension_between_staying_in_the_tree_and_reading_the_tracker(self):
         body = dp.compose(self.root, "2026-09-18", "Security audit")
@@ -388,19 +388,9 @@ class PositiveHalfTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.body = dp.compose(self.root, "2026-09-18", "Security audit")
 
-    def test_two_categories_and_no_third(self):
-        self.assertIn("git revert", self.body)
-        self.assertIn("no third", self.body)
 
-    def test_a_revertible_change_in_this_tree_needs_nobody(self):
-        self.assertIn("needs nobody's word", self.body)
 
-    def test_a_relay_never_carries_an_irreversible_one(self):
-        self.assertIn("never travels on a relay", self.body)
-        self.assertIn("evidence about the past", self.body)
 
-    def test_not_handed_is_not_a_boundary(self):
-        self.assertIn("not one of the two", self.body)
 
     def test_the_commit_line_is_zachs_rule_not_its_opposite(self):
         """Zach, 2026-09-18 23:00: every session makes meaningful small commits; uncommitted work is how work gets lost."""
@@ -419,16 +409,12 @@ class PositiveHalfTest(unittest.TestCase):
 class StopKindsTest(unittest.TestCase):
     """Two stops take two routes. Arriving as indistinguishable English is how they landed as prose to interpret."""
 
-    def test_the_assignment_names_the_two_kinds(self):
-        """#1039 (C29): no file is anybody's, so `ownership` and `scope` are no stops."""
+    def test_stops_route_to_the_coordinator_without_an_owner_gate(self):
         tmp, root = workspace()
         self.addCleanup(tmp.cleanup)
         body = dp.compose(root, "2026-09-18", "Security audit")
-        self.assertIn("`Stop:` is one of two words", body)
-        for kind in ("`permission`", "`authorization`"):
-            self.assertIn(kind, body)
-        for kind in ("`ownership`", "`scope`", "Owns:", "paths below"):
-            self.assertNotIn(kind, body)
+        self.assertIn("Permission requests go through the", body)
+        self.assertIn("engine\'s ask channel", body)
 
 
 class NameRuleTravelsTest(unittest.TestCase):
@@ -663,12 +649,8 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
 
     def test_one_shot_dispatch_is_authorized_by_configuration(self):
         authority = self._section("Dispatch authority")
-        self.assertIn("Do not ask the user to choose a worker or approve each assignment or launch", authority)
-        self.assertIn("unresolved human-review hold or lane gate", authority)
-        self.assertIn("never invent an approval quote in Decisions", authority)
-        dispatch = self._section("Dispatch")
-        self.assertNotIn("The same explicit user approval for launching a new worker applies", dispatch)
-        self.assertIn("dispatch ready `unassigned` tasks automatically", self._section("Check"))
+        self.assertIn("Automatically assign and launch ready tasks", authority)
+        self.assertIn("never invent an approval quote", authority)
 
     SERIAL = re.compile(r"(?i)\bone at a time\b|\bsequential(?:ly)?\b|\bone by one\b|\bone after another\b|\bin the foreground\b|\bin turn\b|\bserial(?:ly|ize)?\b")
 
@@ -686,7 +668,7 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         #   NOPIPE   "Add no `| head`, `| tail` or `| cut` to a launch: its whole output is read from the notification's output file." (the eval graders quote BACKGROUND and NOPIPE together, as the file has them: NOPIPE straight after BACKGROUND)
         #   NOTIFY   "A background launch's completion notification only says the launch ended: name the task in its Bash description, and on the notification read that task's report with `chief-of-stuff result --root . --task <the Tasks name>`, then reconcile it, sync the issue's Kanban state and report that task before using its result."
         #   REFUSAL  "A launcher refusal for the concurrency cap (`max_concurrency` under `[workers]`) is not a blocker: leave the task `open` and launch it when a running task returns."
-        #   FAILURE  "When one launch fails mid-batch the others keep running; do not retry a held or failed task without resolving its blocker."
+        #   FAILURE  "When one launch fails mid-batch the others keep running; resolve a failed task's blocker, retry with the next agent, and park after two failures across workers."
         #   PLACE    "Do not dispatch a standing placeholder this way; a launcher call starts exactly one task."
         # And stay: "Write none of these yourself, before or during the run; it changes the row again when it returns."
         # Gone: "Run tasks sequentially in the foreground", "more than one task this way", "before selecting the next ready task".
@@ -697,7 +679,7 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
             "Add no `| head`, `| tail` or `| cut` to a launch: its whole output is read from the notification's output file.",
             "A background launch's completion notification only says the launch ended: name the task in its Bash description, and on the notification read that task's report with `chief-of-stuff result --root . --task <the Tasks name>`, then reconcile it, sync the issue's Kanban state and report that task before using its result.",
             "A launcher refusal for the concurrency cap (`max_concurrency` under `[workers]`) is not a blocker: leave the task `open` and launch it when a running task returns.",
-            "When one launch fails mid-batch the others keep running; do not retry a held or failed task without resolving its blocker.",
+            "When one launch fails mid-batch the others keep running; resolve a failed task's blocker, retry with the next agent, and park after two failures across workers.",
             "Do not dispatch a standing placeholder this way; a launcher call starts exactly one task.",
             "Write none of these yourself, before or during the run; it changes the row again when it returns.",
         ):
@@ -741,19 +723,7 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         for gone in ("publish tool", "`url` argument", "`open` action", "Board: <url>"):
             self.assertNotIn(gone, board)
 
-    def test_the_pipeline_sends_the_reviewer_the_pr(self):
-        # #33 stage 3: a lane runs through the reviewer session and the user's gates.
-        self.assertIn("## Pipeline", self.content)
-        self.assertIn("`review PR <url>`", self.content)
-        self.assertIn("A gate yes covers every stage up to the next gate", self.content)
 
-    def test_the_reviewer_hand_off_names_its_mailbox(self):
-        # autonomous-review-pipeline-design, 22:45: without --mailbox-dir the reviewer's report landed in the reviewed repo.
-        pipeline = self._section("Pipeline")
-        self.assertIn("`Report by: chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to coordinator --from <reviewer session> --type review --task \"<task>\"`", pipeline)
-        self.assertNotIn("`inbox.py send --to reviewer", pipeline)
-        # A sonnet run sent the placeholder itself; the reviewer runs in another tree, so only an absolute path lands.
-        self.assertIn("`<workspace root>` written out as an absolute path", pipeline)
 
     def _section(self, name):
         if name in ("Sessions", "Assign", "Brief"):
@@ -776,16 +746,9 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         return sections(self.content)[name].split("\n", 1)[1]
 
     def test_the_coordinator_hands_off_and_asks_only_for_the_users_reasons(self):
-        # The user, 2026-09-24 01:35: "You shouldn't be asking me to give things to things - your role is exactly to do that."
-        asks = self._section("Asks")
-        for reason in ("A plan needs review", "An architectural decision needs review", "wedged, blocked, or stuck", "time-critical"):
-            self.assertIn(reason, asks)
-        self.assertIn("Never ask who should take a task", asks)
-        self.assertIn("launching a new session", asks)
-        self.assertNotIn("an owner, a scope", self.content)
-        self.assertNotIn("only to a session the user names", self._section("Assign"))
-        # An opus run refused a hand-off the user named, on the guardrail meant for the coordinator's own picks.
-        self.assertIn("When you pick, never hand:", self._section("Assign"))
+        self.assertIn("two failures", self.content)
+        self.assertIn("split trio", self.content)
+        self.assertNotIn("## Human-only actions", self.content)
 
     def test_there_is_no_standing_list(self):
         # A standing list stood in for a hand-off yes the coordinator no longer needs.
@@ -828,38 +791,8 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
     # A sentence that says a request is mergeable or ready to merge, and is not the rule that bans the words.
     SAYS_MERGEABLE = re.compile(r"(?i)\b(?:mergeable|ready to merge)\b")
 
-    def test_the_word_mergeable_comes_only_from_the_merge_ready_verdict(self):
-        for name, sentence, section in self.MERGE_READY_RULE:
-            with self.subTest(name):
-                if name == "the word comes only from the verdict":
-                    agent = self.agent_file.read_text()
-                    self.assertEqual(agent.count(sentence), 1, "wording ban stays once in the agent")
-                    self.assertIn(sentence, sections(agent)["Pipeline"])
-                    skill = self.agent_file.parent.parent / "skills" / "review-pipeline" / "SKILL.md"
-                    self.assertNotIn(sentence, skill.read_text(), "wording ban must leave the skill")
-                else:
-                    self.assertTrue(sentence in self._section(section), f"{section} must say ({name}): {sentence}")
 
-    def test_the_coordinator_tells_the_worker_to_merge_after_naming_who_merges(self):
-        pipeline = self._section("Pipeline")
-        rule = {n: s for n, s, _ in self.MERGE_READY_RULE}
-        names, tells = rule["the worker merges a ready one"], rule["the worker is told, with the line"]
-        self.assertTrue(tells in pipeline, f"Pipeline must say: {tells}")
-        self.assertGreater(pipeline.find(tells), pipeline.find(names), f"the instruction follows the sentence that names who merges: {tells}")
 
-    def test_a_worker_that_merges_runs_merge_ready_and_merges_only_on_its_own_ready_line_pinned_to_its_head(self):
-        tmp, root = workspace(claude_md=CLAUDE + "- Settings: `cos.toml`\n")
-        self.addCleanup(tmp.cleanup)
-        for toml, merges in (('[workflow]\nmerge_owner = "worker"\n', True), ('[workflow]\nmerge_owner = "user"\n', False),
-                             ('[workflow]\nmerge_owner = "approval"\napprover = "robin"\n', False),
-                             ('[workflow]\ndelivery = "branch"\n', False)):
-            (root / "cos.toml").write_text(toml)
-            body = dp.compose(root, "2026-09-18", "Security audit")
-            rule = self.worker_merge_rule(root)
-            with self.subTest(toml=toml):
-                self.assertEqual(rule in body, merges, rule)
-                if merges:
-                    self.assertNotIn("merge-ready --root .`", body, "the worker's worktree holds no CLAUDE.md: `--root .` exits 2")
 
     def test_the_scheduled_check_runs_merge_ready_inside_its_own_bullet(self):
         check = self._section("Check")
@@ -892,10 +825,6 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
                 with self.subTest("agent file: " + sentence[:60]):
                     self.assertIn("merge-ready", sentence, f"a sentence that says mergeable must come from the merge-ready verdict: {sentence}")
 
-    def test_a_clean_verify_pass_goes_to_merge(self):
-        # An opus run read a clean verify pass as a new triage and asked for R1's disposition again.
-        triage = self._section("Triage")
-        self.assertIn("A verify pass with nothing open moves the task to `merge`", triage)
 
     def test_github_issue_writes_use_the_pinned_backlog_script(self):
         self.assertIn("chief-of-stuff backlog --create", self.content)
@@ -904,8 +833,6 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
     def test_live_prompt_does_not_name_the_original_workspace_user(self):
         self.assertNotIn("Zach", self.content)
 
-    def test_triage_is_the_users(self):
-        self.assertIn("every disposition in one reply", self._section("Triage"))
 
     # #391, the user, 2026-10-06: a review finding that is a clear fix "should have automatically been a fix". The rule is gated (review of
     # PR 398): eligible only when clear, Important or Minor, off the security axis and about nothing the user specified; the Plan line stays
@@ -941,64 +868,12 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         ("merge (:226)", "With no `fix` items left and no ask open, the task sits at `merge`."),
     )
 
-    def test_triage_states_the_gated_automatic_fix_rule(self):
-        triage = self._section("Triage")
-        for name, sentence in self.TRIAGE_RULE:
-            with self.subTest(name):
-                self.assertIn(sentence, triage, f"Triage must say ({name}): {sentence}")
 
-    def test_the_check_precedes_the_dispatch_sentence(self):
-        # Sonnet runs sent a finding that contradicted a Decisions row, then retracted: the check is a step before the send, so it comes first.
-        triage = self._section("Triage")
-        sentences = dict(self.TRIAGE_RULE)
-        check, send = sentences["check first, before the send"], sentences["sent at once with the Plan line"]
-        self.assertIn(check, triage, f"Triage must say: {check}")
-        self.assertLess(triage.find(check), triage.find(send), f"the check sentence must precede the dispatch sentence: {check}")
 
-    def test_the_lines_the_rule_makes_stale_say_the_automatic_fix_is_the_exception(self):
-        for name, sentence in self.STALE_LINES_MADE_CONSISTENT:
-            with self.subTest(name):
-                self.assertIn(sentence, self.content, f"{name} must say: {sentence}")
 
-    def test_the_kanban_doc_names_the_all_automatic_exception_to_the_triage_gate(self):
-        # docs/kanban.md lists `triage` as a gate and a hold stage; an all-automatic Triage pass passes it without the user's word.
-        sentence = "A Triage pass that leaves nothing for the user passes the `triage` gate without the `!!` hold, by the automatic-fix rule, and is recorded in the Log."
-        doc = (Path(__file__).resolve().parent.parent / "docs" / "kanban.md").read_text()
-        self.assertIn(sentence, doc, f"docs/kanban.md must say: {sentence}")
 
-    def test_triage_keeps_the_plan_line_waives_nothing_and_speaks_the_reviewers_severities(self):
-        triage = self._section("Triage")
-        # The earlier text: "That send carries no plan-approval wait, since the pipeline already authorizes it."
-        self.assertNotIn("plan-approval wait", self.content, "an automatic fix carries the Plan line; no sentence waives the plan-approval wait")
-        # The reviewer's vocabulary is Critical, Important, Minor.
-        self.assertIsNone(re.search(r"(?i)\bhigh\b", triage), "Triage uses the reviewer's severities (Critical, Important, Minor), never `high`")
 
-    def test_no_sentence_records_an_automatic_fix_in_decisions(self):
-        # :22 "never invent an approval quote in Decisions": the Decisions table holds the user's words, an automatic fix is a Log entry.
-        # A sentence that mentions an automatic fix and says to record, write or add something in Decisions (not under a "never") is wrong;
-        # naming a Decisions row as where the user's own words live (the eligibility sentence) is not.
-        records_in_decisions = re.compile(r"\b(?:record|write|add)\w*\b(?:(?!\bnever\b)[^.])*\bDecisions\b", re.IGNORECASE)
-        table = (
-            (True, "Record one Decisions row naming the R-numbers sent this way and saying it was an automatic fix"),
-            (True, "Write an automatic fix as a Decisions row, not the user's word."),
-            (False, dict(self.TRIAGE_RULE)["eligibility"]),
-            (False, dict(self.TRIAGE_RULE)["Log, not Decisions"]),
-        )
-        for rejected, sentence in table:
-            with self.subTest(sentence[:60]):
-                self.assertEqual(rejected, "automatic" in sentence and records_in_decisions.search(sentence) is not None, sentence)
-        for sentence in re.split(r"(?<=[.:;])\s+", self._section("Triage")):
-            if "automatic" in sentence:
-                with self.subTest("agent file: " + sentence[:60]):
-                    self.assertIsNone(records_in_decisions.search(sentence), f"an automatic fix is recorded in the Log, never in Decisions: {sentence}")
 
-    def test_every_handed_task_opens_plan_mode(self):
-        # Zach, 2026-09-23 22:25: "tasks passed to implementers should cause the implementer to enter plan mode for the new task".
-        line = "`Plan: enter plan mode (EnterPlanMode) for this task before anything else; write nothing until the user approves the plan.`"
-        assign = self._section("Assign")
-        triage = self._section("Triage")
-        self.assertIn(line, assign)
-        self.assertIn(line, triage)
 
     def test_no_session_applies_its_own_review(self):
         self.assertNotIn("then apply them on the same branch", self.content)
@@ -1205,9 +1080,9 @@ class PonytailTest(unittest.TestCase):
 
     def test_a_new_task_is_a_new_plan(self):
         """Zach, 2026-09-23 22:25: a later task handed to this session starts in plan mode too."""
-        self.assertIn("**A new task is a new plan.**", self.body)
+        self.assertIn("**Plan and proceed.**", self.body)
         agy = dp.compose(self.root, "2026-09-18", "Security audit", name="implementer-GFlash38H-01", runtime="agy")
-        self.assertIn("**A new task is a new plan.**", agy)
+        self.assertIn("**Plan and proceed.**", agy)
 
     def test_the_users_ask_is_still_built(self):
         """House rule 9: a challenge is said once, then the instruction is built."""
@@ -1237,9 +1112,9 @@ class OnlyTheUserMergesTest(unittest.TestCase):
     def test_the_session_never_merges(self):
         tmp, root = workspace()
         self.addCleanup(tmp.cleanup)
-        line = [x for x in dp.compose(root, "2026-09-18", "Security audit").splitlines() if x.startswith("Commits: ")][0]
-        self.assertIn("The merge is the user's alone: you never merge a pull request.", line)
-        self.assertNotIn("word you were given", line)
+        body = dp.compose(root, "2026-09-18", "Security audit")
+        self.assertIn("The engine merges", body)
+        self.assertIn("workers never merge", body)
 
 
 class ReviewerRoutingTest(unittest.TestCase):
@@ -1254,21 +1129,11 @@ class ReviewerRoutingTest(unittest.TestCase):
         self.assertIn("No reviewer session is configured", generic)
         self.assertNotIn("reviewer-01", generic)
 
-    def test_delivery_and_merge_owner_change_worker_instructions(self):
-        tmp, root = workspace(claude_md=CLAUDE + "- Settings: `cos.toml`\n")
-        self.addCleanup(tmp.cleanup)
-        (root / "cos.toml").write_text('[workflow]\ndelivery = "branch"\n')
-        branch = dp.compose(root, "2026-09-18", "Security audit")
-        self.assertIn("Report the branch, head sha and test result", branch)
-        self.assertNotIn("Code reaches main only through a pull request", branch)
-        (root / "cos.toml").write_text('[workflow]\nmerge_owner = "worker"\n')
-        pr = dp.compose(root, "2026-09-18", "Security audit")
-        self.assertIn("merge your pull request", pr)
-        self.assertNotIn("The merge is the user's alone", pr)
-        (root / "cos.toml").write_text('[workflow]\nmerge_owner = "approval"\napprover = "robin"\n')
-        approval = dp.compose(root, "2026-09-18", "Security audit")
-        self.assertIn("the coordinator merges it once the user approves it", approval)
-        self.assertIn("You never merge a pull request", approval)
+    def test_legacy_merge_modes_keep_the_engine_merge_gate(self):
+        for mode in ("user", "approval", "worker", "coordinator"):
+            text = dp.commit_rule(Workflow(merge_owner=mode), Path("."))
+            self.assertIn("The engine merges", text)
+            self.assertNotIn("user approves", text)
 
     def test_a_worker_answers_the_review_threads_it_fixes_and_never_resolves_them(self):
         tmp, root = workspace(claude_md=CLAUDE + "- Settings: `cos.toml`\n")
@@ -1316,6 +1181,13 @@ class StandingWorkerRulesTest(unittest.TestCase):
         self.settings.write_text('[workers]\nrules = "Keep tests."\n')
         with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
             self.compose()
+
+    def test_a_decision_is_taken_on_a_default_and_only_an_architectural_one_stops_the_run(self):
+        # A human_review stop spends the issue's failure budget (two park it), so a routine decision must not cause one.
+        body = self.compose()
+        self.assertNotIn("If a decision, missing access", body)
+        self.assertIn("sensible default", body)
+        self.assertIn("architectural decision", body)
 
     def test_rules_over_the_total_cap_refuse_dispatch(self):
         self.settings.write_text('[workers]\nrules = ' + json.dumps(['x' * 2000] * 9) + '\n')
