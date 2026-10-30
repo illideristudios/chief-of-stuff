@@ -125,7 +125,7 @@ class ReconcileTest(unittest.TestCase):
                          [reconcile.Dispatch(KEY, "implement", "builder", 2)])
         tired = [Segment("implement", n, outcome="failed") for n in range(1, 3)]
         self.assertEqual(self.plan(history=tired, decisions=self.intent("implement")),
-                         [reconcile.Escalate(KEY, "park: two failures on this issue")])
+                         [reconcile.Escalate(KEY, "park: two failures on this issue", stage="implement")])
 
     def test_a_write_intent_or_a_blocked_intent_holds_its_issue_at_every_stage(self):
         for stage in ("implement", "review", "merge"):
@@ -181,7 +181,7 @@ class ReconcileTest(unittest.TestCase):
                 start += timedelta(minutes=1)
                 history.append(Segment("review", round + 1, started_at=start, ended_at=start + timedelta(seconds=30)))
             self.assertEqual(self.plan(item, history, {"minor": 1}),
-                             [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open")])
+                             [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="implement")])
 
     def test_review_target_gets_initial_work_before_any_completed_review(self):
         self.p = replace(self.p, base=policy.Policy(retry_limit=0))
@@ -244,7 +244,7 @@ class ReconcileTest(unittest.TestCase):
             for order in (history, history[::-1]):
                 with self.subTest(stage=stage, history=order):
                     self.assertEqual(self.plan(replace(item, stage=stage), order, {"minor": 1}),
-                                     [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open")])
+                                     [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="implement")])
 
     def test_separate_fix_stage_loops_to_review_until_its_retry_limit(self):
         self.p.stages["fix"] = policy.Place("fix", "builder")
@@ -259,7 +259,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(item, [Segment("review", started_at=NOW - timedelta(hours=4),
                                            ended_at=NOW - timedelta(hours=3)),
                                    Segment("fix", 3), Segment("review", 3, started_at=NOW)],
-                                   {"minor": 1}), [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open")])
+                                   {"minor": 1}), [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="fix")])
 
     def test_shipped_workflow_reviews_all_three_fix_rounds_before_escalating(self):
         path = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"
@@ -278,7 +278,7 @@ class ReconcileTest(unittest.TestCase):
                 start += timedelta(minutes=1)
                 history.append(Segment("review", attempt + 1, started_at=start, ended_at=start + timedelta(seconds=30)))
         self.assertEqual(self.plan(item, history, {"minor": 1}),
-                         [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open")])
+                         [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="fix")])
         history.append(Segment("architect", started_at=history[-1].started_at, ended_at=NOW))
         self.assertEqual(self.plan(item, history, {}, architect_reviews={KEY: reconcile.ArchitectReview(
             HEAD, (f"Architect: APPROVED {HEAD}",))}), [reconcile.Merge(KEY)])
@@ -295,13 +295,13 @@ class ReconcileTest(unittest.TestCase):
                                         ended_at=NOW - timedelta(hours=3)),
                                 Segment("repair", attempts)] if attempts else []) + [Segment("review", started_at=NOW)]
                     expected = (reconcile.Dispatch(KEY, "repair", "builder", attempts + 1) if attempts < 3
-                                else reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open"))
+                                else reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="repair"))
                     self.assertEqual(self.plan(replace(Item(), stage=stage), history, {"minor": 1}), [expected])
         self.assertEqual(self.plan(replace(Item(), stage="repair"),
                                    [Segment("review", started_at=NOW - timedelta(hours=4),
                                             ended_at=NOW - timedelta(hours=3)),
                                     Segment("repair", 3, outcome="failed")]),
-                         [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open")])
+                         [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="repair")])
         self.assertEqual(self.plan(replace(Item(), stage="repair"), [Segment("repair", 3)]),
                          [reconcile.Review(KEY, 1)])
 
@@ -327,12 +327,18 @@ class ReconcileTest(unittest.TestCase):
                 self.assertEqual(actions, [reconcile.Merge(KEY)] if answer and answer.strip() else
                                  [reconcile.Wait(KEY, "decision pending")])
 
+    def test_limit_and_escalate_stage_is_part_of_equality(self):
+        self.assertNotEqual(reconcile.Limit(KEY, "quota", "reached quota limit", stage="review"),
+                            reconcile.Limit(KEY, "quota", "reached quota limit", stage="implement"))
+        self.assertNotEqual(reconcile.Escalate(KEY, "retry limit reached for implement", stage="implement"),
+                            reconcile.Escalate(KEY, "retry limit reached for implement", stage="review"))
+
     def test_measured_usage_at_a_configured_limit_stops_dispatch(self):
         for field, kind, value in (("spend_usd", "spend", 2), ("quota_percent", "quota", 80), ("time_minutes", "time", 30)):
             with self.subTest(field=field):
                 self.p = replace(policies(), base=replace(policies().base, **{field: value}))
                 self.assertEqual(self.plan(usage={KEY: {field: value}}),
-                                 [reconcile.Limit(KEY, kind, f"reached {kind} limit")])
+                                 [reconcile.Limit(KEY, kind, f"reached {kind} limit", stage="implement")])
                 self.p = replace(policies(), base=replace(policies().base, **{field: value}))
                 self.assertEqual(self.plan(usage={KEY: {field: value - 0.1}}),
                                  [reconcile.Dispatch(KEY, "implement", "builder", 1)])
@@ -343,7 +349,7 @@ class ReconcileTest(unittest.TestCase):
     def test_a_room_limit_overrides_an_unset_base(self):
         self.p.rooms["lab"] = policy.Place("lab", policy={"time_minutes": 5})
         self.assertEqual(self.plan(usage={KEY: {"time_minutes": 5}}, rooms={KEY: "lab"}),
-                         [reconcile.Limit(KEY, "time", "reached time limit")])
+                         [reconcile.Limit(KEY, "time", "reached time limit", stage="implement")])
         self.assertEqual(self.plan(usage={KEY: {"time_minutes": 5}}),
                          [reconcile.Dispatch(KEY, "implement", "builder", 1)])
 
@@ -799,7 +805,7 @@ class ReconcileTest(unittest.TestCase):
         item = replace(Item(), stage="review", human_review=True)
         history = [Segment("review", attempt=n, outcome="failed") for n in (1, 2)]
         self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": "review", "attempt": 2}}),
-                         [reconcile.Escalate(KEY, "park: two failures on this issue")])
+                         [reconcile.Escalate(KEY, "park: two failures on this issue", stage="review")])
         history = [Segment("review", attempt=n) for n in (1, 2)] + [Segment("review", attempt=3, outcome="failed")]
         self.assertEqual(self.plan(replace(item, human_review=False), history), [reconcile.Review(KEY, 4)])
 

@@ -409,7 +409,7 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
         self.assertEqual(self.db.item(KEY).stage, "review")
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "review", "attempt": 1})
-        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue")])
+        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue", stage="review")])
         self.assertEqual(self.launched, [])
 
     def test_unpublished_suite_hold_retries_without_accepting_the_failed_work(self):
@@ -701,7 +701,7 @@ class EngineTest(unittest.TestCase):
         self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
         self.addCleanup(self.db.engine.dispose)
         actions = self.run_pass()
-        self.assertEqual(actions, [reconcile.Escalate(KEY, "park: two failures on this issue")])
+        self.assertEqual(actions, [reconcile.Escalate(KEY, "park: two failures on this issue", stage="review")])
         self.assertEqual(len(self.launched), 2)
         self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "exhausted")
 
@@ -1361,7 +1361,7 @@ class EngineTest(unittest.TestCase):
         unknown = self.db.segments(KEY)[-1]
         self.assertEqual((unknown.runtime, unknown.model, unknown.effort), ("", "", ""))
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "implement", "attempt": 2})
-        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue")])
+        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue", stage="implement")])
 
     def assert_cursor_start_failure(self, *, review=False, verification=False, restore_error=False):
         worker = engine.worker
@@ -1496,7 +1496,7 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(self.forge, "add_human_hold", create=True, return_value="offline"):
             with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
                 self.run_pass()
-            self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue")])
+            self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue", stage="implement")])
         self.assertTrue(self.db.items()[0].human_review)
         self.assertTrue(self.db.resume(KEY)["park"]["research"]["attempts"])
         self.assertEqual(self.launched, [])
@@ -1514,7 +1514,7 @@ class EngineTest(unittest.TestCase):
         self.pending_release()
         self.db.record_segment(KEY, "implement", 2, NOW.isoformat(), NOW.isoformat(), "failed")
         self.forge.rows[0]["human_review"] = False
-        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue")])
+        self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "park: two failures on this issue", stage="implement")])
         self.assertEqual(self.launched, [])
         self.assertTrue(self.db.resume(KEY)["park"]["recommendation"])
 
@@ -2272,7 +2272,7 @@ class EngineTest(unittest.TestCase):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
         self.db.set_resume(KEY, {"quota_percent": 100,
                                  "quota": {"retry_at": (NOW + timedelta(hours=1)).isoformat()}})
-        self.assertEqual(self.run_pass(max_concurrency=0), [reconcile.Limit(KEY, "quota", "reached quota limit")])
+        self.assertEqual(self.run_pass(max_concurrency=0), [reconcile.Limit(KEY, "quota", "reached quota limit", stage="review")])
         self.assertEqual(self.db.resume(KEY)["interrupt"]["stage"], "review")
         self.now += timedelta(hours=1)
         self.run_pass(max_concurrency=0)
@@ -2613,7 +2613,7 @@ class EngineTest(unittest.TestCase):
         self.db.upsert_item(KEY, stage="implement")
         self.db.set_resume(KEY, {"quota_percent": 100,
                                  "quota": {"reset": "in two hours", "retry_at": (NOW + timedelta(hours=2)).isoformat()}})
-        self.assertEqual(self.run_pass(), [reconcile.Limit(KEY, "quota", "reached quota limit")])
+        self.assertEqual(self.run_pass(), [reconcile.Limit(KEY, "quota", "reached quota limit", stage="implement")])
         self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "limit")
         self.assertEqual(self.launched, [])
         self.now += timedelta(hours=2)
@@ -2647,7 +2647,6 @@ class EngineTest(unittest.TestCase):
         self.db.add_decision(KEY, "design", "Rework?", record={"reversed": True})
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, start, "builder", 2)])
         self.assertNotIn("decision_interrupts", self.db.resume(KEY))
-
 
 
 
@@ -2976,6 +2975,168 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
         self.assertEqual(datetime.fromisoformat(self.db.resume(KEY)["quota"]["retry_at"]),
                          self.now + timedelta(minutes=1))
+
+    def test_expired_quota_clears_its_hold_without_quota_percent(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        quota = {"retry_at": (NOW - timedelta(minutes=1)).isoformat()}
+        self.db.set_resume(KEY, {"quota": quota, "interrupt": {
+            "kind": "limit", "reason": "reached quota limit", "stage": "review"}})
+        self.run_pass(max_concurrency=0)
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.db.set_resume(KEY, {"quota": quota, "interrupt": {
+            "kind": "limit", "reason": "reached spend limit", "stage": "review"}})
+        self.run_pass(max_concurrency=0)
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["reason"], "reached spend limit")
+
+    def test_an_answered_ask_with_no_decision_row_can_be_reversed(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        ask_id = self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "ctx")
+        self.db.answer_ask(KEY, ask_id, "Keep")
+        model = mock.Mock()
+        self.run_pass(model=model)
+        model.assert_not_called()
+        row = self.db.decisions(KEY)[-1]
+        self.assertEqual((row.topic, row.question, row.answer, row.decided_by),
+                         ("ask", "Which parser?", "Keep", "user"))
+        self.assertEqual(row.record["decision"]["instance"], f"ask-{ask_id}")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "ask", "Which parser?")
+        self.db.add_decision(KEY, rev.topic, rev.question, rev.answer, rev.decided_by, rev.record)
+        self.assertTrue(decision_escalation.is_reversed(self.db.decisions(KEY)[-1]))
+        other = self.db.add_ask(KEY, "implement", 1, "s1", "Which backend?", ["Local", "Remote"], "")
+        with self.assertRaises(ValueError):
+            self.db.answer_ask(KEY, other, "Neither")
+        self.assertIsNone(self.db.asks(KEY)[-1].answer)
+
+    def test_a_human_answer_during_consult_wins_and_a_matching_one_adds_no_row(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        ask_id = self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "ctx")
+
+        def during(choice):
+            def call(request):
+                if call.n == 0:
+                    self.db.answer_ask(KEY, ask_id, choice)
+                vote, picked = pending.pop(0)
+                call.n += 1
+                return model_port.Reply("", {"vote": vote, "choice": picked, "reasoning": "because"}, "", 0.1, 1)
+            pending = [("adopt", "Split")] * 3
+            call.n = 0
+            return call
+
+        self.run_pass(model=during("Keep"))
+        self.assertEqual(self.db.asks(KEY)[0].answer, "Keep")
+        self.assertEqual((self.db.decisions(KEY)[-1].answer, self.db.decisions(KEY)[-1].decided_by), ("Keep", "user"))
+        # A fresh issue: the same human answer as the trio does not add a second row.
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        self.db.upsert_item(OTHER, stage="implement")
+        other_ask = self.db.add_ask(OTHER, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "ctx")
+
+        def same(request):
+            if same.n == 0:
+                self.db.answer_ask(OTHER, other_ask, "Split")
+            same.n += 1
+            return model_port.Reply("", {"vote": "adopt", "choice": "Split", "reasoning": "because"}, "", 0.1, 1)
+        same.n = 0
+        self.run_pass(model=same)
+        rows = [row for row in self.db.decisions(OTHER)]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(self.db.asks(OTHER)[0].answer, "Split")
+
+    def _finished_restart(self):
+        self._trio()
+        self.db.clock = lambda: self.now
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split", record={
+            "decision": {"options": ["Split", "Keep"], "context": "original", "instance": "parser"}})
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        self.db.add_decision(KEY, rev.topic, rev.question, rev.answer, rev.decided_by, rev.record)
+        self.run_pass()
+        self.finish("implement")
+
+    def test_completed_restart_without_a_model_still_asks(self):
+        self._finished_restart()
+        self.run_pass(model=None)
+        ask, = self.db.asks(KEY)
+        self.assertEqual((ask.question, ask.options), ("Which parser?", ["Split", "Keep"]))
+        self.assertEqual([stage for _, stage, _, _ in self.launched], ["implement"])
+
+    def test_quota_backoff_asks_once_about_a_finished_restart(self):
+        self._finished_restart()
+        data = dict(self.db.resume(KEY) or {})
+        data["quota"] = {"retry_at": (self.now + timedelta(hours=1)).isoformat()}
+        self.db.set_resume(KEY, data)
+        model = mock.Mock()
+        self.run_pass(model=model)
+        model.assert_not_called()
+        ask, = self.db.asks(KEY)
+        self.assertEqual((ask.question, ask.options), ("Which parser?", ["Split", "Keep"]))
+        self.assertEqual([stage for _, stage, _, _ in self.launched], ["implement"])
+        rows = len(self.db.decisions(KEY))
+        self.run_pass(model=model)
+        model.assert_not_called()
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+        self.assertEqual(len(self.db.decisions(KEY)), rows)
+
+    def _open_reversal_at_merge(self):
+        self._merge_gate()
+        self.p.stages["review"] = policy.Place("review", "critic")
+        self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split",
+                             record={"decision": {"options": ["Split", "Keep"]}})
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
+
+    def test_restart_claim_rejected_for_an_existing_segment_drops_the_route(self):
+        self._open_reversal_at_merge()
+        real = engine.reconcile.plan
+
+        def plan(*args, **kwargs):
+            actions = real(*args, **kwargs)
+            for action in actions:
+                if isinstance(action, reconcile.Dispatch):
+                    self.db.record_segment(KEY, action.stage, action.attempt, self.now.isoformat())
+            return actions
+
+        with mock.patch.object(engine.reconcile, "plan", side_effect=plan):
+            self.run_pass()
+        self.assertNotIn("pending_stage", self.db.resume(KEY) or {})
+        self.assertEqual(self.forge.writes, [])
+        self.assertEqual(self.forge.rows[0]["stage"], "merge")
+
+    def test_launch_failure_keeps_fail_start_pending_stage(self):
+        self._open_reversal_at_merge()
+        with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")), \
+             mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.run_pass()
+        pending = self.db.resume(KEY)["pending_stage"]
+        self.assertEqual(pending["stage"], "implement")
+        self.assertIn("restore_hold", pending)
+        self.assertNotIn("attempt", pending)
+
+    def test_trio_retry_keys_hide_context_and_a_user_answer_drops_them(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        context = "parser constraints that must not sit in the resume key"
+        ask_id = self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], context)
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "timeout"))
+        self.run_pass(model=failed)
+        token, = self.db.resume(KEY)["trio_retries"]
+        self.assertNotIn(context, token)
+        parts = json.loads(token)
+        self.assertEqual([len(parts[5]), len(parts[6])], [64, 64])
+        data = self.db.resume(KEY)
+        legacy = json.dumps([parts[0], parts[1], parts[2], parts[3], parts[4], context, ["Split", "Keep"]])
+        other = json.dumps(["ask", "Which backend?", "ask-9", "implement", 1, "a" * 64, "b" * 64])
+        data["trio_retries"][legacy] = {"failures": 1, "retry_at": (self.now + timedelta(hours=1)).isoformat()}
+        data["trio_retries"][other] = {"failures": 1, "retry_at": (self.now + timedelta(hours=1)).isoformat()}
+        self.db.set_resume(KEY, data)
+        self.db.answer_ask(KEY, ask_id, "Keep")
+        self.run_pass(model=failed)
+        left = self.db.resume(KEY).get("trio_retries") or {}
+        self.assertNotIn(token, left)
+        self.assertNotIn(legacy, left)
+        self.assertIn(other, left)
 
 
 class MainTest(unittest.TestCase):
