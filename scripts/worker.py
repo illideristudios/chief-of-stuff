@@ -345,7 +345,8 @@ def stage_defaults(root: Path, text: str, stage: str) -> Any:
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
            claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
-           clock: engine_clock.Clock = engine_clock.system, launcher: str = "cli") -> tuple[str, str]:
+           clock: engine_clock.Clock = engine_clock.system, launcher: str = "cli",
+           t3_providers: dict[str, str] | None = None) -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
@@ -479,8 +480,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     try:
         if launcher == "t3" and chosen.runtime not in t3_adapter.PROVIDERS:
             raise RuntimeError(f"T3 has no engine channel for {chosen.runtime}; refusing a local fallback")
-        if launcher == "t3" and claude_as_profile:
-            raise RuntimeError("T3 cannot map claude_as_profile to a provider instance; refusing the default account")
+        # An unmapped profile or a missing instance refuses here, never falling back to T3's default account.
+        provider = t3_adapter.provider_instance(claude_as_profile, t3_providers or {}) if launcher == "t3" else None
         request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                           cwd=str(tree), worker=True, agent=agent,
                           plugin_dirs=plugin_dirs)
@@ -499,7 +500,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             if via_t3:
                 host["launcher"] = "t3"
                 (run_dir / "branch_heads.json").write_text(json.dumps(host["branch_heads"]))
-                runner = t3_adapter.start(request, run_dir, env=env)
+                runner = t3_adapter.start(request, run_dir, env=env, provider=provider)
             else:
                 runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
         try:
@@ -608,6 +609,30 @@ def deliver_messages(store: Any, root: Path, clock: engine_clock.Clock = engine_
                 store.add_log(item.issue_key, f"worker message {message.id} not handed off: {exc}", clock().isoformat())
 
 
+def _deliver_t3(store: Any, root: Path, message: Any, record: dict, run_dir: Path, identity: tuple, fail: Callable) -> None:
+    """`t3 thread send` carries the message as the thread's next turn. T3's acceptance is the most it can show: it is
+    recorded as delivered with that caveat, never as read. A CLI refusal fails the message; a timeout leaves it sending,
+    unconfirmed and never sent twice."""
+    thread = record.get("thread_id")
+    if not thread:
+        return  # the thread id is recorded just after launch
+    seen = t3_adapter.observe(record)
+    if seen.error:
+        return  # an unreadable thread is unknown: wait, never fail or send blind
+    if not seen.alive:
+        return fail(f"the worker's T3 thread has ended; {NEVER_WRITTEN}")
+    claim = store.begin_worker_message_delivery(*identity)
+    try:
+        t3_adapter.send(run_dir, thread, message.body)
+    except RuntimeError as exc:
+        return fail(f"{exc}; {NEVER_WRITTEN}", claim_id=claim.delivery_id)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"t3 thread send is unconfirmed ({type(exc).__name__})") from None
+    store.ack_worker_message(*identity, delivery_id=claim.delivery_id,
+                             evidence=f"T3 accepted it as thread {thread}'s next turn; "
+                                      "this does not show the worker read it or acted on it")
+
+
 def _deliver(store: Any, root: Path, message: Any) -> None:
     identity = (message.id, message.issue_key, message.stage, message.attempt, message.session_id)
 
@@ -630,6 +655,8 @@ def _deliver(store: Any, root: Path, message: Any) -> None:
         runtime = record.get("runtime", "claude")
         if runtime != "claude":
             return fail(f"{runtime} workers cannot receive live messages; {NEVER_WRITTEN}")
+        if record.get("launcher") == "t3":
+            return _deliver_t3(store, root, message, record, run_dir, identity, fail)
         if not claude_adapter.messaging(run_dir):
             return fail(f"this worker was started without live messaging; {NEVER_WRITTEN}")
         with claude_adapter.mailbox_lock(run_dir):

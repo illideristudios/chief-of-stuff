@@ -564,6 +564,87 @@ class LandingTest(unittest.TestCase):
         self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
                                           [key])[key], (None, None))
 
+    def test_a_request_merging_between_the_two_reads_is_not_lost(self):
+        merged_21_gh = {"number": 21, "headRefOid": "old-head", "body": "Closes #3",
+                        "baseRefName": "main", "mergeCommit": {"oid": "squashed"}, "updatedAt": "2026-03-01"}
+        opened_22_gh = {"number": 22, "headRefOid": "new-head", "baseRefName": "main",
+                        "closingIssuesReferences": [{"number": 3, "repository": {
+                            "owner": {"login": "example"}, "name": "app"}}]}
+        merged_21_gl = {"iid": 21, "sha": "old-head", "description": "Closes #3",
+                        "target_branch": "main", "merge_commit_sha": "squashed"}
+        opened_22_gl = {"iid": 22, "sha": "new-head", "description": "Closes #3", "target_branch": "main"}
+
+        class BetweenReadsGh(FakeGh):
+            """After the first pr list, move #22 from open into merged."""
+
+            def __init__(self):
+                super().__init__(prs=[dict(opened_22_gh)], merged=[dict(merged_21_gh)])
+                self._listed = False
+
+            def __call__(self, args, input_text=None):
+                code, out, err = super().__call__(args, input_text)
+                if args[:2] == ["pr", "list"] and not self._listed:
+                    self._listed = True
+                    if self.prs:
+                        row = dict(self.prs[0])
+                        self.prs.clear()
+                        self.merged.insert(0, {**row, "body": "Closes #3", "mergeCommit": {"oid": "new-merge"},
+                                               "updatedAt": "2026-03-02"})
+                return code, out, err
+
+        for home in (GH, GL):
+            for pipeline_sha, base, expected in (
+                    ("squashed", "squashed", (False, False)),
+                    ("new-merge", "new-merge", (True, True))):
+                with self.subTest(home=home, pipeline_sha=pipeline_sha):
+                    key = forge.Forge(home).key(3)
+                    heads = {}
+                    if home == GH:
+                        adapter = forge.Forge(GH, gh=BetweenReadsGh())
+                        read = mock.patch.object(
+                            forge.Forge, "_pipeline_read",
+                            return_value={"merge_base_commit": {"sha": base}})
+                    else:
+                        adapter = forge.Forge(GL, token="test-token")
+                        race = {"listed": False}
+
+                        def move_after_first_list():
+                            if race["listed"]:
+                                return
+                            race["listed"] = True
+                            opened.clear()
+                            merged.insert(0, {**opened_22_gl, "merge_commit_sha": "new-merge"})
+
+                        opened = [dict(opened_22_gl)]
+                        merged = [dict(merged_21_gl)]
+
+                        def pipeline_read(path):
+                            if path.startswith("merge_requests?") and "opened" in path:
+                                move_after_first_list()
+                                return list(opened)
+                            if path.startswith("compare/") or path.startswith("repository/merge_base"):
+                                return {"id": base} if home == GL else {"merge_base_commit": {"sha": base}}
+                            return []
+
+                        def backlog_call(method, url, token, timeout):
+                            if method == "GET" and "merge_requests" in url and "state=opened" in url:
+                                rows = list(opened)
+                                move_after_first_list()
+                                return rows, {}, ""
+                            if method == "GET" and "merge_requests" in url and "state=merged" in url:
+                                move_after_first_list()
+                                return list(merged), {}, ""
+                            return [], {}, "unexpected"
+
+                        read = contextlib.ExitStack()
+                        read.enter_context(mock.patch.object(forge.Forge, "_pipeline_read", side_effect=pipeline_read))
+                        read.enter_context(mock.patch.object(forge.backlog, "_call", side_effect=backlog_call))
+                    with read:
+                        result = adapter.landings(
+                            forge.Pipeline(1, "main", pipeline_sha, "passed", ""), [key], heads=heads)
+                        self.assertEqual(result[key], expected)
+                        self.assertEqual(heads, {key: "new-head"} if expected[0] else {})
+
     def test_landing_comparison_errors_are_attached_to_the_affected_issue(self):
         merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "merge"}}
         adapter = forge.Forge(GH, gh=FakeGh(merged=[merged]))

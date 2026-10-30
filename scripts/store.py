@@ -1063,6 +1063,12 @@ class Store:
                 for row in rows
             )
 
+    def decision_graph_nodes(self) -> tuple[decision_graph.AncestorDecision, ...]:
+        """Detached snapshot of every decision-graph node, oldest first; read-only and never logs a grant."""
+        with self.session(write=False) as s:
+            nodes_by_id, _ = self._graph_snapshot(s)
+            return tuple(nodes_by_id[nid] for nid in sorted(nodes_by_id))
+
     @staticmethod
     def _serialize_leaf(leaf: decision_graph.DecisionLeaf) -> dict[str, Any]:
         return {
