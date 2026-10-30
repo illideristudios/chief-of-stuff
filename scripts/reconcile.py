@@ -167,7 +167,7 @@ class Ask:
 class Escalate:
     issue_key: str
     reason: str
-    stage: str = field(default="", compare=False)
+    stage: str = ""
 
 
 @dataclass(frozen=True)
@@ -175,7 +175,7 @@ class Limit:
     issue_key: str
     kind: str
     reason: str
-    stage: str = field(default="", compare=False)
+    stage: str = ""
 
 
 @dataclass(frozen=True)
