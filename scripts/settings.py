@@ -31,6 +31,7 @@ HERDR_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 RULES_MAX = 64  # rules; the rendered assignment budget is checked by dispatch_prompt.validate_worker_rules at engine start
 RULES_TOTAL_CAP = 6000  # sum of len(rule)
 CLAUDE_AS_PROFILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")  # claude-as's valid_profile_name
+T3_INSTANCE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*")  # a T3 provider instance id, passed as an argv value
 DEFAULT_WARNINGS = ("24h", "3h", "1h")
 POLICY = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"  # the shipped policy and workflow
 EFFORTS = ("high", "medium", "low")
@@ -110,6 +111,7 @@ class Workers:
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
     worker_launcher: str = "cli"  # how an engine worker starts (§13, #1178): a local CLI process, or a T3 thread
+    t3_providers: dict[str, str] = field(default_factory=dict)  # claude_as_profile -> T3 provider instance id (§13, #1178)
     require_green_tests: bool = False  # one-shot and engine done require known counts with passed > 0 and no failures, skips or xfails
     rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
     teardown: str = ""  # engine-only cleanup command; one-shot launchers do not run it
@@ -375,6 +377,11 @@ def _workers(table) -> Workers:
     worker_launcher = table.get("worker_launcher", "cli")
     if worker_launcher not in ("cli", "t3"):
         raise SettingsError("[workers] worker_launcher must be `cli` or `t3`")
+    providers = table.get("t3_providers", {})
+    if not isinstance(providers, dict) or not all(
+            CLAUDE_AS_PROFILE.fullmatch(k) and isinstance(v, str) and T3_INSTANCE.fullmatch(v) for k, v in providers.items()):
+        raise SettingsError("[workers.t3_providers] must map claude-as profile names to T3 provider instance ids "
+                            "(letters, digits, '_', '-', '.', ':', not starting with '-')")
     rules = table.get("rules", [])
     # Reject controls, invisible formatting (including bidi), and separators that can conceal instructions.
     if not isinstance(rules, list) or not all(
@@ -395,7 +402,7 @@ def _workers(table) -> Workers:
             raise SettingsError(f"[workers] {key} must be a nonempty, single-line command without control characters")
         commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, worker_launcher=worker_launcher, require_green_tests=green, rules=tuple(rules),
+                   claude_as_profile=profile, worker_launcher=worker_launcher, t3_providers=providers, require_green_tests=green, rules=tuple(rules),
                    stall=_stall(table.get("stall", {})), failure_limit=failure_limit, **commands)
 
 

@@ -46,6 +46,9 @@ if args[:2] == ["thread", "show"]:
                "activeRunId": None if finished else "run-1", "pendingRequestCount": 0}}
     print(json.dumps({{"thread": thread, "messages": [{{"role": "assistant", "text": "all done"}}]}})); done()
 if args[:2] == ["thread", "send"]:
+    state.setdefault("sent", []).append([args[2], sys.stdin.read()])
+    if state["sent"][-1][1] == "refuse":
+        print("No T3 Code thread matches", file=sys.stderr); done(1)
     done()
 done(2)
 '''
@@ -388,6 +391,56 @@ class T3AdapterTest(unittest.TestCase):
         self.assertIn("claude-haiku-5-5", start)
         self.assertIn(session, state["prompt"].split())  # the session id stands alone, as process identity needs
         self.assertEqual(json.loads((run_dir / "started.json").read_text())["session_id"], session)
+
+    def test_a_message_goes_to_thread_send_on_stdin_and_a_refusal_raises_with_the_clis_words(self):
+        run_dir = self.dir / "run"
+        run_dir.mkdir()
+        (run_dir / "t3.json").write_text(json.dumps({"cli": str(self.fake_cli()), "home": ""}))
+        os.environ["CHIEF_FAKE_T3"] = str(self.dir / "state.json")
+        self.addCleanup(os.environ.pop, "CHIEF_FAKE_T3")
+        t3_adapter.send(run_dir, "mcp:thread-1", "--also check the docs")  # a leading dash is text, not a flag
+        with self.assertRaisesRegex(RuntimeError, "No T3 Code thread matches"):
+            t3_adapter.send(run_dir, "mcp:gone", "refuse")
+        state = json.loads((self.dir / "state.json").read_text())
+        self.assertEqual(state["sent"], [["mcp:thread-1", "--also check the docs"], ["mcp:gone", "refuse"]])
+        self.assertEqual(state["calls"][0][:4], ["thread", "send", "mcp:thread-1", "-"])
+
+    def instances(self, *ids):
+        (self.dir / "userdata").mkdir(exist_ok=True)
+        (self.dir / "userdata" / "settings.json").write_text(json.dumps({"providerInstances": {i: {} for i in ids}}))
+
+    def test_a_claude_profile_selects_its_mapped_t3_provider_instance(self):
+        self.instances("claudeAgent", "cl2")
+        self.assertEqual(t3_adapter.provider_instance("", {}, self.dir), "claudeAgent")  # no profile: T3's default instance
+        self.assertEqual(t3_adapter.provider_instance("secondary", {"secondary": "cl2"}, self.dir), "cl2")
+
+    def test_an_unmapped_profile_or_a_missing_instance_is_a_clear_error_naming_what_exists(self):
+        self.instances("claudeAgent", "cl2")
+        with self.assertRaisesRegex(ShellError, "claude_as_profile 'other'.*t3_providers"):
+            t3_adapter.provider_instance("other", {"secondary": "cl2"}, self.dir)
+        with self.assertRaisesRegex(ShellError, "provider instance 'cl3' does not exist.*claudeAgent, cl2"):
+            t3_adapter.provider_instance("secondary", {"secondary": "cl3"}, self.dir)
+        # T3's settings file is not a documented interface: when it cannot be read the instance is left to T3 to refuse.
+        self.assertEqual(t3_adapter.provider_instance("secondary", {"secondary": "cl3"}, self.dir / "nowhere"), "cl3")
+
+    def test_start_passes_the_chosen_provider_instance_and_refuses_one_without_a_model(self):
+        tree, run_dir = self.git_tree(), self.dir / "run"
+        run_dir.mkdir()
+        (self.dir / "userdata").mkdir()
+        (self.dir / "userdata" / "environment-id").write_text("env-9")
+        guard = (str(guard_binding.guard_plugin_dir()),)
+        env = {**BINDING, "CHIEF_FAKE_T3": str(self.dir / "state.json")}
+        with self.assertRaisesRegex(ValueError, "needs a model"):  # `t3 thread start` ignores --provider without --model
+            t3_adapter.start(Request("x", session_id="s", cwd=str(tree), worker=True, plugin_dirs=guard), run_dir, env=env,
+                             cli=str(self.fake_cli()), home=self.dir, provider="cl2")
+        request = Request("x", model="claude-haiku-5-5", session_id="s", cwd=str(tree), worker=True, plugin_dirs=guard)
+        runner = t3_adapter.start(request, run_dir, env=env, cli=str(self.fake_cli()), home=self.dir, poll_s=0.05, provider="cl2")
+        deadline = time.monotonic() + 20
+        while not (run_dir / "exit.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        runner.wait(timeout=5)
+        start = next(call for call in json.loads((self.dir / "state.json").read_text())["calls"] if call[:2] == ["thread", "start"])
+        self.assertEqual(start[start.index("--provider") + 1], "cl2")
 
 
 if __name__ == "__main__":

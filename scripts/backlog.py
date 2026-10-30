@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
@@ -28,6 +29,8 @@ from backlog_ref import (  # noqa: F401
 
 TIMEOUT = 5.0
 GH_TIMEOUT = 60.0  # a stalled gh must not hold a caller (the board POST, the engine pass) forever
+RETRY_BACKOFF = (0.5, 1.5)  # seconds between the extra attempts of one timed-out read
+_sleep = time.sleep
 PER_PAGE = 100
 MAX_PAGES = 50
 OPEN, CLOSED = "opened", "closed"
@@ -164,7 +167,25 @@ def token(cfg: Backlog, environ: dict | None = None, keychain=keychain_token, gl
 
 
 def _call(method: str, url: str, private_token: str, timeout: float,
-          payload: dict | None = None) -> tuple[object, dict, str]:
+          payload: dict | None = None, *, retries: int | None = None) -> tuple[object, dict, str]:
+    """One request, retried when it times out. Returns (parsed body, headers, error) and raises nothing.
+
+    A GET takes `len(RETRY_BACKOFF)` extra attempts. Anything else is one attempt unless the caller passes `retries`
+    (a GraphQL query reads through POST). A write is not retried: it may have landed.
+    """
+    extra = (len(RETRY_BACKOFF) if method == "GET" else 0) if retries is None else retries
+    got = _call_once(method, url, private_token, timeout, payload)
+    for attempt in range(extra):
+        # shortcut: retry is timeout-only; widen it when a 5xx shows the same stuck-ready symptom.
+        if "timed out" not in got[2]:
+            return got
+        _sleep(RETRY_BACKOFF[attempt])
+        got = _call_once(method, url, private_token, timeout, payload)
+    return got
+
+
+def _call_once(method: str, url: str, private_token: str, timeout: float,
+               payload: dict | None = None) -> tuple[object, dict, str]:
     """One request. Returns (parsed body, headers, error) and raises nothing the caller has to catch."""
     headers = {"PRIVATE-TOKEN": private_token, "User-Agent": "chief-of-stuff/backlog",
                "Accept": "application/json"}

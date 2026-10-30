@@ -3,11 +3,12 @@
 import io
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 from unittest.mock import patch
@@ -16,12 +17,23 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
+import performance_report  # noqa: E402
 import shell_setup  # noqa: E402
 import supervisor  # noqa: E402
 
+def _help_sections(help_text: str) -> dict[str, str]:
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    sections = {"purpose": body[:headings[0].start()].strip() if headings else body.strip()}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    return sections
+
 
 # A per-command help issue opts in here after bringing its parser up to the standard.
-ENFORCED = frozenset({"docs", "init"})
+ENFORCED = frozenset({"docs", "init", "performance"})
 
 
 def missing_sections(help_text: str, name: str) -> list[str]:
@@ -609,6 +621,175 @@ class InitHelpTest(unittest.TestCase):
         self.assertEqual(preview.returncode, 0, preview.stderr)
         self.assertIn("would create", preview.stdout)
         self.assertEqual(list(workspace.iterdir()), [])
+
+
+class PerformanceHelpTest(unittest.TestCase):
+    """#850: `chief-of-stuff performance --help` is the reference an agent discovers and trusts."""
+
+    def run_performance(self, *args):
+        env = dict(os.environ, COLUMNS="100", NO_COLOR="1", PYTHON_COLORS="0", PYTHONHASHSEED="0")
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "performance", *args],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_performance_help_meets_shared_standard_and_covers_performance_contract(self):
+        self.assertIn("performance", ENFORCED)
+        done = self.run_performance("--help")
+        short = self.run_performance("-h")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual((short.returncode, short.stdout, short.stderr), (0, done.stdout, ""))
+        self.assertEqual(missing_sections(done.stdout, "performance"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = performance_report.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = performance_report.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            if action.option_strings:
+                self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        help_text = " ".join(done.stdout.split())
+        for phrase in (
+            "chief-of-stuff board",
+            "chief-of-stuff pages",
+            "chief-of-stuff tracker",
+            "chief-of-stuff health",
+            "chief-of-stuff limits",
+            "stage segments",
+            "store.db",
+            "interactive sessions",
+            "one-shot",
+            "not TOON",
+            "not JSON",
+            "period",
+            "runtime",
+            "model",
+            "effort",
+            "agent_type",
+            "runs",
+            "completed",
+            "human_review",
+            "relaunched",
+            "median_minutes",
+            "Monday",
+            "lower middle",
+            "performance:",
+            "migrate.lock",
+            "engine.lock",
+            "No preview",
+            "--dry-run",
+            "--commit",
+            "maple-workspace",
+            "--raw",
+            "attempt records",
+        ):
+            self.assertIn(phrase, help_text, phrase)
+
+        examples = [line.strip() for line in sections["examples"].splitlines()
+                    if line.strip().startswith("chief-of-stuff performance")]
+        self.assertEqual(len(examples), 4, examples)
+        for example in examples:
+            tokens = shlex.split(example)
+            self.assertEqual(tokens[:2], ["chief-of-stuff", "performance"])
+            parser.parse_args(tokens[2:])
+
+    def test_help_does_not_read_config_or_open_store(self):
+        with mock.patch("performance_report.read_config") as read_cfg, \
+                mock.patch("performance_report.store_access.migrated_store") as migrated, \
+                mock.patch("performance_report.table") as tbl, \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                performance_report.main(["--help"])
+        self.assertEqual(raised.exception.code, 0)
+        read_cfg.assert_not_called()
+        migrated.assert_not_called()
+        tbl.assert_not_called()
+
+    def test_parser_fault_exits_two_without_store_access(self):
+        for bad_argv in ([], ["--since"], ["--by", "month"], ["--unknown"]):
+            with self.subTest(argv=bad_argv):
+                err = io.StringIO()
+                with mock.patch("performance_report.read_config") as read_cfg, \
+                        mock.patch("performance_report.store_access.migrated_store") as migrated, \
+                        mock.patch("performance_report.table") as tbl, \
+                        redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as raised:
+                        performance_report.main(bad_argv)
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("usage: chief-of-stuff performance", err.getvalue())
+                read_cfg.assert_not_called()
+                migrated.assert_not_called()
+                tbl.assert_not_called()
+
+    def test_invalid_date_and_missing_store_exit_two_on_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(
+                "# Workspace\n\n## Coordinator\n\n- User: Robin\n- Daily log dir: `daily/`\n"
+                "- Tracker: `daily/<date>-tracker.md`\n- Timezone: UTC\n")
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = performance_report.main(["--root", str(root), "--since", "not-a-date"])
+            self.assertEqual(code, 2)
+            self.assertEqual(out.getvalue(), "")
+            self.assertTrue(err.getvalue().startswith("performance: "), err.getvalue())
+
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = performance_report.main(["--root", str(root), "--since", "2026-10-01"])
+            self.assertEqual(code, 2)
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn(f"performance: no store at {root.resolve() / 'store.db'}", err.getvalue())
+
+    def test_printed_table_columns_and_empty_key_dash_match_documented_output(self):
+        import store
+
+        help_out = io.StringIO()
+        with redirect_stdout(help_out):
+            with self.assertRaises(SystemExit):
+                performance_report.main(["--help"])
+        output_section = _help_sections(help_out.getvalue())["output"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(
+                "# Workspace\n\n## Coordinator\n\n- User: Robin\n- Daily log dir: `daily/`\n"
+                "- Tracker: `daily/<date>-tracker.md`\n- Timezone: UTC\n")
+            store.migrate(root / "store.db")
+            db = store.Store(root / "store.db")
+            try:
+                db.upsert_item("github:example/repo#1", title="sample")
+                db.record_segment(
+                    "github:example/repo#1", "implement", 1,
+                    started_at="2026-10-08T09:00:00+00:00",
+                    ended_at="2026-10-08T09:15:00+00:00",
+                    outcome="done", runtime="claude", model="sonnet", effort="", agent_type="",
+                )
+            finally:
+                db.engine.dispose()
+
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = performance_report.main([
+                    "--root", str(root), "--since", "2026-10-08", "--until", "2026-10-08", "--by", "week",
+                ])
+        self.assertEqual(code, 0)
+        self.assertEqual(err.getvalue(), "")
+        lines = [line.split() for line in out.getvalue().strip().splitlines()]
+        self.assertEqual(len(lines), 2, lines)
+        headers, row = lines
+        for col in headers:
+            self.assertIn(f"- {col}:", output_section, col)
+        # Thursday 2026-10-08 buckets to Monday 2026-10-05; empty effort, agent_type and workflow print as "-".
+        self.assertEqual(row, ["2026-10-05", "claude", "sonnet", "-", "-", "-", "1", "1", "0", "0", "15"])
 
 
 if __name__ == "__main__":
