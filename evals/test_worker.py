@@ -83,6 +83,43 @@ class WorkerTest(unittest.TestCase):
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         return self.db.segments(KEY)[0]
 
+    def test_collect_captures_live_and_ended_attempts_without_the_source_after_restart(self):
+        run = self.launched()
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        (run / "command.json").write_text(json.dumps({"session_id": record["session_id"], "cwd": record["tree"],
+            "env": {"CLAUDE_CONFIG_DIR": str(self.root / "profile")}}))
+        path = claude_adapter.transcript_path(record)
+        path.parent.mkdir(parents=True)
+        line = json.dumps({"type": "assistant", "sessionId": record["session_id"],
+                           "message": {"content": "A generic reply"}}) + "\n"
+        path.write_text(line)
+        with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            worker.collect(self.db, self.root, transcript_max_bytes=2048)
+        got = self.db.transcript(KEY, "implement", 1)
+        self.assertEqual(got["events"][0]["kind"], "worker")
+        self.assertEqual(got["max_bytes"], 2048)
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+        with path.open("a") as f:
+            f.write(line)
+        worker.collect(self.db, self.root)
+        self.assertEqual(len(self.db.transcript(KEY, "implement", 1)["events"]), 2)
+        path.unlink()
+        worker.collect(self.db, self.root)
+        self.assertIn("unavailable", self.db.transcript(KEY, "implement", 1)["last_gap"])
+
+    def test_t3_and_other_runtimes_never_read_provider_local_transcripts(self):
+        segment = SimpleNamespace(issue_key=KEY, stage="implement", attempt=1, ended_at=None)
+        with mock.patch.object(claude_adapter, "transcript_path") as read:
+            for record in ({"launcher": "t3", "runtime": "claude"}, {"runtime": "codex"}):
+                worker._capture_transcript(self.db, segment, record, 1024)
+        read.assert_not_called()
+
+    def test_invalid_run_directory_marks_a_gap_without_interrupting_collection(self):
+        segment = SimpleNamespace(issue_key=KEY, stage="implement", attempt=1, ended_at=None)
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        worker._capture_transcript(self.db, segment, {"session_id": "generic-session", "run_dir": None}, 1024)
+        self.assertIn("unverified", self.db.transcript(KEY, "implement", 1)["last_gap"])
+
     def test_assignment_has_fixed_header_row_issue_job_and_persona_rules(self):
         persona = SimpleNamespace(role="builder", rules=("Tests first.",))
         row = self.db.items()[0]

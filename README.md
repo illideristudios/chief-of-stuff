@@ -82,8 +82,13 @@ herdr_session = "chief-of-stuff" # herdr only: the dedicated session workers run
 claude_as_profile = "secondary" # optional: Claude workers run as `claude-as run secondary`
 worker_launcher = "t3" # optional: engine Claude workers start as T3 threads; "cli" (the default) is a local process
 require_green_tests = true # optional: hold one-shot and engine completions with unknown or non-green suite counts
+transcript_max_bytes = 1048576 # optional: retained transcript event bytes per engine attempt; default 1 MiB
 rules = ["Never skip or weaken tests."] # optional: standing rules for every one-shot and engine worker
 ```
+
+The engine retains Claude CLI worker transcripts in its ORM store, keyed by issue, stage and attempt. Ordered worker, tool, user, error and gap events remain readable after the worker exits, the engine restarts or the original log disappears. `Store.transcript(issue_key, stage, attempt)` reads that retained history without accessing the runtime or its files; it returns `None` before capture. T3 thread transcripts and other runtimes are not captured yet.
+
+`transcript_max_bytes` must be a positive integer and is pinned on the attempt's first capture. It caps the serialized event array, including JSON escaping and separators; fixed-size identity, cursor and loss metadata are additional. Once full, capture keeps the prefix and drops all subsequent normalized events, including tools and gap events, counting them in `dropped_events`. A source record larger than the cap is skipped without decoding and counted separately in `dropped_records`, since its event count is unknown. `capped`, `gap_count` and `last_gap` remain visible after the buffer fills. Partial records wait for completion; a partial tail at exit is marked as a gap. Missing files are marked and retried. Replacement, truncation, rewritten history or changed session identity halts capture with a gap, preserving the original attempt's history.
 
 The engine's stall threshold is configurable:
 

@@ -204,6 +204,14 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(st.load(self.root, self.write(text)).workers.rules, ())
 
+    def test_worker_transcript_cap_is_a_positive_integer(self):
+        self.assertEqual(st.load(self.root, None).workers.transcript_max_bytes, 1024 * 1024)
+        got = st.load(self.root, self.write('[workers]\ntranscript_max_bytes = 4096\n'))
+        self.assertEqual(got.workers.transcript_max_bytes, 4096)
+        for value in ('0', '-1', 'true', '1.5', '"1024"'):
+            with self.subTest(value=value), self.assertRaisesRegex(st.SettingsError, "transcript_max_bytes"):
+                st.load(self.root, self.write(f'[workers]\ntranscript_max_bytes = {value}\n'))
+
     def test_worker_rules_preserve_wording_and_order(self):
         for prefix in ("", '[notify]\nadapter = "off"\n'):
             with self.subTest(prefix=prefix):

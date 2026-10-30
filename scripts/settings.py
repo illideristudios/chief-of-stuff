@@ -116,6 +116,7 @@ class Workers:
     teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
     stall: Stall = field(default_factory=Stall)
     failure_limit: int = 2
+    transcript_max_bytes: int = 1024 * 1024  # retained event JSON bytes per attempt; the first capture pins it
 
 
 @dataclass(frozen=True)
@@ -375,6 +376,9 @@ def _workers(table) -> Workers:
     worker_launcher = table.get("worker_launcher", "cli")
     if worker_launcher not in ("cli", "t3"):
         raise SettingsError("[workers] worker_launcher must be `cli` or `t3`")
+    transcript_max_bytes = table.get("transcript_max_bytes", 1024 * 1024)
+    if type(transcript_max_bytes) is not int or transcript_max_bytes <= 0:
+        raise SettingsError("[workers] transcript_max_bytes must be a positive integer")
     rules = table.get("rules", [])
     # Reject controls, invisible formatting (including bidi), and separators that can conceal instructions.
     if not isinstance(rules, list) or not all(
@@ -396,7 +400,8 @@ def _workers(table) -> Workers:
         commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
                    claude_as_profile=profile, worker_launcher=worker_launcher, require_green_tests=green, rules=tuple(rules),
-                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit, **commands)
+                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit,
+                   transcript_max_bytes=transcript_max_bytes, **commands)
 
 
 def _repos(table) -> dict[str, str]:
