@@ -27,7 +27,7 @@ import reconcile
 import runtimes
 import supervisor
 import t3_adapter
-from settings import ModelEntry, load as load_settings
+from settings import ModelEntry, Settings, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import RETRYABLE, Failure, Reply, Request, retry_at
@@ -349,10 +349,14 @@ def stage_defaults(root: Path, text: str, stage: str) -> Any:
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
+           claude_as_profile: str | None = None, config: Settings | None = None,
            clock: engine_clock.Clock = engine_clock.system, launcher: str = "cli",
            t3_providers: dict[str, str] | None = None) -> tuple[str, str]:
-    """The Launch port: verify a live start or adopt durable completion before slots records it."""
+    """The Launch port: verify a live start or adopt durable completion before slots records it.
+
+    `config` is the caller's settings snapshot (rotation, rules, suite policy, teardown, T3 providers); it is loaded
+    when omitted. An explicit `claude_as_profile` or `t3_providers` overrides the snapshot's (empty profile selects
+    the default login)."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
@@ -371,8 +375,11 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         used = (model, effort) if model else (actor.model, actor.effort or "")
         return (*used, runtime) if runtime not in ("", "claude") else used
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
-    loaded = load_settings(root, settings_path(text))
-    defaults = loaded.stages.get(stage)
+    if config is None:
+        config = load_settings(root, settings_path(text))
+    if claude_as_profile is None:
+        claude_as_profile = config.workers.claude_as_profile
+    defaults = config.stages.get(stage)
     agent = agent_for(text, actor, defaults)
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
@@ -382,8 +389,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if stage != "review" and (changes := data.get("architect_changes")):
         body += f"\n\n## Architect findings for {changes['head']}\n\n{changes['reply']}\n"
     assignment = dispatch_prompt.compose_issue(row, got.issue.title, body, stage, actor, root=root,
-                                               skills=defaults.skills if defaults else (), rules=rules,
-                                               require_green=require_green)
+                                               skills=defaults.skills if defaults else (), rules=config.workers.rules,
+                                               require_green=config.workers.require_green_tests)
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
@@ -483,16 +490,16 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     def available(entry: ModelEntry) -> bool:
         if entry.runtime not in capacity:
             account = claude_as_profile if entry.runtime == "claude" else ""
-            capacity[entry.runtime] = below_limit(entry.runtime, account, now, loaded.limits.warn_at)
+            capacity[entry.runtime] = below_limit(entry.runtime, account, now, config.limits.warn_at)
         return capacity[entry.runtime]
 
     workflow = policies.workflow_for(data.get("issue_type") or getattr(row, "issue_type", None)).name
-    rotation = loaded.models.get(TASK_CLASS.get(stage, stage), ())
+    rotation = config.models.get(TASK_CLASS.get(stage, stage), ())
     if launcher == "t3" and rotation and not any(entry.runtime in t3_adapter.PROVIDERS for entry in rotation):
         raise RuntimeError("T3 has no engine channel for any runtime in this rotation")
     try:
-        chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
-                        how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
+        chosen = _model(store, issue_key, stage, data, actor, config.models, now.isoformat(), launchable,
+                        how=config.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
                         attempt=attempt, available=available, workflow=workflow)
     except RuntimeError:
         if clock_refusals and clock_refusals[0] is not None:
@@ -502,7 +509,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         if launcher == "t3" and chosen.runtime not in t3_adapter.PROVIDERS:
             raise RuntimeError(f"T3 has no engine channel for {chosen.runtime}; refusing a local fallback")
         # An unmapped profile or a missing instance refuses here, never falling back to T3's default account.
-        provider = t3_adapter.provider_instance(claude_as_profile, t3_providers or {}) if launcher == "t3" else None
+        provider = t3_adapter.provider_instance(claude_as_profile, (config.workers.t3_providers if t3_providers is None else t3_providers) or {}) if launcher == "t3" else None
         request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                           cwd=str(tree), worker=True, agent=agent,
                           plugin_dirs=plugin_dirs)
@@ -589,7 +596,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                         pass
                 host_adapter.cleanup(host)
                 # The process is already up. collect() never sees a segment slots.claim drops on this failure.
-                for error in teardown(root, tree, tree.name, teardown_command):
+                for error in teardown(root, tree, tree.name, config.workers.teardown):
                     try:
                         store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
                     except Exception:
