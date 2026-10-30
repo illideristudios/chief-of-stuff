@@ -6,11 +6,14 @@ import contextlib
 from datetime import datetime
 from html import escape
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
@@ -23,9 +26,11 @@ import decision_graph as dg  # noqa: E402
 import decision_graph_page as dgp  # noqa: E402
 import decision_page as dp  # noqa: E402
 from fragment import issue_href  # noqa: E402
+import pages as pg  # noqa: E402
 import store  # noqa: E402
 import task_forge  # noqa: E402
 from test_page_theme import assert_carries_the_theme  # noqa: E402
+from test_pages import LANES, TRACKER, ZONE as PAGES_ZONE, get, post  # noqa: E402
 
 ZONE = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 10, 29, 14, 0, tzinfo=ZONE)
@@ -246,6 +251,215 @@ class DecisionGraphPresenterTest(unittest.TestCase):
     def test_existing_decisions_index_links_to_decision_graph(self) -> None:
         html, _ = dp.index(self.pages, dp.Context(NOW), "2026-10-29", db=self.page_data())
         self.assertIn('href="/decisions/graph"', html)
+
+
+class DecisionGraphHttpServerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        self.root = Path(parent.name).resolve() / "ws"
+        self.root.mkdir()
+        self.day = datetime.now(ZoneInfo(PAGES_ZONE)).date().isoformat()
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: the owner\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            f"- Timezone: {PAGES_ZONE}\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n"
+            "- Settings: `cos.toml`\n",
+            encoding="utf-8",
+        )
+        (self.root / "daily").mkdir()
+        (self.root / "daily" / f"{self.day}-tracker.md").write_text(
+            TRACKER.format(day=self.day, task="Security audit"),
+            encoding="utf-8",
+        )
+        self.pages = self.root / "pages"
+        self.pages.mkdir()
+        (self.root / "cos.toml").write_text(LANES, encoding="utf-8")
+        self.refreshed = threading.Event()
+        self.server = pg.make_server(self.pages, 0, root=self.root, refresh=self._fake_refresh, every=3600)
+        self.port = self.server.server_address[1]
+        self.origin = f"http://127.0.0.1:{self.port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.assertTrue(self.refreshed.wait(10))
+
+    def _fake_refresh(self, root: Path, now: datetime):
+        import board_sources
+        try:
+            return board_sources.refresh(root, now)
+        finally:
+            self.refreshed.set()
+
+    def _open_store(self) -> store.Store:
+        db_path = self.root / "store.db"
+        store.migrate(db_path)
+        return store.Store(db_path)
+
+    def test_decisions_links_to_graph_and_empty_workspace_serves_empty_graph(self) -> None:
+        decisions = get(self.port, "/decisions")
+        self.assertEqual(decisions.status, 200)
+        self.assertIn('href="/decisions/graph"', decisions.body.decode())
+
+        empty_graph = get(self.port, "/decisions/graph")
+        self.assertEqual(empty_graph.status, 200)
+        body = empty_graph.body.decode()
+        self.assertIn("0 current leaves", body)
+        self.assertIn(">none<", body)
+        self.assertFalse((self.root / "store.db").exists())
+
+        # Without a store, any node id returns the same 404 refusal page as /decisions/<id>.
+        missing = get(self.port, "/decisions/graph/1")
+        neighbour = get(self.port, "/decisions/1")
+        self.assertEqual(missing.status, 404)
+        self.assertEqual(missing.body, neighbour.body)
+
+    def test_traverse_up_and_down_from_store_without_grants_writes_or_history_tool(self) -> None:
+        db = self._open_store()
+        try:
+            db.upsert_item("github:example/repo#42", title="Engine task", stage="implement", forge_state="open")
+            db.add_decision("github:example/repo#42", "scope", "Pending ask for nav badge")
+            ancestor = db.add_graph_decision(
+                "Keep decision records in markdown files.",
+                "Bootstrapped before the SQLite store.",
+                topic="decisions",
+                decided_by="owner",
+            )
+            leaf = db.add_graph_decision(
+                "Record decisions as a provenance DAG in SQLite.",
+                "Workers receive only current leaves; the owner walks the full graph.",
+                parent_ids=(ancestor.id,),
+                topic="decisions",
+                decided_by="owner",
+                issue_key="github:example/repo#42",
+                rejected_alternatives=(
+                    dg.RejectedAlternative(
+                        approach="Expose all rejected alternatives in every worker prompt",
+                        reason="Wastes context and anchors workers on dead designs.",
+                    ),
+                ),
+            )
+        finally:
+            db.engine.dispose()
+
+        import decisions_cli
+        with (
+            mock.patch.object(store.Store, "submit_history_request", side_effect=AssertionError("history tool called")),
+            mock.patch.object(store.Store, "fulfill_history_request", side_effect=AssertionError("history grant called")),
+            mock.patch.object(decisions_cli, "main", side_effect=AssertionError("decisions cli called")),
+        ):
+            graph_resp = get(self.port, "/decisions/graph")
+            self.assertEqual(graph_resp.status, 200)
+            graph_html = graph_resp.body.decode()
+            self.assertIn("1 current leaf", graph_html)
+            self.assertIn("Record decisions as a provenance DAG in SQLite.", graph_html)
+            self.assertIn("Workers receive only current leaves; the owner walks the full graph.", graph_html)
+            self.assertIn(f'href="/decisions/graph/{leaf.id}"', graph_html)
+            self.assertNotIn("Keep decision records in markdown files.", graph_html)
+            # Carries shared navigation counts from the store.
+            self.assertIn('title="1 pending">1', graph_html)
+
+            # Walk to the leaf, then up to its parent, then see the link back down to the child.
+            leaf_resp = get(self.port, f"/decisions/graph/{leaf.id}")
+            self.assertEqual(leaf_resp.status, 200)
+            leaf_html = leaf_resp.body.decode()
+            self.assertIn(f'href="/decisions/graph/{ancestor.id}"', leaf_html)
+            self.assertNotIn("Expose all rejected alternatives in every worker prompt", leaf_html)
+
+            head_resp = get(self.port, f"/decisions/graph/{leaf.id}", method="HEAD")
+            self.assertEqual(head_resp.status, 200)
+            self.assertEqual(int(head_resp.getheader("Content-Length")), len(leaf_resp.body))
+
+            parent_resp = get(self.port, f"/decisions/graph/{ancestor.id}")
+            self.assertEqual(parent_resp.status, 200)
+            parent_html = parent_resp.body.decode()
+            self.assertIn("Keep decision records in markdown files.", parent_html)
+            self.assertIn("Bootstrapped before the SQLite store.", parent_html)
+            self.assertIn(f'href="/decisions/graph/{leaf.id}"', parent_html)
+            self.assertIn("Expose all rejected alternatives in every worker prompt", parent_html)
+            self.assertIn("Wastes context and anchors workers on dead designs.", parent_html)
+
+        # Updating the store re-renders /decisions/graph on the next request.
+        db = self._open_store()
+        try:
+            newer = db.add_graph_decision(
+                "Add a read-only /decisions/graph view on the page server.",
+                "Lets the owner walk parents, children, and rejected alternatives.",
+                parent_ids=(leaf.id,),
+                topic="pages",
+                decided_by="owner",
+            )
+            self.assertEqual(db.pending_history_requests(), [])
+            self.assertEqual(db.history_grants(), [])
+            self.assertEqual(db.engine_log(), [])
+        finally:
+            db.engine.dispose()
+
+        refreshed = get(self.port, "/decisions/graph").body.decode()
+        self.assertIn(f'href="/decisions/graph/{newer.id}"', refreshed)
+        self.assertIn("Add a read-only /decisions/graph view on the page server.", refreshed)
+        self.assertNotIn("Record decisions as a provenance DAG in SQLite.", refreshed)
+
+        with contextlib.closing(sqlite3.connect(self.root / "store.db")) as conn:
+            req_count = conn.execute("SELECT COUNT(*) FROM decision_history_request").fetchone()[0]
+            grant_count = conn.execute("SELECT COUNT(*) FROM decision_history_grant").fetchone()[0]
+        self.assertEqual((req_count, grant_count), (0, 0))
+
+        # Rendered HTML files are routes only (404 by filename, omitted from /all), and POST is refused.
+        for direct in ("/decisions-graph.html", f"/decisions-graph-{leaf.id}.html", "/Decisions-Graph.html"):
+            with self.subTest(direct=direct):
+                self.assertEqual(get(self.port, direct).status, 404)
+        listing = get(self.port, "/all").body.decode()
+        self.assertNotIn("decisions-graph", listing)
+
+        (self.pages / "decision-graph.json").write_text('{"bad": true}', encoding="utf-8")
+        for target in ("/decisions/graph", f"/decisions/graph/{leaf.id}"):
+            with self.subTest(post_target=target):
+                resp = post(self.port, target, b"key=A&words=attempt", origin=self.origin)
+                self.assertEqual(resp.status, 405)
+
+    def test_unknown_and_invalid_graph_ids_match_neighbour_not_found_page(self) -> None:
+        db = self._open_store()
+        try:
+            node = db.add_graph_decision("Single root decision.", "Initial reason.")
+        finally:
+            db.engine.dispose()
+
+        neighbour_404 = get(self.port, "/decisions/999")
+        self.assertEqual(neighbour_404.status, 404)
+        self.assertIn(b"No such decision. Return to the decisions list or board.", neighbour_404.body)
+
+        for bad in ("/decisions/graph/999", "/decisions/graph/0", "/decisions/graph/01",
+                    "/decisions/graph/nope", f"/decisions/graph/{node.id}/extra"):
+            with self.subTest(bad=bad):
+                resp = get(self.port, bad)
+                self.assertEqual(resp.status, 404)
+                self.assertEqual(resp.body, neighbour_404.body)
+
+    def test_cycle_in_store_edges_does_not_hang_http_routes(self) -> None:
+        db = self._open_store()
+        try:
+            n1 = db.add_graph_decision("Cycle node one.", "First reason.")
+            n2 = db.add_graph_decision("Cycle node two.", "Second reason.", parent_ids=(n1.id,))
+            n3 = db.add_graph_decision("Leaf pointing into cycle.", "Third reason.", parent_ids=(n2.id,))
+        finally:
+            db.engine.dispose()
+
+        with contextlib.closing(sqlite3.connect(self.root / "store.db")) as conn:
+            conn.execute(
+                "INSERT INTO decision_graph_edge (child_id, parent_id, position) VALUES (?, ?, 0)",
+                (n1.id, n2.id),
+            )
+            conn.commit()
+
+        idx = get(self.port, "/decisions/graph")
+        self.assertEqual(idx.status, 200)
+        self.assertIn("Leaf pointing into cycle.", idx.body.decode())
+
+        for nid in (n1.id, n2.id, n3.id):
+            with self.subTest(node_id=nid):
+                resp = get(self.port, f"/decisions/graph/{nid}")
+                self.assertEqual(resp.status, 200)
+        self.assertTrue(re.search(rf'href="/decisions/graph/{n2.id}"', get(self.port, f"/decisions/graph/{n1.id}").body.decode()))
 
 
 if __name__ == "__main__":
