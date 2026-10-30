@@ -9,6 +9,7 @@ and writes a stable, tiny launcher to /usr/local/bin. Later installs only move t
 from __future__ import annotations
 
 import argparse
+import json
 import ast
 import os
 import subprocess
@@ -70,6 +71,21 @@ COMMAND_REGISTRY = {
 COMMANDS = {name: script for name, (script, _) in COMMAND_REGISTRY.items() if script is not None}
 # Commands whose scripts import store (SQLAlchemy/Alembic).
 STORE_BACKED = frozenset({"adopt", "board", "decision", "decisions", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
+
+
+# Runs a script's main() only as far as argument parsing: argparse exits 0 for help and 2 for bad
+# arguments itself, and a successful parse stops the run with 75 before the command does any work.
+PARSE_PROBE = """\
+import argparse, os, runpy, sys
+script = sys.argv[1]
+sys.argv, sys.path[0] = [script, *sys.argv[2:]], os.path.dirname(script)
+parse = argparse.ArgumentParser.parse_known_args
+def parse_only(self, *args, **kwargs):
+    parse(self, *args, **kwargs)
+    raise SystemExit(75)
+argparse.ArgumentParser.parse_known_args = parse_only
+sys.exit(runpy.run_path(script, run_name="probe")["main"](sys.argv[1:]))
+"""
 
 
 def command_purpose(name: str) -> str:
@@ -214,8 +230,13 @@ def install(*, source: Path, install_dir: Path, bin_dir: Path, dry_run: bool = F
         os.replace(staged_pointer, current)
     finally:
         staged_pointer.unlink(missing_ok=True)
-    return {"command": str(binary), "release": str(release),
-            "wrapper_write": change_wrapper, "installed": True}
+    # §14: the same install brings the Claude Code plugin to this release, or reports where it stands.
+    if str(SOURCE / "scripts") not in sys.path:
+        sys.path.insert(0, str(SOURCE / "scripts"))
+    import claude_adapter
+    version = json.loads((release / ".claude-plugin/plugin.json").read_text())["version"]
+    return {"command": str(binary), "release": str(release), "wrapper_write": change_wrapper, "installed": True,
+            **claude_adapter.update_plugin(current, version)}
 
 
 def install_main(argv: list[str]) -> int:
@@ -275,16 +296,19 @@ def main(argv: list[str] | None = None) -> int:
     if not target.is_file():
         print(f"installed command is missing: {target}", file=sys.stderr)
         return 1
-    if args[0] in STORE_BACKED and {"-h", "--help"} & set(args[1:]):
-        # Help must not install the engine venv (offline CI, first run). Bootstrap only when this interpreter
-        # cannot import the script's dependencies.
-        done = subprocess.run([sys.executable, str(target), *(["--board"] if args[0] == "board" else []), *args[1:]],
+    if args[0] in STORE_BACKED:
+        # Help and usage errors must not install the engine venv (offline CI, first run). Parse under this
+        # interpreter; exit 0 (help) and 2 (bad arguments) are final. Anything else, including an import
+        # failure for lack of dependencies, falls through to the bootstrap and the real run.
+        # shortcut: valid invocations import the script twice, drop the probe if startup cost matters.
+        done = subprocess.run([sys.executable, "-c", PARSE_PROBE, str(target),
+                               *(["--board"] if args[0] == "board" else []), *args[1:]],
                               capture_output=True, text=True)
-        if "ModuleNotFoundError" not in done.stderr:
+        if done.returncode in (0, 2):
             sys.stdout.write(done.stdout)
             sys.stderr.write(done.stderr)
             return done.returncode
-    if args[0] in STORE_BACKED:
+
         scripts_dir = str(SOURCE / "scripts")
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)
