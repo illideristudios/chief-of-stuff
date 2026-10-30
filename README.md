@@ -40,6 +40,8 @@ claude plugin install chief-of-stuff@chief-of-stuff
 claude --agent chief-of-stuff
 ```
 
+The plugin declares `datetime-inject@ai-additions` at `^1.0` as a dependency, so installation also installs the clock. Engine workers started as a local Claude CLI process check before launch that it is installed and enabled at user scope in their Claude account, including the selected `claude_as_profile`. A missing, disabled, or incompatible clock makes that local Claude entry unlaunchable: the rotation moves to another entry, and the launch is refused only when none is left. Codex, Cursor, Antigravity and T3-launched workers are not checked, so they still rotate. The clock plugin supplies one bracketed timestamp per prompt; chief-of-stuff ships no clock hook. To check delivery with two real worker prompts, run `CHIEF_CLOCK_LIVE=1 CHIEF_CLOCK_PROFILE=secondary python3 -m unittest evals.test_worker_clock.LiveClockTest -v` from a checkout with the Python requirements installed (omit `CHIEF_CLOCK_PROFILE` for the default account).
+
 A running engine from an older release may not understand the upgrade request. `supervisor status` reports `upgrade_pending: true` while the registered loaded release differs from the selected release or an explicit install is still pending; ensure reports `engine: upgrade pending` and does not interrupt the running pass. An interrupted explicit install can remain pending indefinitely if the old engine does not understand the handoff. For a marker-unaware engine, arrange a maintenance window, stop new work and verify the current pass has completed and no new pass can start before running `chief-of-stuff supervisor --root /path/to/workspace install` from the desired release. That explicit command restarts the agent and can interrupt work if it is not actually idle. Missing or stale status alone does not establish idleness.
 
 The authoritative install/uninstall recovery record is stored in a private engine data directory outside the workspace. The data directory must not be inside the workspace. Releases and their ancestors must be trusted outside the workspace; release trees overlapping the workspace or containing links outside the release tree are rejected before preparing dependencies or starting their code. This protects against workspace-only writes, not an attacker who can modify the release cache or private engine data. Older workspace-only pending install records are not trusted or replayed; if one was interrupted before this upgrade, arrange a confirmed idle maintenance window and run an explicit install again.
@@ -86,11 +88,16 @@ herdr_session = "chief-of-stuff" # herdr only: the dedicated session workers run
 claude_as_profile = "secondary" # optional: Claude workers run as `claude-as run secondary`
 worker_launcher = "t3" # optional: engine Claude workers start as T3 threads; "cli" (the default) is a local process
 require_green_tests = true # optional: hold one-shot and engine completions with unknown or non-green suite counts
+transcript_max_bytes = 1048576 # optional: retained transcript event bytes per engine attempt; default 1 MiB
 rules = ["Never skip or weaken tests."] # optional: standing rules for every one-shot and engine worker
 
 [workers.t3_providers] # optional, T3 launcher only: the T3 provider instance each claude_as_profile runs as
 secondary = "cl2"
 ```
+
+The engine retains Claude CLI worker transcripts in its ORM store, keyed by issue, stage and attempt. Ordered worker, tool, user, error and gap events remain readable after the worker exits, the engine restarts or the original log disappears. `Store.transcript(issue_key, stage, attempt)` reads that retained history without accessing the runtime or its files; it returns `None` before capture. T3 thread transcripts and other runtimes are not captured yet.
+
+`transcript_max_bytes` must be a positive integer and is pinned on the attempt's first capture. It caps the serialized event array, including JSON escaping and separators; fixed-size identity, cursor and loss metadata are additional. Once full, capture keeps the prefix and drops all subsequent normalized events, including tools and gap events, counting them in `dropped_events`. A source record larger than the cap is skipped without decoding and counted separately in `dropped_records`, since its event count is unknown. `capped`, `gap_count` and `last_gap` remain visible after the buffer fills. Partial records wait for completion; a partial tail at exit is marked as a gap. Missing files are marked and retried. Replacement, truncation, rewritten history or changed session identity halts capture with a gap, preserving the original attempt's history.
 
 The engine's stall threshold is configurable:
 
@@ -218,13 +225,16 @@ The board and `notify.py sync` also read precise deadlines from tracker `## Deci
 
 ## Workspace policy
 
-The engine runs the shipped policy, `assets/policy.toml`, unless the workspace names an overlay: set `[policy] overlay = "policy.toml"` in the workspace TOML, with the path relative to the workspace root. The overlay's keys are merged over the shipped policy. A table merges key by key, and a field is replaced whole. For example, `[stages.review.policy] architect = false` stops architect requests in that workspace only. An overlay changes keys of tables the shipped policy has: a persona, stage, room or workflow it does not have is refused by name, and so is an unknown key. A named overlay that is missing is refused at startup; the engine never falls back to the shipped policy. The engine, `init` and the board load the same merged policy, and the engine logs `engine: policy changed: <fingerprint>` when the merged policy differs from the one the workspace last ran.
+The engine runs the shipped policy, `assets/policy.toml`, unless the workspace names an overlay: set `[policy] overlay = "policy.toml"` in the workspace TOML, with the path relative to the workspace root. An absolute path, or one that resolves outside the workspace, is refused. The overlay's keys are merged over the shipped policy. A table merges key by key, and a field is replaced whole. For example, `[stages.review.policy] architect = false` stops architect requests in that workspace only. An overlay changes keys of tables the shipped policy has: a persona, stage, room or workflow it does not have is refused by name, and so is an unknown key. A named overlay that is missing is refused at startup; the engine never falls back to the shipped policy. The engine, `init` and the board load the same merged policy, and the engine logs `engine: policy changed: <fingerprint>` when the merged policy differs from the one the workspace last ran.
 
 ```
-O := the workspace names an overlay      F := the overlay file exists      K := every key and table it names is known
+O := the workspace names an overlay
+R := the path is relative and resolves inside the workspace
+F := the overlay file exists      K := every key and table it names is known
 P := the merged policy runs
 
-O ∧ F ∧ K → P              [#827: keys merged over the shipped policy]
+O ∧ R ∧ F ∧ K → P          [#827: keys merged over the shipped policy]
+O ∧ ¬R → ¬P                [absolute or outside the workspace is refused]
 O ∧ ¬F → ¬P                [a refusal, never a silent fallback]
 O ∧ ¬K → ¬P                [refused by name]
 ¬O → the shipped policy runs

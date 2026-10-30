@@ -14,6 +14,7 @@ from typing import Any
 from collections.abc import Callable
 
 import claude_adapter
+import transcripts
 import clock as engine_clock
 import dispatch_prompt
 import guard_binding
@@ -30,7 +31,7 @@ from settings import ModelEntry, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import RETRYABLE, Failure, Reply, Request, retry_at
-from shell_setup import teardown
+from shell_setup import ShellError, teardown
 from reconcile import OP_WORKER_RUN
 
 _runners: dict[str, Any] = {}
@@ -289,9 +290,14 @@ def teardown_once(store: Any, root: Path, key: str, stage: str, attempt: int, co
     if isinstance(tree, str) and tree:
         for error in teardown(root, Path(tree), Path(tree).name, command):
             store.add_log(key, f"worker teardown failed: {error}", at)
-    record["torn_down"] = True
-    data["runs"] = {**runs, f"{stage}-{attempt}": record}
-    store.set_resume(key, data)
+    def mark(current: dict) -> None:
+        current_runs = current.get("runs")
+        current_runs = dict(current_runs) if isinstance(current_runs, dict) else {}
+        entry = dict(current_runs.get(f"{stage}-{attempt}") or record)
+        entry["torn_down"] = True
+        current["runs"] = {**current_runs, f"{stage}-{attempt}": entry}
+
+    store.update_resume(key, mark)
 
 
 def _clear_tree(root: Path, tree: Path, store: Any, key: str, at: str) -> None:
@@ -448,12 +454,23 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
            **guard_binding.guard_env(guard_binding.Binding(
                issue_key, stage, attempt, session_id, root.resolve(), clock(), protected))}
     protects: list[bool] = []  # the forge is asked once, and only when a non-Claude entry is considered
+    clock_refusals: list[ShellError | None] = []  # the worker clock is checked once, and only for a local Claude CLI entry
+
+    def local_claude_ready() -> bool:
+        # Only a local Claude CLI worker loads the clock plugin; T3 threads and other hosts are not checked (§13).
+        if not clock_refusals:
+            try:
+                claude_adapter.require_worker_clock(claude_as_profile, str(root))
+                clock_refusals.append(None)
+            except ShellError as exc:
+                clock_refusals.append(exc)
+        return clock_refusals[0] is None
 
     def launchable(runtime: str) -> bool:
         if launcher == "t3":
             return t3_adapter.available(runtime) and _guarded(forge, issue_key)
         if runtime == "claude":
-            return True
+            return local_claude_ready()
         if not host_adapter.available(runtime):
             return False
         if not protects:
@@ -473,9 +490,14 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     rotation = loaded.models.get(TASK_CLASS.get(stage, stage), ())
     if launcher == "t3" and rotation and not any(entry.runtime in t3_adapter.PROVIDERS for entry in rotation):
         raise RuntimeError("T3 has no engine channel for any runtime in this rotation")
-    chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
-                    how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
-                    attempt=attempt, available=available, workflow=workflow)
+    try:
+        chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
+                        how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
+                        attempt=attempt, available=available, workflow=workflow)
+    except RuntimeError:
+        if clock_refusals and clock_refusals[0] is not None:
+            raise clock_refusals[0] from None  # the clock, not the rotation, is why nothing could launch
+        raise
     try:
         if launcher == "t3" and chosen.runtime not in t3_adapter.PROVIDERS:
             raise RuntimeError(f"T3 has no engine channel for {chosen.runtime}; refusing a local fallback")
@@ -701,12 +723,39 @@ def _runner_live(record: dict, run_dir: Path) -> bool:
     return process_status.identity(record["runner_pid"], record["session_id"]) == record.get("runner_identity")
 
 
+def _capture_transcript(store, segment, record: dict, max_bytes: int) -> None:
+    if record.get("launcher") == "t3" or record.get("runtime", "claude") != "claude":
+        return  # T3's source is its thread, never the provider's local files.
+    session = record.get("session_id")
+    if not isinstance(session, str) or not session:
+        return  # no safe launch identity to bind
+    path, error = None, ""
+    try:
+        path = claude_adapter.transcript_path(record)
+    except (OSError, ValueError, KeyError, TypeError):
+        error = "transcript launch source unavailable or identity unverified"
+    try:
+        directory = record.get("run_dir")
+        exited = isinstance(directory, str) and bool(directory) and (Path(directory) / "exit.json").is_file()
+        transcripts.capture(store, segment.issue_key, segment.stage, segment.attempt, session, path,
+                            ended=segment.ended_at is not None or exited,
+                            max_bytes=max_bytes, source_error=error)
+    except ValueError as exc:
+        store.add_log(segment.issue_key, f"transcript capture refused: {exc}", engine_clock.system().isoformat())
+
+
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
             trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False,
-            finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None) -> reconcile.Facts | None:
+            finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None,
+            transcript_max_bytes: int = transcripts.DEFAULT_MAX_BYTES) -> reconcile.Facts | None:
     """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
     completed = []
     for segment in store.segments():
+        data = _resume(store, segment.issue_key)
+        runs = data.get("runs", {})
+        saved = runs.get(f"{segment.stage}-{segment.attempt}") if isinstance(runs, dict) else None
+        if isinstance(saved, dict):
+            _capture_transcript(store, segment, saved, transcript_max_bytes)
         if segment.ended_at is not None:
             continue
         key = segment.issue_key
@@ -734,6 +783,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     _save_run(store, key, segment.stage, segment.attempt, record)
                     data = _resume(store, key)
                     record = data["runs"][f"{segment.stage}-{segment.attempt}"]
+                    _capture_transcript(store, segment, record, transcript_max_bytes)
             if not isinstance(record, dict):
                 raise ValueError("missing run record")
             if record.get("launcher") == "t3":
@@ -779,10 +829,12 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
+            # Durable exit evidence or confirmed death releases the workspace stack, even if completion waits.
+            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
+            data = _resume(store, key)  # Later quota/suite writes must retain the teardown marker.
             if not (run_dir / "exit.json").exists():
                 # The planner closes it from tree, report and orphan evidence.
                 continue
-            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
             code, exited_at = _exit_record(run_dir)
             runtime = record.get("runtime", "claude")
             stdout, stderr = (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text()
@@ -822,9 +874,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                         outcome = "human_review"
                         reason = reconcile.suite_reason(counts, reports[-1].summary)
                         store.set_human_review(key, True)
-                        data["suite_hold"] = {"stage": segment.stage, "attempt": segment.attempt,
-                                              "published": False}
-                        store.set_resume(key, data)
+                        hold = {"stage": segment.stage, "attempt": segment.attempt, "published": False}
+                        store.update_resume(key, lambda d, hold=hold: d.update(suite_hold=hold))
                     else:
                         outcome = "done"
                 else:

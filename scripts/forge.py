@@ -829,12 +829,32 @@ class Forge:
                 forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
         return [ref for ref in refs if _LOCAL_CLOSE.fullmatch(ref)]
 
-    def _merged_closes(self) -> set[int]:
-        """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
+    def _landing_commit(self, row: dict) -> str | None:
+        commit = ((row.get("mergeCommit") or {}).get("oid") if self.github else
+                  row.get("squash_commit_sha") or row.get("merge_commit_sha") or row.get("sha"))
+        return commit if isinstance(commit, str) and commit else None
+
+    def _merged_landing_index(self) -> tuple[set[int], dict[int, str]]:
+        """Closed issue numbers and each one's newest main merge commit (bounded by REQUEST_LIMIT)."""
         try:
-            return {int(ref[1:]) for row in self._merged_requests() for ref in self._closed_refs(row)}
+            closed: set[int] = set()
+            newest: dict[int, tuple[int, str]] = {}
+            for row in self._merged_requests():
+                base = row.get("baseRefName" if self.github else "target_branch")
+                number = row.get("number" if self.github else "iid")
+                commit = self._landing_commit(row) if base == "main" and type(number) is int else None
+                for ref in self._closed_refs(row):
+                    iid = int(ref[1:])
+                    closed.add(iid)
+                    if commit and (iid not in newest or number >= newest[iid][0]):
+                        newest[iid] = (number, commit)
+            return closed, {iid: sha for iid, (_, sha) in newest.items()}
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
+
+    def _merged_closes(self) -> set[int]:
+        """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
+        return self._merged_landing_index()[0]
 
     def landings(self, pipeline: Pipeline, keys: list[str], *,
                  errors: dict[str, str] | None = None,
@@ -869,10 +889,9 @@ class Forge:
             if not mine:
                 continue
             try:
-                commit = ((row.get("mergeCommit") or {}).get("oid") if self.github else
-                          row.get("squash_commit_sha") or row.get("merge_commit_sha") or row.get("sha"))
+                commit = self._landing_commit(row)
                 landed = None
-                if isinstance(commit, str) and commit:
+                if commit:
                     if commit == pipeline.sha:
                         landed = True
                     elif self.github:
@@ -983,7 +1002,7 @@ class Forge:
             for ref in r.closes:
                 if _LOCAL_CLOSE.fullmatch(ref):
                     latest[int(ref[1:])] = r
-        merged = self._merged_closes()
+        merged, landing_shas = self._merged_landing_index()
         statuses: dict[str, str | None] = {}
         if self.kanban is not None and self.kanban.github_project is not None and self.github:
             statuses, error = project_items(self.gh, self.kanban.github_project,
@@ -1003,6 +1022,8 @@ class Forge:
                 snap["review_state"] = r.approval if r else ""
             if one.state == backlog.CLOSED and one.iid in merged:  # an open follow-up does not undo a merge
                 snap["merge_state"] = "merged"
+                if sha := landing_shas.get(one.iid):
+                    snap["landing_sha"] = sha
             elif r:
                 snap["merge_state"] = r.verdict
             else:
