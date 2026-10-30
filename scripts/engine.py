@@ -308,25 +308,6 @@ def _sync_decision_interrupts(store: Any, item: Any, at: str, start: str = "impl
         store.set_resume(key, data)
 
 
-def _permission(ask: Any) -> dict | None:
-    """The event a worker's permission ask records (#874), or None for any other ask."""
-    try:
-        event = json.loads(ask.context or "")
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(event, dict):
-        return None
-    # #893: new asks carry kind, so recognition does not depend on the question text.
-    if event.get("kind") == "permission" and "tool_name" in event:
-        return event
-    # Asks raised before #874 carry no options; they are permission requests all the same (#890 follow-up).
-    # Contexts with no kind keep the prefix check, so asks already on the store still settle as permissions.
-    if ("kind" not in event and "tool_name" in event and tuple(ask.options) in (("allow", "deny"), ())
-            and str(ask.question).startswith("Permission requested for ")):
-        return event
-    return None
-
-
 def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at: str) -> None:
     """#890: a permission request is never an owner decision. The guard's rule or the trio answers it; a split,
     unavailable or exhausted trio denies it, with the reason on the run's log. The answer is appended, never a delete."""
@@ -353,7 +334,7 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
         _settle_asks(store, key)
         asks = store.asks(key)
         for ask in (ask for ask in asks if not ask.answer):
-            permission = _permission(ask)
+            permission = decision_escalation.permission_event(ask)
             if permission is not None:
                 # Judged again by today's rule, so an ask raised under a narrower one is closed by its answer.
                 verdict, why = guard_commands.permission_judgement(permission, ())
