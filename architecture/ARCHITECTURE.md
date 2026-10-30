@@ -347,6 +347,24 @@ The agent type follows the declaration rule: a segment records an agent type onl
 
 Segment times are full timestamps, so a run that ends after midnight keeps its end, and no daylight-saving rule is needed.
 
+Each attempt's transcript is kept with its segment (#1161; `transcripts.py`, migration `0013_transcripts`). It is evidence of what the attempt did, not a performance source.
+- **Bound to the launch, never discovered.** The store's `transcript` table holds one row per segment, unique by session and by source. The engine hands `transcripts.capture` the exact source of the launch it recorded (`claude_adapter.transcript_path`, `scripts/worker.py:741`), and never searches a tree or takes the newest session (`scripts/transcripts.py:3`). A run without a session id is not captured (`scripts/worker.py:737`).
+- **Read on every collection pass, resumable.** `worker.collect` captures each recorded run on every pass (`scripts/worker.py:765`). Each capture reads only whole records past a stored offset and digest and commits them with the cursor in one store write (`Store.update_transcript`, `scripts/store.py:607`), so a restart resumes where it stopped. The source is opened without following a link (`scripts/transcripts.py:86`).
+- **Capped, with the prefix kept.** The cap is `[workers] transcript_max_bytes`, 1 MiB by default (`scripts/settings.py:121`), pinned for an attempt at its first capture. Past it the prefix stays and every later event is dropped and counted (`scripts/transcripts.py:26-32`).
+- **Gaps are marked, never filled.** An unavailable source, a malformed or non-object record, a partial last record of an ended run, and the cap each add a gap event with its reason. A source that was rotated, truncated or rewritten, or a record from another session, halts the capture with a gap, and the prefix already kept stays readable (`scripts/transcripts.py:78`, `:112`, `:150`).
+- **Local Claude CLI runs only.** A T3 run and a non-Claude runtime are skipped: a T3 worker's source is its thread, never the provider's local files (`scripts/worker.py:734-735`).
+- **Shown in memory, never published.** The workers page links each attempt to its session view, which the page server renders on request and never writes into the pages directory (`scripts/pages.py:983`).
+
+```
+Cp := an attempt's transcript is captured      Ls := the source is the one its launch recorded      Lc := the run is a local Claude CLI run
+Ov := the kept events exceed the cap      Pk := the prefix is kept and later events are dropped and counted
+Sc := the source was rotated, truncated or rewritten, or a record names another session      Ht := capture halts with a gap
+1.  Cp → Ls ∧ Lc          [scripts/transcripts.py:3; scripts/worker.py:734-741]
+2.  Ov → Pk               [scripts/transcripts.py:26-32]
+3.  Sc → Ht               [scripts/transcripts.py:78, :112, :150]
+∴   a kept transcript is one attempt's own events, bounded by the cap, and every hole in it is marked rather than filled
+```
+
 | Boundary | Signature | Circle |
 |---|---|---|
 | `store.Segment` | `issue_key: str, stage: str, attempt: int, started_at: str, ended_at: str \| None, outcome: str \| None, runtime: str, model: str, effort: str, agent_type: str, workflow: str` | Interface Adapters, gateways |
