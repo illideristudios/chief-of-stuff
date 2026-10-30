@@ -754,9 +754,10 @@ class Forge:
         found = {key: (None, None) for key in keys}
         if pipeline.ref != "main" or not isinstance(pipeline.sha, str) or not pipeline.sha:
             return found
+        opened = self._open_closers(pipeline.ref)
         merged = self._merged_requests()
         newest = {}
-        for row in [*merged, *self._open_closers(pipeline.ref)]:
+        for row in [*merged, *opened]:
             if row.get("baseRefName" if self.github else "target_branch") != pipeline.ref:
                 continue
             identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))
