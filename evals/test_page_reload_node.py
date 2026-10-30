@@ -37,6 +37,9 @@ const flush = () => new Promise(r => setImmediate(r));
 async function run(scenario) {
 let header = scenario.header;
 let controls = (scenario.controls || []).slice();
+let openDetails = !!scenario.openDetails;
+let scrolledElement = scenario.scrolledElement || null;
+const window = {scrollX: scenario.scrollX || 0, scrollY: scenario.scrollY || 0};
 let reloads = 0, intervals = [], listeners = {}, notices = [];
 const control = c => {
   if ((c.tag || '').toUpperCase() === 'SELECT') {
@@ -68,6 +71,8 @@ const document = {
   // `form`: one form whose .elements are in-form controls and those tied by the form attribute (#388).
   // `form input` / `form option` (older snippet): a part is [form] tag; `form` needs the control inside one.
   querySelectorAll: sel => {
+    if (sel === 'details[open]') return openDetails ? [{}] : [];
+    if (sel === '*') return scrolledElement ? [scrolledElement] : [];
     if (sel === 'form') {
       const members = controls.map(control).filter(c => c.inForm || c.formAttr);
       const nested = controls.map(control).filter(c => c.inForm);  // tree descendants, not form= (#388 mutant)
@@ -99,13 +104,16 @@ const fetch = (url, opts) => {
     : Promise.resolve({headers: {get: name => name === 'Last-Modified' ? at : null}});
 };
 const location = {pathname: '/x.html', reload() { reloads++; }};
-const sandbox = {document, location, fetch, setInterval: f => intervals.push(f), isNaN, Date};
+const sandbox = {document, window, location, fetch, setInterval: f => intervals.push(f), isNaN, Date};
   new vm.Script(snippet.replace(/^\s*<script>|<\/script>\s*$/g, '')).runInNewContext(sandbox, {timeout: 2000});
   await flush();  // finish the load-time HEAD before steps run; the GET supplies the baseline
   for (const step of scenario.steps) {
     if ('header' in step) header = step.header;
     if ('active' in step) document.activeElement = step.active;
     if ('controls' in step) controls = step.controls;
+    if ('openDetails' in step) openDetails = step.openDetails;
+    if ('scrollY' in step) window.scrollY = step.scrollY;
+    if ('scrolledElement' in step) scrolledElement = step.scrolledElement;
     if (step.tick) for (let i = 0; i < step.tick; i++) { intervals.forEach(f => f()); await flush(); }
     if (step.visible) { (listeners.visibilitychange || []).forEach(f => f()); await flush(); }
     if (step.click && notices[0] && notices[0].children[0]) notices[0].children[0].onclick();
@@ -213,6 +221,17 @@ SCENARIOS = {
     "lastModified disagrees with header by an hour, header changes": (
         {"lastModified": DOC_HOUR_OFF, "steps": [{"header": LATER}, {"tick": 1}]}, RELOAD),
     "typing without a change does not notice": ({"controls": [typed()], "steps": [{"tick": 2}]}, NOTHING),
+    "an open fold without a change does not notice": ({"openDetails": True, "steps": [{"tick": 2}]}, NOTHING),
+    "an open fold protects a reader": (changed({"tick": 2}, openDetails=True), NOTICE),
+    "a fold opened after load protects a reader": (changed({"openDetails": True}, {"tick": 1}), NOTICE),
+    "a closed fold permits reload": (changed({"openDetails": False}, {"tick": 1}, openDetails=True), RELOAD),
+    "page scroll protects a reader": (changed({"tick": 1}, scrollY=200), NOTICE),
+    "horizontal page scroll protects a reader": (changed({"tick": 1}, scrollX=30), NOTICE),
+    "a scrolled column protects a reader": (changed({"tick": 1}, scrolledElement={"scrollLeft": 40}), NOTICE),
+    "a vertically scrolled element protects a reader": (changed({"tick": 1}, scrolledElement={"scrollTop": 40}), NOTICE),
+    "a reader can reload from the fold notice": (changed({"tick": 1}, {"click": 1}, openDetails=True), {"reloads": 1, "notices": 1}),
+    "returning to the top permits reload": (changed({"scrollY": 0}, {"tick": 1}, scrollY=200), RELOAD),
+    "an open fold and typed input": (changed({"tick": 1}, openDetails=True, controls=[typed()]), NOTICE),
     "typed text": (changed({"tick": 1}, controls=[typed()]), NOTICE),
     "typed text, changed after it is typed": ({"steps": [{"controls": [typed()]}, {"header": LATER}, {"tick": 1}]}, NOTICE),
     "typed textarea": (changed({"tick": 1}, controls=[typed(tag="textarea")]), NOTICE),
@@ -255,6 +274,10 @@ MUTANTS = [
     ("notice not once-only", "if(document.getElementById('page-changed'))return;", ""),
     # the rest of the branches its guards pin
     ("typing() never true", "if(typing())notice()", "if(false)notice()"),
+    ("open folds are ignored", "some('details[open]',function(){return true;})", "false"),
+    ("vertical page scroll is ignored", "||window.scrollY", ""),
+    ("horizontal page scroll is ignored", "||window.scrollX", ""),
+    ("nested scroll is ignored", "||some('*',function(e){return e.scrollTop||e.scrollLeft;})", ""),
     ("a null header is a change", "t!=null&&t!==seen", "t!==seen"),
     ("focus is not typing", "a&&(/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)||a.isContentEditable)||", ""),
     ("SELECT is not typing", "INPUT|TEXTAREA|SELECT", "INPUT|TEXTAREA"),

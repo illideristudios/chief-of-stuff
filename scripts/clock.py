@@ -91,3 +91,18 @@ def version_ok(version: str, spec: str) -> bool:
     if minor > 0:
         return (0, minor, patch) <= numbers < (0, minor + 1, 0)
     return (0, 0, patch) <= numbers < (0, 0, patch + 1)
+
+
+def parse_stamp(raw: str | None, fallback: datetime) -> datetime:
+    """Read a stored ISO timestamp in the fallback zone; malformed values use the fallback instant."""
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None and fallback.tzinfo is not None:
+                dt = dt.replace(tzinfo=fallback.tzinfo)
+            elif dt.tzinfo is not None and fallback.tzinfo is not None:
+                dt = dt.astimezone(fallback.tzinfo)
+            return dt
+        except ValueError:
+            pass
+    return fallback

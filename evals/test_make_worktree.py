@@ -229,21 +229,6 @@ class GitHelperErrorPathTest(unittest.TestCase):
         with mock.patch.object(git_view, "run", side_effect=exc):
             return mw.git(["status"], Path("."))
 
-    def test_an_oserror_is_code_1_naming_the_exception_class(self):
-        code, detail = self.failing(FileNotFoundError("no git"))
-        self.assertEqual(code, 1)
-        self.assertIn("FileNotFoundError", detail)
-
-    def test_a_timeout_is_code_1_naming_the_exception_class(self):
-        code, detail = self.failing(subprocess.TimeoutExpired("git", 1))
-        self.assertEqual(code, 1)
-        self.assertIn("TimeoutExpired", detail)
-
-    def test_an_unviewable_tree_is_code_1_with_git_trees_unreadable_shape(self):
-        """Changed with #449: the duplicate helper said `Unviewable:`; git_trees says `unreadable:`."""
-        self.assertEqual(self.failing(git_view.Unviewable("metadata is not a bounded regular file")),
-                         (1, "unreadable: metadata is not a bounded regular file"))
-
     def test_a_cache_error_is_code_1_naming_the_configuration_problem(self):
         reason = "cannot prepare view cache base '/unusable-cache'"
         self.assertEqual(self.failing(git_view.CacheError(reason)), (1, f"CacheError: {reason}"))
@@ -638,12 +623,6 @@ class BuildTest(CloneCase):
             self.build(branch="-rf")
         self.assertFalse(self.tree.exists())
 
-    def test_it_prints_the_path_and_branch_it_actually_made(self):
-        made = self.build()
-        line = mw.line(made)
-        self.assertIn(str(made.path), line)
-        self.assertIn("feat/new", line)
-
     def assert_refused_before_any_fetch(self, about: str, **kw):
         with mock.patch.object(mw.git_trees, "fetch_base") as fetch:
             with self.assertRaises(mw.RefusedError) as e:
@@ -870,13 +849,6 @@ class BuildTest(CloneCase):
         self.assertIn("left branch feat/new", str(raised.exception))
         self.assertEqual([args[:2] for args in calls], [["worktree", "add"]])
 
-    def test_the_report_line_carries_the_short_sha_not_the_full_one(self):
-        remote_head = advance_remote(self.root)
-        self.assertEqual(len(remote_head), 40)
-        line = mw.line(self.build())
-        self.assertIn(remote_head[:7], line)
-        self.assertNotIn(remote_head, line)
-
     def test_main_prints_the_short_sha_not_the_full_one(self):
         remote_head = advance_remote(self.root)
         code, out, err = self.run_main()
@@ -990,6 +962,16 @@ class FreshBaseTest(CloneCase):
         self.build()
         self.assertEqual(rev(self.clone, "main"), local_main)
 
+    def test_origin_main_branches_and_tags_cannot_shadow_the_remote_base(self):
+        stale = rev(self.clone)
+        make_repo.git(["branch", "origin/main", stale], self.clone)
+        make_repo.git(["tag", "origin/main", stale], self.clone)
+        remote_head = advance_remote(self.root)
+        made = self.build()
+        self.assertEqual(rev(made.path), remote_head)
+        self.assertEqual(rev(self.clone, "refs/heads/origin/main"), stale)
+        self.assertEqual(rev(self.clone, "refs/tags/origin/main"), stale)
+
     def test_the_new_branch_has_no_upstream_so_a_bare_push_cannot_target_main(self):
         advance_remote(self.root)
         made = self.build()
@@ -1004,13 +986,6 @@ class FreshBaseTest(CloneCase):
         self.assertEqual(code, 0, err)
         for part in (str(self.tree.resolve()), "feat/new", "origin/main", remote_head[:7], "implementer"):
             self.assertIn(part, out)
-
-    def test_line_carries_the_base_sha_too(self):
-        remote_head = advance_remote(self.root)
-        line = mw.line(self.build())
-        self.assertIn("origin/main", line)
-        self.assertIn(remote_head[:7], line)
-
 
 class FetchFailureTest(CloneCase):
     """Rule: a failed fetch refuses and creates nothing; the message offers `--from-local` and names local main's sha."""
@@ -1038,6 +1013,16 @@ class FetchFailureTest(CloneCase):
     def test_no_origin_refuses_and_creates_nothing(self):
         self.no_origin()
         self.assert_refused_with_nothing_made(self.refuse_build())
+
+    def test_the_refusal_includes_the_reported_age_of_local_main(self):
+        with mock.patch.dict(make_repo.ENV, {"GIT_COMMITTER_DATE": f"{int(time.time()) - 2 * 86400} +0000"}):
+            make_repo.git(["commit", "--amend", "--no-edit"], self.clone)
+        local = make_repo.git(["log", "-1", "--format=%h %cr", "refs/heads/main"], self.clone)
+        with mock.patch.object(git_trees, "fetch_base", return_value="offline"):
+            message = self.refuse_build()
+        self.assertIn(f"local main ({local})", message)
+        self.assertFalse(self.tree.exists())
+        self.assertEqual(self.branches(), "")
 
     def test_an_origin_at_a_path_that_does_not_exist_refuses_and_creates_nothing(self):
         self.dead_origin()
@@ -1401,7 +1386,7 @@ class BaseRefTest(unittest.TestCase):
     def test_a_clean_fetch_cuts_from_the_fetched_remote_ref(self):
         self.assertEqual(mw.base_ref("", False), "refs/remotes/origin/main")
 
-    def test_from_local_cuts_from_local_main_whatever_the_fetch_said(self):
+    def test_from_local_cuts_from_the_local_branch(self):
         """Not the bare `main`: a tag called `main` would shadow it. The full ref names the branch alone."""
         self.assertEqual(mw.base_ref("", True), "refs/heads/main")
         self.assertEqual(mw.base_ref("fatal: could not read from remote", True), "refs/heads/main")

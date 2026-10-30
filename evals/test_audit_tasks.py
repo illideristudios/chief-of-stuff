@@ -79,15 +79,10 @@ Coordinator: coordinator. Board: none.
 |---|---|---|---|---|---|---|---|---|
 {sessions}
 
-## File ownership
-
-| context | paths |
-|---|---|
-{ownership}
-
 ## Log
 
 - 09:00 opened the day
+{log}
 """
 
 
@@ -144,13 +139,18 @@ def session_row(name: str, ref: str = "a1b2c3") -> str:
     return f"| {ref} | {name} | working | a task | | now | | none | 09:30 |"
 
 
-def workspace(rows: str, ownership: str, sessions: str = "") -> tuple[tempfile.TemporaryDirectory, Path]:
+def started(task: str, tree: str) -> str:
+    """The Log's record of a one-shot launched into `tree` for `task`: the tracker's only claim on a tree (#1039)."""
+    return tl.started_line("09:05", "worker01", "codex", "", f"worktree `{tree}`", task)
+
+
+def workspace(rows: str, log: str, sessions: str = "") -> tuple[tempfile.TemporaryDirectory, Path]:
     tmp = tempfile.TemporaryDirectory()
     root = Path(tmp.name)
     (root / "daily").mkdir()
     (root / "CLAUDE.md").write_text(CLAUDE)
     (root / "daily" / "2026-09-17-tracker.md").write_text(
-        TRACKER.format(rows=rows, ownership=ownership, sessions=sessions))
+        TRACKER.format(rows=rows, sessions=sessions, log=log))
     build(root)
     return tmp, root
 
@@ -205,26 +205,6 @@ class ConfigTest(unittest.TestCase):
 
 
 class OwnershipTest(unittest.TestCase):
-    def test_finds_the_worktree_named_in_a_prose_row(self):
-        rows = al.parse_ownership(
-            "| demo-fixes [b8fca1] (fix 5, from 11:13) | worktree openemr-agent-demo-fixes (fix/agent-demo-fixes off main d6aab3b) |"
-        )
-        self.assertEqual(rows[0].context, "demo-fixes [b8fca1] (fix 5, from 11:13)")
-        self.assertEqual(rows[0].worktrees, ["openemr-agent-demo-fixes"])
-
-    def test_a_row_with_no_worktree_yields_none(self):
-        rows = al.parse_ownership("| subagent (Final requirements) | Projects/week-1/FINAL-REQUIREMENTS.md (new) |")
-        self.assertEqual(rows[0].worktrees, [])
-
-    def test_reads_a_bullet_row_with_a_backticked_worktree(self):
-        rows = al.parse_ownership("- Security audit: worktree `audit-upload` \u00b7 src/a/")
-        self.assertEqual(rows[0].context, "Security audit")
-        self.assertEqual(rows[0].worktrees, ["audit-upload"])
-
-    def test_a_bullet_row_with_no_worktree_yields_none(self):
-        rows = al.parse_ownership("- Release notes: notes/release.md")
-        self.assertEqual(rows[0].worktrees, [])
-
     def test_a_row_matches_by_task_item_as_well_as_owner(self):
         row = al.OwnerRow("Security audit", ["audit-upload"])
         self.assertTrue(al.owns(row, "Security audit"))
@@ -238,28 +218,6 @@ class OwnershipTest(unittest.TestCase):
         self.assertFalse(al.owns(row, "architecture"))
 
 
-class ProseTest(unittest.TestCase):
-    """Ownership cells are prose, and prose says "worktree" in sentences that name no tree."""
-
-    def test_a_word_that_follows_worktree_in_a_sentence_is_not_a_tree(self):
-        rows = al.parse_ownership(
-            "| 32505 | worktree openemr-agent-smart (feat/smart), that branch only: a docs subagent is on those now, its worktree only |"
-        )
-        self.assertEqual(rows[0].worktrees, ["openemr-agent-smart"])
-
-    def test_a_plain_word_after_worktree_is_not_a_tree(self):
-        """A tree name is backticked or shaped like one; `preserved` was reported as a tree never created (#72)."""
-        rows = al.parse_ownership("| impl-x | `src/x.py`; worktree preserved for review |")
-        self.assertEqual(rows[0].worktrees, [])
-
-    def test_a_backticked_plain_word_is_a_tree(self):
-        self.assertEqual(al.parse_ownership("| a | worktree `demo` |")[0].worktrees, ["demo"])
-
-    def test_trailing_punctuation_is_not_part_of_the_name(self):
-        rows = al.parse_ownership("| a | worktree wt-audit, and notes/release.md |")
-        self.assertEqual(rows[0].worktrees, ["wt-audit"])
-
-
 class ReadabilityTest(unittest.TestCase):
     def test_a_refusal_is_reported_once_however_many_tasks_name_it(self):
         rows = (
@@ -267,7 +225,7 @@ class ReadabilityTest(unittest.TestCase):
             "| Two | robin | done 10:01 | 09:00 |  | Checklist: Two |\n"
             "| Three | robin | done 10:02 | 09:00 |  | Checklist: Three |"
         )
-        tmp, root = workspace(rows, "| robin | worktree wt-not-here |")
+        tmp, root = workspace(rows, "\n".join(started(t, "wt-not-here") for t in ("One", "Two", "Three")))
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
         self.assertEqual(sum(1 for line in report.lines if "wt-not-here" in line), 1, report.lines)
@@ -276,7 +234,7 @@ class ReadabilityTest(unittest.TestCase):
         item = "Delete agent-parked (superseded; secrets) and the client-JSON copy in the scratchpad. 11:13 assigned. 11:53 deleted (62 MB); path never recorded"
         tmp, root = workspace(
             f"| {item} | robin | done 10:00 | 09:00 |  | Checklist: Delete |",
-            "| robin | worktree wt-unmerged (feat/open) |",
+            started(item, "wt-unmerged"),
         )
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
@@ -289,7 +247,7 @@ class ContainmentTest(unittest.TestCase):
     def test_a_worktree_outside_the_root_is_refused_not_probed(self):
         tmp, root = workspace(
             "| Escape | robin | done 10:00 | 09:00 |  | Checklist: Escape |",
-            "| robin | worktree ../../../etc |",
+            started("Escape", "../../../etc"),
         )
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
@@ -299,29 +257,18 @@ class ContainmentTest(unittest.TestCase):
     def test_a_missing_worktree_is_reported_not_silent(self):
         tmp, root = workspace(
             "| Gone | robin | done 10:00 | 09:00 |  | Checklist: Gone |",
-            "| robin | worktree wt-not-here |",
+            started("Gone", "wt-not-here"),
         )
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
         self.assertTrue(any("wt-not-here" in line for line in report.lines), report.lines)
 
 
-class BulletOwnershipAuditTest(unittest.TestCase):
-    def test_done_task_reopens_when_its_tree_is_named_in_a_bullet(self):
-        tmp, root = workspace(
-            "| Open branch work | robin | done 10:00 | 09:00 |  | Checklist: Open branch work |",
-            "- Open branch work: worktree `wt-unmerged` \u00b7 src/a/",
-        )
-        self.addCleanup(tmp.cleanup)
-        report = al.audit(root, "2026-09-17")
-        self.assertEqual([r.task for r in report.reopen], ["Open branch work"])
-
-
 class AuditTest(unittest.TestCase):
     def test_done_on_main_stays_done(self):
         tmp, root = workspace(
             "| Landed work | robin | done 10:00 | 09:00 |  | Checklist: Landed work |",
-            "| robin | worktree wt-merged (landed) |",
+            started("Landed work", "wt-merged"),
         )
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
@@ -330,7 +277,7 @@ class AuditTest(unittest.TestCase):
     def test_done_on_an_unmerged_branch_must_reopen(self):
         tmp, root = workspace(
             "| Open branch work | robin | done 10:00 | 09:00 |  | Checklist: Open branch work |",
-            "| robin | worktree wt-unmerged (feat/open) |",
+            started("Open branch work", "wt-unmerged"),
         )
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
@@ -341,7 +288,7 @@ class AuditTest(unittest.TestCase):
         # #547: a forge closure the user approved is recorded in the Log, and the audit honours the record.
         tmp, root = workspace(
             "| Open branch work | robin | done 10:00 | 09:00 |  | Checklist: Open branch work |",
-            "| robin | worktree wt-unmerged (feat/open) |",
+            started("Open branch work", "wt-unmerged"),
         )
         self.addCleanup(tmp.cleanup)
         tracker = root / "daily" / "2026-09-17-tracker.md"
@@ -352,7 +299,7 @@ class AuditTest(unittest.TestCase):
     def test_an_approval_recorded_for_another_task_does_not_clear_this_one(self):
         tmp, root = workspace(
             "| Open branch work | robin | done 10:00 | 09:00 |  | Checklist: Open branch work |",
-            "| robin | worktree wt-unmerged (feat/open) |",
+            started("Open branch work", "wt-unmerged"),
         )
         self.addCleanup(tmp.cleanup)
         tracker = root / "daily" / "2026-09-17-tracker.md"
@@ -364,7 +311,7 @@ class AuditTest(unittest.TestCase):
     def test_done_with_uncommitted_work_must_reopen(self):
         tmp, root = workspace(
             "| Unsaved work | robin | done 10:00 | 09:00 |  | Checklist: Unsaved work |",
-            "| robin | worktree wt-dirty (feat/dirty) |",
+            started("Unsaved work", "wt-dirty"),
         )
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
@@ -374,7 +321,7 @@ class AuditTest(unittest.TestCase):
     def test_a_task_with_no_tree_is_never_reopened(self):
         tmp, root = workspace(
             "| Decide the merge order | robin | done 10:00 | 09:00 |  | Checklist: Decide |",
-            "| robin | Projects/notes.md |",
+            "",
         )
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
@@ -383,7 +330,7 @@ class AuditTest(unittest.TestCase):
     def test_a_running_task_on_an_unmerged_branch_is_not_reopened(self):
         tmp, root = workspace(
             "| Still going | robin | running 09:30 | 09:00 |  | Checklist: Still going |",
-            "| robin | worktree wt-unmerged (feat/open) |",
+            started("Still going", "wt-unmerged"),
         )
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
@@ -394,8 +341,7 @@ class AuditTest(unittest.TestCase):
             "| Landed work | robin | done 10:00 | 09:00 |  | Checklist: Landed work |\n"
             "| Open branch work | sam | done 10:30 | 09:00 |  | Checklist: Open branch work |"
         )
-        ownership = "| robin | worktree wt-merged (landed) |\n| sam | worktree wt-unmerged (feat/open) |"
-        tmp, root = workspace(rows, ownership)
+        tmp, root = workspace(rows, started("Landed work", "wt-merged") + "\n" + started("Open branch work", "wt-unmerged"))
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
         self.assertEqual([r.task for r in report.reopen], ["Open branch work"])
@@ -405,7 +351,7 @@ class AuditTest(unittest.TestCase):
         local main, which nothing moves, still lags."""
         tmp, root = workspace(
             "| Open branch work | sam | done 10:30 | 09:00 |  | Checklist: Open branch work |",
-            "| sam | worktree wt-unmerged (feat/open) |",
+            started("Open branch work", "wt-unmerged"),
         )
         self.addCleanup(tmp.cleanup)
         clone, tree = root / "repo", root / "trees" / "wt-unmerged"
@@ -420,7 +366,7 @@ class AuditTest(unittest.TestCase):
         """#567 review: `landed` reads origin/main too. The tree moves on past the pushed commit, so only the cited
         sha, on origin/main alone, can clear the task."""
         tmp, root = workspace("| Open branch work | sam | @STATE@ | 09:00 |  | Checklist: Open branch work |",
-                              "| sam | worktree wt-unmerged (feat/open) |")
+                              started("Open branch work", "wt-unmerged"))
         self.addCleanup(tmp.cleanup)
         tree = root / "trees" / "wt-unmerged"
         sha = git("rev-parse", "--short", "HEAD", cwd=tree).strip()
@@ -433,22 +379,24 @@ class AuditTest(unittest.TestCase):
     def test_a_removed_tree_whose_branch_merged_on_the_forge_is_cleaned_up(self):
         """#567 review: `missing_tree` reads origin/main too."""
         tmp, root = workspace("| Open branch work | sam | waiting | 09:00 |  | Checklist: Open branch work |",
-                              "| sam | worktree wt-unmerged (feat/open) |")
+                              started("Open branch work", "wt-unmerged"))
         self.addCleanup(tmp.cleanup)
         clone, tree = root / "repo", root / "trees" / "wt-unmerged"
         git("push", "origin", "HEAD:main", cwd=tree)
         git("worktree", "remove", "--force", str(tree), cwd=clone)
+        git("branch", "-m", "feat/open", "wt-unmerged", cwd=clone)
         line = next(ln for ln in al.audit(root, "2026-09-17").lines if "wt-unmerged" in ln)
         self.assertIn("is on main; merged and cleaned up", line)
 
     def test_a_tag_named_like_a_removed_trees_branch_does_not_stand_in_for_it(self):
         """#567 review: `missing_tree` asks about the branch itself, so a tag of the same name on main does not clear it."""
         tmp, root = workspace("| Open branch work | sam | waiting | 09:00 |  | Checklist: Open branch work |",
-                              "| sam | worktree wt-unmerged (feat/open) |")
+                              started("Open branch work", "wt-unmerged"))
         self.addCleanup(tmp.cleanup)
         clone = root / "repo"
         git("worktree", "remove", "--force", str(root / "trees" / "wt-unmerged"), cwd=clone)
-        git("tag", "feat/open", "main", cwd=clone)
+        git("branch", "-m", "feat/open", "wt-unmerged", cwd=clone)
+        git("tag", "wt-unmerged", "main", cwd=clone)
         line = next(ln for ln in al.audit(root, "2026-09-17").lines if "wt-unmerged" in ln)
         self.assertIn("is not on main", line)
 
@@ -456,7 +404,7 @@ class AuditTest(unittest.TestCase):
         """#567 review: local main ahead of origin/main (integrated, not yet pushed) still holds the work."""
         tmp, root = workspace(
             "| Open branch work | sam | done 10:30 | 09:00 |  | Checklist: Open branch work |",
-            "| sam | worktree wt-unmerged (feat/open) |",
+            started("Open branch work", "wt-unmerged"),
         )
         self.addCleanup(tmp.cleanup)
         clone = root / "repo"
@@ -473,7 +421,7 @@ class ViewReuseTest(unittest.TestCase):
     def test_an_audit_builds_a_low_constant_number_of_views_per_tree(self):
         tmp, root = workspace(
             "| Open branch work | robin | done 10:00 | 09:00 |  | Checklist: Open branch work |",
-            "| robin | worktree wt-unmerged (feat/open) |",
+            started("Open branch work", "wt-unmerged"),
         )
         self.addCleanup(tmp.cleanup)
         # A cited sha, so `landed`'s reads ride the same per-tree view too.
@@ -538,7 +486,7 @@ class OnMainTest(unittest.TestCase):
     def test_a_branch_named_like_origin_main_does_not_stand_in_for_it(self):
         # With no refs/remotes/origin/main, git's lookup would take a branch called `refs/remotes/origin/main`.
         tmp, root = workspace("| Open branch work | sam | done 10:30 | 09:00 |  | Checklist: Open branch work |",
-                              "| sam | worktree wt-unmerged (feat/open) |")
+                              started("Open branch work", "wt-unmerged"))
         self.addCleanup(tmp.cleanup)
         clone = root / "repo"
         git("update-ref", "-d", git_trees.REF, cwd=clone)
@@ -550,7 +498,7 @@ class PushGapTest(unittest.TestCase):
     def test_main_even_with_origin_is_reported_as_even(self):
         tmp, root = workspace(
             "| Landed work | robin | done 10:00 | 09:00 |  | Checklist: Landed work |",
-            "| robin | worktree wt-merged (landed) |",
+            started("Landed work", "wt-merged"),
         )
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
@@ -559,7 +507,7 @@ class PushGapTest(unittest.TestCase):
     def test_a_commit_on_main_not_pushed_is_reported_as_unpushed(self):
         tmp, root = workspace(
             "| Landed work | robin | done 10:00 | 09:00 |  | Checklist: Landed work |",
-            "| robin | worktree wt-merged (landed) |",
+            started("Landed work", "wt-merged"),
         )
         self.addCleanup(tmp.cleanup)
         clone = root / "repo"
@@ -593,7 +541,7 @@ class ArgvTest(unittest.TestCase):
     def test_exit_code_counts_the_rows_to_reopen(self):
         tmp, root = workspace(
             "| Open branch work | robin | done 10:00 | 09:00 |  | Checklist: Open branch work |",
-            "| robin | worktree wt-unmerged (feat/open) |",
+            started("Open branch work", "wt-unmerged"),
         )
         self.addCleanup(tmp.cleanup)
         self.assertEqual(al.main(["--root", str(root), "--date", "2026-09-17"]), 1)
@@ -601,7 +549,7 @@ class ArgvTest(unittest.TestCase):
     def test_a_clean_tracker_exits_zero(self):
         tmp, root = workspace(
             "| Landed work | robin | done 10:00 | 09:00 |  | Checklist: Landed work |",
-            "| robin | worktree wt-merged (landed) |",
+            started("Landed work", "wt-merged"),
         )
         self.addCleanup(tmp.cleanup)
         self.assertEqual(al.main(["--root", str(root), "--date", "2026-09-17"]), 0)
@@ -609,61 +557,6 @@ class ArgvTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class MultipleRowsPerContextTest(unittest.TestCase):
-    """One context, several rows: the parenthetical is the only thing saying which task a row is about.
-
-    Live shape from 2026-09-17: `architecture [a16e40]` owned both the agent-parked deletion (no tree,
-    finished) and the ARCHITECTURE.md reconciliation (a tree). Matching on the bare context name gave
-    the deletion task the other row's worktree and reopened a task that was genuinely done.
-    """
-
-    OWNERSHIP = (
-        "| architecture [a16e40] (agent-parked deletion, 11:13-11:53, done) | Projects/week-1/agent-parked/ (deleted) |\n"
-        "| architecture [a16e40] (ARCHITECTURE.md reconciliation, from 11:53) | worktree wt-unmerged (docs/arch from main): ARCHITECTURE.md |"
-    )
-    ROWS = (
-        "| Delete agent-parked/ | architecture | done | 09:00 |  |  |\n"
-        "| Reconcile ARCHITECTURE.md | architecture | done | 09:00 |  |  |"
-    )
-
-    def test_a_no_tree_task_does_not_inherit_a_sibling_rows_worktree(self):
-        tmp, root = workspace(self.ROWS, self.OWNERSHIP)
-        self.addCleanup(tmp.cleanup)
-        report = al.audit(root, "2026-09-17")
-        reopened = [r.task for r in report.reopen]
-        self.assertNotIn("Delete agent-parked/", reopened)
-
-    def test_the_task_the_row_names_still_reopens(self):
-        tmp, root = workspace(self.ROWS, self.OWNERSHIP)
-        self.addCleanup(tmp.cleanup)
-        report = al.audit(root, "2026-09-17")
-        self.assertEqual([r.task for r in report.reopen], ["Reconcile ARCHITECTURE.md"])
-
-    def test_a_task_no_row_names_is_reported_as_ambiguous_not_reopened(self):
-        ownership = (
-            "| pair [a1b2c3] (first thing, from 10:00) | worktree wt-unmerged (feat/open) |\n"
-            "| pair [a1b2c3] (second thing, from 11:00) | worktree wt-dirty (feat/dirty) |"
-        )
-        tmp, root = workspace("| Something else entirely | pair | done | 09:00 |  |  |", ownership)
-        self.addCleanup(tmp.cleanup)
-        report = al.audit(root, "2026-09-17")
-        self.assertEqual(report.reopen, [])
-        self.assertTrue(
-            any("ambiguous" in line and "Something else entirely" in line for line in report.lines),
-            report.lines,
-        )
-
-    def test_one_row_for_a_context_needs_no_parenthetical_at_all(self):
-        """The common case must not regress: a single row owns everything that context owns."""
-        tmp, root = workspace(
-            "| Ship the thing | solo | done | 09:00 |  |  |",
-            "| solo [a1b2c3] | worktree wt-unmerged (feat/open) |",
-        )
-        self.addCleanup(tmp.cleanup)
-        report = al.audit(root, "2026-09-17")
-        self.assertEqual([r.task for r in report.reopen], ["Ship the thing"])
 
 
 class OrphanJoinTest(unittest.TestCase):
@@ -674,7 +567,7 @@ class OrphanJoinTest(unittest.TestCase):
     """
 
     DIRTY = "| Unsaved work | sam | waiting | 09:00 |  | Checklist: Unsaved work |"
-    OWNS = "| sam | worktree wt-dirty (feat/dirty) |"
+    OWNS = started("Unsaved work", "wt-dirty")
 
     def test_uncommitted_work_whose_owner_is_not_a_session_is_named(self) -> None:
         tmp, root = workspace(self.DIRTY, self.OWNS, sessions=session_row("robin"))
@@ -715,7 +608,7 @@ class OrphanJoinTest(unittest.TestCase):
         self.assertEqual(al.audit(root, "2026-09-17").orphans, [])
 
     OPEN = "| Open branch work | sam | waiting | 09:00 |  | Checklist: Open branch work |"
-    OPEN_OWNS = "| sam | worktree wt-unmerged (feat/open) |"
+    OPEN_OWNS = started("Open branch work", "wt-unmerged")
 
     def test_pushed_work_is_not_an_orphan_however_gone_its_owner(self) -> None:
         """An unmerged branch a remote holds is recoverable by name. One only this tree holds is not (#43)."""
@@ -746,9 +639,9 @@ class OrphanJoinTest(unittest.TestCase):
         [orphan] = al.audit(root, "2026-09-17").orphans
         self.assertIn("1 unpushed", str(orphan))
 
-    # A one-shot's File ownership row is keyed on its task, which is never a session.
+    # A one-shot's started line is keyed on its task, which is never a session.
     ONE_SHOT = "| Unsaved work | impl-01 | running 09:10 | 09:00 |  | Checklist: Unsaved work |"
-    TASK_KEYED = "| Unsaved work | worktree wt-dirty (feat/dirty) |"
+    TASK_KEYED = started("Unsaved work", "wt-dirty")
 
     def launcher(self, root: Path, pid: int) -> None:
         d = root / "trees/wt-dirty/.chief-of-stuff"
@@ -793,11 +686,11 @@ class OwnershipRowKeyedOnShortNameTest(unittest.TestCase):
 
     ITEM = "Security audit: the upload handler, every path, findings into notes/audit.md"
     TASK = f"| {ITEM} | Robin | done 10:00 | 09:00 |  | Checklist: Security audit |"
-    SHORT_KEYED = "| Security audit | worktree wt-dirty (feat/dirty) |"
-    MISKEYED = "| ghost (unrelated) | worktree wt-dirty (feat/dirty) |"
+    SHORT_KEYED = started("Security audit", "wt-dirty")
+    MISKEYED = started("ghost (unrelated)", "wt-dirty")
 
     def row(self, context: str, tree: str = "wt-a") -> al.OwnerRow:
-        return al.parse_ownership(f"| {context} | worktree {tree} (feat/a) |")[0]
+        return al.OwnerRow(context, [tree])
 
     def test_a_row_keyed_on_a_short_name_is_not_orphaned_when_sessions_has_rows(self) -> None:
         """The issue's repro: a done one-shot's short-keyed row, one just-spawned session row, ref empty."""
@@ -810,7 +703,7 @@ class OwnershipRowKeyedOnShortNameTest(unittest.TestCase):
         """A head under 12 characters is one `short_name` does not cut to, so the colon prefix is the key."""
         item = "Tab check: confirm this session came up in a tab and change nothing at all"
         task = f"| {item} | Robin | done 10:00 | 09:00 |  | Checklist: Tab check |"
-        tmp, root = workspace(task, "| Tab check | worktree wt-dirty (feat/dirty) |",
+        tmp, root = workspace(task, started("Tab check", "wt-dirty"),
                               sessions=session_row("sam", ref=""))
         self.addCleanup(tmp.cleanup)
         self.assertEqual(al.audit(root, "2026-09-17").orphans, [])
@@ -859,7 +752,7 @@ class TreesOnDiskTest(unittest.TestCase):
         return proc.pid
 
     def test_a_gone_workers_unpushed_tree_no_row_names_is_orphaned(self) -> None:
-        """The acceptance case: one committed, unpushed commit; no File ownership row; its worker's PID gone."""
+        """The acceptance case: one committed, unpushed commit; no started line; its worker's PID gone."""
         tmp, root = workspace(self.TASK, "", sessions=session_row("robin"))
         self.addCleanup(tmp.cleanup)
         self.register(root, "impl-7", self.dead_pid(), "wt-unmerged")
@@ -905,7 +798,9 @@ class TreesOnDiskTest(unittest.TestCase):
         self.assertFalse(any("wt-merged" in str(f) for f in report.orphans + report.unclaimed), report.lines)
 
     def test_no_unclaimed_count_when_there_is_none(self) -> None:
-        tmp, root = workspace(self.TASK, "| robin | worktree wt-dirty · worktree wt-unmerged |", sessions=session_row("robin"))
+        tmp, root = workspace(self.TASK + "\n| Other work | robin | waiting | 09:00 |  | c |",
+                              started("Landed work", "wt-dirty") + "\n" + started("Other work", "wt-unmerged"),
+                              sessions=session_row("robin"))
         self.addCleanup(tmp.cleanup)
         self.assertNotIn("unclaimed=", al.audit(root, "2026-09-17").lines[-1])
 
@@ -918,34 +813,37 @@ class MissingTreeTest(unittest.TestCase):
     made without the suffix. One is housekeeping; the other is a task pointing at nothing.
     """
 
-    def remove(self, root: Path, name: str) -> None:
+    def remove(self, root: Path, name: str, branch: str = "") -> None:
         git("worktree", "remove", "--force", str(root / "trees" / name), cwd=root / "repo")
+        if branch:
+            # A started line names no branch (#1039), so only a branch named like the tree is found.
+            git("branch", "-m", branch, name, cwd=root / "repo")
 
     def test_a_merged_branch_with_no_tree_is_routine(self) -> None:
         tmp, root = workspace(
             "| Landed work | robin | done 10:00 | 09:00 |  | Checklist: Landed work |",
-            "| robin | worktree wt-merged (landed) |")
+            started("Landed work", "wt-merged"))
         self.addCleanup(tmp.cleanup)
-        self.remove(root, "wt-merged")
+        self.remove(root, "wt-merged", "landed")
         line = next(ln for ln in al.audit(root, "2026-09-17").lines if "wt-merged" in ln)
-        self.assertIn("landed", line)
+        self.assertIn("merged and cleaned up", line)
         self.assertIn("on main", line)
         self.assertNotIn("never", line)
 
     def test_an_unmerged_branch_with_no_tree_is_the_alarming_one(self) -> None:
         tmp, root = workspace(
             "| Open branch work | sam | waiting | 09:00 |  | Checklist: Open branch work |",
-            "| sam | worktree wt-unmerged (feat/open) |")
+            started("Open branch work", "wt-unmerged"))
         self.addCleanup(tmp.cleanup)
-        self.remove(root, "wt-unmerged")
+        self.remove(root, "wt-unmerged", "feat/open")
         line = next(ln for ln in al.audit(root, "2026-09-17").lines if "wt-unmerged" in ln)
-        self.assertIn("feat/open", line)
+        self.assertIn("branch wt-unmerged", line)
         self.assertIn("not on main", line)
 
     def test_a_name_with_no_branch_behind_it_was_never_created(self) -> None:
         tmp, root = workspace(
             "| Planned work | sam | waiting | 09:00 |  | Checklist: Planned work |",
-            "| sam | worktree wt-never-made (feat/planned) |")
+            started("Planned work", "wt-never-made"))
         self.addCleanup(tmp.cleanup)
         line = next(ln for ln in al.audit(root, "2026-09-17").lines if "wt-never-made" in ln)
         self.assertIn("no branch", line)
@@ -954,7 +852,7 @@ class MissingTreeTest(unittest.TestCase):
         """Every answer here is git's answer, and git needs a repository to be asked in."""
         tmp, root = workspace(
             "| Planned work | sam | waiting | 09:00 |  | Checklist: Planned work |",
-            "| sam | worktree wt-never-made (feat/planned) |")
+            started("Planned work", "wt-never-made"))
         self.addCleanup(tmp.cleanup)
         for name in ("wt-merged", "wt-unmerged", "wt-dirty"):
             self.remove(root, name)
@@ -971,8 +869,7 @@ class UnclaimedOwnershipRowTest(unittest.TestCase):
     straight past all three — the very trees finding 47 was written about.
     """
 
-    OWNS = ("| robin | worktree wt-merged (landed) |\n"
-            "| nobody (the TTL fix, orphaned) | worktree wt-dirty (feat/dirty) |")
+    OWNS = started("Landed work", "wt-merged") + "\n" + started("The TTL fix", "wt-dirty")
     TASK = "| Landed work | robin | done 10:00 | 09:00 |  | Checklist: Landed work |"
 
     def test_a_row_no_task_claims_is_still_audited(self) -> None:
@@ -986,7 +883,7 @@ class UnclaimedOwnershipRowTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
         self.assertEqual(len(report.orphans), 1, report.lines)
-        self.assertIn("nobody", str(report.orphans[0]))
+        self.assertIn("the ttl fix", str(report.orphans[0]))
 
     def test_an_unclaimed_row_never_reopens_a_task(self) -> None:
         """It belongs to no task, so there is no row to reopen and nothing to infer about one."""
@@ -997,7 +894,7 @@ class UnclaimedOwnershipRowTest(unittest.TestCase):
     def test_a_tree_is_reported_once_however_many_rows_reach_it(self) -> None:
         tmp, root = workspace(
             "| Landed work | robin | done 10:00 | 09:00 |  | Checklist: Landed work |",
-            "| robin | worktree wt-merged (landed) |\n| nobody | worktree wt-merged (landed) |",
+            started("Landed work", "wt-merged") + "\n" + started("Earlier work", "wt-merged"),
             sessions=session_row("robin"))
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
@@ -1015,7 +912,7 @@ class MainShaTest(unittest.TestCase):
     def test_the_audit_names_the_commit_on_main_a_claim_must_pin_to(self) -> None:
         tmp, root = workspace(
             "| Landed work | robin | done 10:00 | 09:00 |  | Checklist: Landed work |",
-            "| robin | worktree wt-merged (landed) |")
+            started("Landed work", "wt-merged"))
         self.addCleanup(tmp.cleanup)
         sha = git("rev-parse", "--short", "main", cwd=root / "repo")
         line = next(ln for ln in al.audit(root, "2026-09-17").lines if "origin/main" in ln)
@@ -1025,7 +922,7 @@ class MainShaTest(unittest.TestCase):
         """Every answer here is git's answer, and there is nowhere left to ask."""
         tmp, root = workspace(
             "| Planned work | sam | waiting | 09:00 |  | Checklist: Planned work |",
-            "| sam | worktree wt-never-made (feat/planned) |")
+            started("Planned work", "wt-never-made"))
         self.addCleanup(tmp.cleanup)
         # The audit walks the trees on disk (#43), so none may be left there.
         for name in ("wt-merged", "wt-unmerged", "wt-dirty"):
@@ -1046,7 +943,7 @@ class StopTest(unittest.TestCase):
     def setUp(self):
         self.tmp, self.root = workspace(
             "| Merge D4 | impl-3 | running 02:20 | 09:00 |  | c |",
-            "| Merge D4 | worktree wt-unmerged (feat/open) |",
+            started("Merge D4", "wt-unmerged"),
             session_row("impl-3"))
         stop = self.root / "trees" / "wt-unmerged" / al.PROMPT_DIR
         stop.mkdir(parents=True)
@@ -1089,7 +986,7 @@ class StopEdgesTest(unittest.TestCase):
     def setUp(self):
         self.tmp, self.root = workspace(
             "| Merge D4 | impl-3 | running 02:20 | 09:00 |  | c |",
-            "| Merge D4 | worktree wt-unmerged (feat/open) |",
+            started("Merge D4", "wt-unmerged"),
             session_row("impl-3"))
         self.dir = self.root / "trees" / "wt-unmerged" / al.PROMPT_DIR
         self.dir.mkdir(parents=True)
@@ -1129,7 +1026,7 @@ class DecisionQueueTest(unittest.TestCase):
     """Emitting N asks is emitting none, so the queue has to be one ordered list with a payload per row."""
 
     def setUp(self):
-        self.tmp, self.root = workspace("| A | Robin | open | 09:00 |  | c |", "| A | none |")
+        self.tmp, self.root = workspace("| A | Robin | open | 09:00 |  | c |", "")
         self.addCleanup(self.tmp.cleanup)
 
     def test_a_clean_queue_reports_its_head_and_no_fault(self):
@@ -1173,7 +1070,7 @@ class StopReadGuardTest(unittest.TestCase):
     def setUp(self):
         self.tmp, self.root = workspace(
             "| Merge D4 | impl-3 | running 02:20 | 09:00 |  | c |",
-            "| Merge D4 | worktree wt-unmerged (feat/open) |",
+            started("Merge D4", "wt-unmerged"),
             session_row("impl-3"))
         self.dir = self.root / "trees" / "wt-unmerged" / al.PROMPT_DIR
         self.dir.mkdir(parents=True)
@@ -1203,7 +1100,7 @@ class PushGapNamesMainTest(unittest.TestCase):
     """The one sha the CIMP gate rests on. `Verified` is re-checkable only if it names the branch it claims to."""
 
     def setUp(self):
-        self.tmp, self.root = workspace("| A | Robin | open | 09:00 |  | c |", "| A | none |")
+        self.tmp, self.root = workspace("| A | Robin | open | 09:00 |  | c |", "")
         self.addCleanup(self.tmp.cleanup)
         self.main = git("rev-parse", "--short", "main", cwd=self.root / "repo")
 
@@ -1246,35 +1143,34 @@ class RefJoinTest(unittest.TestCase):
     is the join.
     """
 
-    DIRTY = "| Unsaved work | sam | waiting | 09:00 |  | Checklist: Unsaved work |"
-
-    def audit(self, ownership: str, sessions: str):
-        tmp, root = workspace(self.DIRTY, ownership, sessions=sessions)
+    def audit(self, owner: str, sessions: str):
+        tmp, root = workspace(f"| Unsaved work | {owner} | waiting | 09:00 |  | Checklist: Unsaved work |",
+                              started("Unsaved work", "wt-dirty"), sessions=sessions)
         self.addCleanup(tmp.cleanup)
         return al.audit(root, "2026-09-17")
 
     def test_a_renamed_session_is_not_an_orphan(self) -> None:
-        report = self.audit("| sam [768194] | worktree wt-dirty (feat/dirty) |",
+        report = self.audit("sam [768194]",
                             session_row("**openemr-arch** (tab title `sam`)", ref="768194"))
         self.assertEqual(report.orphans, [], report.lines)
 
     def test_a_bolded_session_name_still_joins_when_there_is_no_ref(self) -> None:
-        report = self.audit("| sam | worktree wt-dirty (feat/dirty) |", session_row("**sam**"))
+        report = self.audit("sam", session_row("**sam**"))
         self.assertEqual(report.orphans, [], report.lines)
 
     def test_a_ref_no_session_carries_is_an_orphan_however_familiar_the_name(self) -> None:
-        report = self.audit("| sam [999999] | worktree wt-dirty (feat/dirty) |",
+        report = self.audit("sam [999999]",
                             session_row("sam", ref="a1b2c3"))
         self.assertEqual(len(report.orphans), 1, report.lines)
         self.assertIn("999999", str(report.orphans[0]))
 
     def test_with_no_ref_on_the_owner_the_name_still_decides(self) -> None:
-        report = self.audit("| sam | worktree wt-dirty (feat/dirty) |", session_row("sam", ref="768194"))
+        report = self.audit("sam", session_row("sam", ref="768194"))
         self.assertEqual(report.orphans, [], report.lines)
 
     def test_a_tracker_whose_sessions_carry_no_refs_falls_back_to_names(self) -> None:
         """An empty ref column is not a roster of nobody, the same way an empty table is not."""
-        report = self.audit("| sam [768194] | worktree wt-dirty (feat/dirty) |", session_row("sam", ref=""))
+        report = self.audit("sam [768194]", session_row("sam", ref=""))
         self.assertEqual(report.orphans, [], report.lines)
 
 
@@ -1287,7 +1183,7 @@ class OwnsRefTest(unittest.TestCase):
     """
 
     def row(self, context: str) -> al.OwnerRow:
-        return al.parse_ownership(f"| {context} | worktree wt-a (feat/a) |")[0]
+        return al.OwnerRow(context, ["wt-a"])
 
     def test_two_names_on_one_ref_are_one_context(self) -> None:
         self.assertTrue(al.owns(self.row("architecture-review-setup [768194]"), "openemr-arch [768194]"))
@@ -1298,17 +1194,6 @@ class OwnsRefTest(unittest.TestCase):
     def test_with_a_ref_on_one_side_only_the_name_still_decides(self) -> None:
         self.assertTrue(al.owns(self.row("sam"), "sam [aaaaaa]"))
         self.assertTrue(al.owns(self.row("sam [aaaaaa]"), "sam"))
-
-    def test_a_task_renamed_away_from_its_row_is_still_audited(self) -> None:
-        tmp, root = workspace(
-            "| Landed work | openemr-arch [768194] | done | 09:00 |  | Checklist: Landed work |",
-            "| architecture-review-setup [768194] | worktree wt-unmerged (feat/open) |",
-            sessions=session_row("openemr-arch", ref="768194"))
-        self.addCleanup(tmp.cleanup)
-        report = al.audit(root, "2026-09-17")
-        self.assertEqual(len(report.reopen), 1, report.lines)
-        self.assertIn("wt-unmerged", str(report.reopen[0]))
-
 
 class ReopenGroupsByTreeTest(unittest.TestCase):
     """Finding 116, option (c), from `gauntlet-b2` by way of `board-ux-improvements`.
@@ -1322,10 +1207,10 @@ class ReopenGroupsByTreeTest(unittest.TestCase):
 
     TWO = ("| First | robin | done 10:00 | 09:00 |  | Checklist: First |\n"
            "| Second | robin | done 10:00 | 09:00 |  | Checklist: Second |")
-    OWNS = "| robin | worktree wt-unmerged (feat/open) |"
 
     def report(self):
-        tmp, root = workspace(self.TWO, self.OWNS, sessions=session_row("robin"))
+        tmp, root = workspace(self.TWO, started("First", "wt-unmerged") + "\n" + started("Second", "wt-unmerged"),
+                              sessions=session_row("robin"))
         self.addCleanup(tmp.cleanup)
         return al.audit(root, "2026-09-17")
 
@@ -1353,7 +1238,7 @@ class ReopenGroupsByTreeTest(unittest.TestCase):
         tmp, root = workspace(
             "| First | robin | done 10:00 | 09:00 |  | Checklist: First |\n"
             "| Other | sam | done 10:00 | 09:00 |  | Checklist: Other |",
-            "| robin | worktree wt-unmerged (feat/open) |\n| sam | worktree wt-dirty (feat/dirty) |",
+            started("First", "wt-unmerged") + "\n" + started("Other", "wt-dirty"),
             sessions=session_row("robin") + "\n" + session_row("sam"))
         self.addCleanup(tmp.cleanup)
         lines = [l for l in al.audit(root, "2026-09-17").lines if l.startswith("reopen:")]
@@ -1366,7 +1251,8 @@ class ReopenGroupsByTreeTest(unittest.TestCase):
         tmp, root = workspace(
             "| **A task whose item is bold and much longer than the short_name cut** | robin "
             "| done 10:00 | 09:00 |  | Checklist: x |",
-            self.OWNS, sessions=session_row("robin"))
+            started("A task whose item is bold and much longer than the short_name cut", "wt-unmerged"),
+            sessions=session_row("robin"))
         self.addCleanup(tmp.cleanup)
         line = [l for l in al.audit(root, "2026-09-17").lines if l.startswith("reopen:")][0]
         self.assertIn("A task whose item is bold", line)
@@ -1385,12 +1271,12 @@ class ShaClosesTheLaneTest(unittest.TestCase):
     heuristic did not have, and why it was discarded after this suite falsified it.
     """
 
-    OWNS = "| robin | worktree wt-unmerged (feat/open) |"
-    DIRTY = "| sam | worktree wt-dirty (feat/dirty) |"
+    OWNS = started("Landed work", "wt-unmerged")
+    DIRTY = started("Landed work", "wt-dirty")
 
-    def tracker(self, state: str, ownership: str | None = None, sessions: str = "", owner: str = "robin"):
+    def tracker(self, state: str, log: str | None = None, sessions: str = "", owner: str = "robin"):
         tmp, root = workspace(f"| Landed work | {owner} | @STATE@ | 09:00 |  | Checklist: Landed work |",
-                              ownership or self.OWNS, sessions)
+                              log or self.OWNS, sessions)
         self.addCleanup(tmp.cleanup)
         repo = root / "repo"
         state = state.replace("@main@", git("rev-parse", "--short", "main", cwd=repo).strip())
@@ -1409,12 +1295,6 @@ class ShaClosesTheLaneTest(unittest.TestCase):
         self.assertEqual(len(report.reopen), 1, report.lines)
         self.assertIn("is not on main", report.reopen[0].why)
 
-    def test_a_task_with_no_sha_reopens_exactly_as_before(self) -> None:
-        """The regression guard against 116a: no sha is no evidence, and no evidence clears nothing."""
-        report = self.tracker("done 10:00")
-        self.assertEqual(len(report.reopen), 1, report.lines)
-        self.assertIn("not on main", report.reopen[0].why)
-
     def test_a_malformed_sha_falls_back_and_says_so(self) -> None:
         report = self.tracker("done 10:00 not-a-sha")
         self.assertEqual(len(report.reopen), 1, report.lines)
@@ -1429,7 +1309,7 @@ class ShaClosesTheLaneTest(unittest.TestCase):
     def test_a_closed_task_is_still_checked_for_orphaned_work(self) -> None:
         """This rule touches `reopen` and nothing else."""
         # `sam`, not the fixture's user: the user is exempt from the orphan join by design.
-        report = self.tracker("done 10:00 @main@", ownership=self.DIRTY,
+        report = self.tracker("done 10:00 @main@", log=self.DIRTY,
                               sessions=session_row("kim"), owner="sam")
         self.assertEqual(report.reopen, [], report.lines)
         self.assertEqual(len(report.orphans), 1, report.lines)
@@ -1728,17 +1608,11 @@ class ClosedIssueOnOpenTaskTest(unittest.TestCase):
 | Unlanded work | Unlanded work, its tree still ahead of main | robin | waiting | 09:00 |  | S | #6 | c |
 | Landed work | Landed work, its tree already merged | kim | waiting | 09:00 |  | S | #7 | c |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| robin | worktree wt-unmerged (feat/open) |
-| kim | worktree wt-merged (landed) |
-
 ## Log
 
 - 09:00 opened the day
-"""
+""" + started("Unlanded work, its tree still ahead of main", "wt-unmerged") + "\n" \
+        + started("Landed work, its tree already merged", "wt-merged") + "\n"
 
     def workspace(self) -> Path:
         tmp = tempfile.TemporaryDirectory()
@@ -1839,39 +1713,19 @@ class ClosedIssueOnOpenTaskTest(unittest.TestCase):
         self.assert_asks_the_user_it_is_unknown(unreadable)
 
     def test_an_unlanded_worktree_keyed_on_the_tasks_name_asks_the_user_too(self):
-        """#51: a prefix-less item whose File ownership row is keyed on the task's `name` — `_tree_unlanded`
+        """#51: a prefix-less item whose started line is keyed on the task's `name` — `_tree_unlanded`
         must hand the name to `rows_for`, or this task is attributed no tree and is told to write it done."""
         root = self.workspace()
         tracker = root / "daily" / "2026-09-17-tracker.md"
         tracker.write_text(tracker.read_text().replace(
-            "\n## File ownership",
-            "| alpha | Tidy the importer | sam | waiting | 09:00 |  | S | #8 | c |\n\n## File ownership", 1
-        ).replace("| kim | worktree wt-merged (landed) |", "| kim | worktree wt-merged (landed) |\n| alpha | worktree wt-unmerged (feat/open) |"))
+            "\n## Log", "| alpha | Tidy the importer | sam | waiting | 09:00 |  | S | #8 | c |\n\n## Log", 1
+        ) + started("alpha", "wt-unmerged") + "\n")
         gh = FakeGh({"o/backlog": {5: "CLOSED", 6: "CLOSED", 7: "CLOSED", 8: "CLOSED"}})
         report = al.audit(root, "2026-09-17", gh=gh)
         self.assertIn(
             "issue: alpha — #8 is closed but its tree has work not on main; "
             "ask the user: reopen the issue or drop the work",
             [str(f) for f in report.issues])
-
-    def test_a_task_named_for_a_listed_session_does_not_take_that_sessions_tree(self):
-        """#51: `arch` is a listed session, so the bare `arch` row is that session's own, not the open task named
-        `arch`'s (kim's): `_tree_unlanded` must key on no name, and the closed issue's task is written done."""
-        root = self.workspace()
-        tracker = root / "daily" / "2026-09-17-tracker.md"
-        tracker.write_text(tracker.read_text().replace(
-            "\n## File ownership",
-            "| arch | Review the architecture | kim | waiting | 09:00 |  | S | #8 | c |\n\n"
-            "## Sessions\n\n| ref | name | state | doing | waiting on | free at | constraints | children | last reply |\n"
-            "|---|---|---|---|---|---|---|---|---|\n"
-            "| a1b2c3 | arch | working | a task | | now | | none | 09:30 |\n"
-            "| b2c3d4 | kim | working | a task | | now | | none | 09:30 |\n\n## File ownership", 1
-        ).replace("| kim | worktree wt-merged (landed) |",
-                  "| kim | worktree wt-merged (landed) |\n| arch | worktree wt-unmerged (feat/open) |"))
-        gh = FakeGh({"o/backlog": {5: "CLOSED", 6: "CLOSED", 7: "CLOSED", 8: "CLOSED"}})
-        report = al.audit(root, "2026-09-17", gh=gh)
-        self.assertIn("issue: arch — #8 is closed; write the task done",
-                      [str(f) for f in report.issues])
 
 
 LANE_CLAUDE = CLAUDE + "- Settings: `cos.toml`\n"
@@ -1883,7 +1737,7 @@ LANE_TRACKER = TRACKER.replace(
     "| Unnamed lane | x | a | open | 10:00 | | M | designed | design | | c |\n"
     "| Wrong stage | x | a | open | 10:00 | | M | build | design | | c |\n"
     "| Blank stage | x | a | open | 10:00 | | M | build | | | c |\n"
-    "| No lane | a console action | a | open | 10:00 | | S | | | | c |").format(rows="", ownership="", sessions="")
+    "| No lane | a console action | a | open | 10:00 | | S | | | | c |").format(rows="", sessions="", log="")
 
 
 class LaneAuditTest(unittest.TestCase):
@@ -1915,7 +1769,7 @@ class LaneAuditTest(unittest.TestCase):
             self.assertEqual(al.main(["--root", str(self.root), "--date", "2026-09-17"]), 3)
 
     def test_no_lane_column_says_nothing(self):
-        (self.root / "daily" / "2026-09-17-tracker.md").write_text(TRACKER.format(rows="| x | a | open | 10:00 | | c |", ownership="", sessions=""))
+        (self.root / "daily" / "2026-09-17-tracker.md").write_text(TRACKER.format(rows="| x | a | open | 10:00 | | c |", sessions="", log=""))
         report = al.audit(self.root, "2026-09-17")
         self.assertEqual(report.lanes, [])
         self.assertNotIn("lanes=", report.lines[-1])
@@ -1931,7 +1785,7 @@ LANELESS_TRACKER = TRACKER.replace(
     "| Decision | a console action | a | open | 10:00 | | S | | | | c |\n"
     "| Step | a review | a | open | 10:00 | | S | | | workflow | c |\n"
     "| Finished | done earlier | a | done 09:00-10:00 | 09:00 | | S | | | | c |\n"
-    "| impl02 | impl02: standing implementer. wait idle | impl02 | waiting | 09:00 | | | | | | c |").format(rows="", ownership="", sessions="")
+    "| impl02 | impl02: standing implementer. wait idle | impl02 | waiting | 09:00 | | | | | | c |").format(rows="", sessions="", log="")
 
 
 class StageWithNoLaneTest(unittest.TestCase):
@@ -1982,7 +1836,7 @@ BUDGET_TRACKER = TRACKER.replace(
     "| At S | x | a | running 11:40 | 11:40 | | S | c |\n"
     "| Huge XL | x | a | running 06:00 | 06:00 | | XL | c |\n"
     "| Unsized | x | a | running 06:00 | 06:00 | | | c |\n"
-    "| Open L | x | a | open | 06:00 | | L | c |").format(rows="", ownership="", sessions="")
+    "| Open L | x | a | open | 06:00 | | L | c |").format(rows="", sessions="", log="")
 
 
 class BudgetAuditTest(unittest.TestCase):
@@ -2375,10 +2229,10 @@ class ShaFlagTest(unittest.TestCase):
     TREE = " [wt-dirty]"
 
     ROW = "| Open branch work | robin | done 10:00 | 09:00 |  | Checklist: Open branch work |"
-    OWNERSHIP = "| robin | worktree wt-unmerged (feat/open) |"
+    LOG = started("Open branch work", "wt-unmerged")
 
     def setUp(self) -> None:
-        tmp, self.root = workspace(self.ROW, self.OWNERSHIP)
+        tmp, self.root = workspace(self.ROW, self.LOG)
         self.addCleanup(tmp.cleanup)
         self.clone = self.root / "repo"
 
@@ -2757,7 +2611,7 @@ class ShaTreesTest(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        tmp, self.root = workspace(ShaFlagTest.ROW, ShaFlagTest.OWNERSHIP)
+        tmp, self.root = workspace(ShaFlagTest.ROW, ShaFlagTest.LOG)
         self.addCleanup(tmp.cleanup)
         self.clone, self.trees = self.root / "repo", self.root / "trees"
         self.sha = git("rev-parse", "origin/main", cwd=self.clone)
@@ -3239,9 +3093,9 @@ class ShaTreesTest(unittest.TestCase):
 NAMED_HEADER = "| name | item | owner | state | since | due | size | checklist |\n|---|---|---|---|---|---|---|---|"
 
 
-def named_workspace(rows: str, ownership: str, sessions: str = "") -> tuple[tempfile.TemporaryDirectory, Path]:
+def named_workspace(rows: str, log: str, sessions: str = "") -> tuple[tempfile.TemporaryDirectory, Path]:
     """`workspace` with the Tasks table carrying the `name` column (#51)."""
-    tmp, root = workspace(rows, ownership, sessions)
+    tmp, root = workspace(rows, log, sessions)
     tracker = root / "daily" / "2026-09-17-tracker.md"
     tracker.write_text(tracker.read_text().replace(
         "| item | owner | state | since | due | checklist |\n|---|---|---|---|---|---|", NAMED_HEADER))
@@ -3259,10 +3113,10 @@ class OwnershipRowKeyedOnNameTest(unittest.TestCase):
     BETA = "| beta | Trim the exporter | robin | done 10:00 | 09:00 |  | S | Checklist: Trim |"
 
     def row(self, context: str, tree: str = "wt-a") -> al.OwnerRow:
-        return al.parse_ownership(f"| {context} | worktree {tree} (feat/a) |")[0]
+        return al.OwnerRow(context, [tree])
 
     def test_a_task_whose_name_keys_the_row_reopens_for_that_trees_unlanded_work(self) -> None:
-        tmp, root = named_workspace(self.ALPHA, "| alpha | worktree wt-unmerged (feat/open) |")
+        tmp, root = named_workspace(self.ALPHA, started("alpha", "wt-unmerged"))
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
         self.assertEqual([r.task for r in report.reopen], ["Tidy the importer"], report.lines)
@@ -3271,7 +3125,7 @@ class OwnershipRowKeyedOnNameTest(unittest.TestCase):
     def test_two_tasks_of_one_owner_each_get_their_own_name_keyed_tree(self) -> None:
         tmp, root = named_workspace(
             f"{self.ALPHA}\n{self.BETA}",
-            "| alpha | worktree wt-unmerged (feat/open) |\n| beta | worktree wt-merged (landed) |")
+            started("alpha", "wt-unmerged") + "\n" + started("beta", "wt-merged"))
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
         self.assertEqual([r.task for r in report.reopen], ["Tidy the importer"], report.lines)
@@ -3306,86 +3160,15 @@ class OwnershipRowKeyedOnNameTest(unittest.TestCase):
         self.assertEqual(al.rows_for("Tidy the importer", "robin", [keyed, self.row("beta", "wt-b")], "alpha"),
                          ([keyed], ""))
 
-    # The join is on the whole context: a task's name is a slug in the namespace session names live in, so a
-    # task named `arch` must not take the rows of the session `arch`. Dispatch joins `row.context in keys`.
     @staticmethod
     def named(name: str, item: str, owner: str, state: str = "done 10:00") -> str:
         return f"| {name} | {item} | {owner} | {state} | 09:00 |  | S | Checklist: x |"
 
-    def test_a_session_rows_are_not_keyed_on_a_task_that_shares_the_sessions_name(self) -> None:
-        """The done task's owner-scored row is the merged importer tree; `arch (guide edit)` is the session's, not its."""
-        for label, ref, owner in (("plain", "", "arch"), ("ref", " [a1b2c3]", "arch [a1b2c3]")):
-            with self.subTest(label):
-                tmp, root = named_workspace(
-                    self.named("arch", "Delete the old importer", owner)
-                    + "\n" + self.named("docs", "Edit the guide", owner, "running 09:10"),
-                    f"| arch{ref} (importer deletion) | worktree wt-merged (landed) |\n"
-                    f"| arch{ref} (guide edit) | worktree wt-unmerged (feat/open) |",
-                    sessions=session_row("arch"))
-                self.addCleanup(tmp.cleanup)
-                report = al.audit(root, "2026-09-17")
-                self.assertEqual(report.reopen, [], report.lines)
-
-    def test_a_row_of_another_session_is_not_keyed_on_a_task_named_for_it(self) -> None:
-        tmp, root = named_workspace(
-            self.named("arch", "Delete the old importer", "kim"),
-            "| kim | worktree wt-merged (landed) |\n| arch (guide edit) | worktree wt-unmerged (feat/open) |",
-            sessions=session_row("arch") + "\n" + session_row("kim", "b2c3d4"))
-        self.addCleanup(tmp.cleanup)
-        self.assertEqual(al.audit(root, "2026-09-17").reopen, [])
-
-    def test_a_dead_sessions_row_is_not_kept_live_by_a_task_named_for_it(self) -> None:
-        tmp, root = named_workspace(
-            self.named("arch", "Review the architecture", "kim", "running 09:10"),
-            "| arch (deletion) | worktree wt-unmerged (feat/open) |", sessions=session_row("kim"))
-        self.addCleanup(tmp.cleanup)
-        report = al.audit(root, "2026-09-17")
-        self.assertEqual(len(report.orphans), 1, report.lines)
-        orphan = report.orphans[0]
-        self.assertIn("wt-unmerged", str(orphan))
-        self.assertIn("is not in ## Sessions", str(orphan))
-
-    def test_a_dead_sessions_ref_row_is_not_kept_live_by_a_task_named_for_it(self) -> None:
-        tmp, root = named_workspace(
-            self.named("arch", "Review the architecture", "kim", "running 09:10"),
-            "| arch [ffff01] (deletion) | worktree wt-unmerged (feat/open) |", sessions=session_row("kim"))
-        self.addCleanup(tmp.cleanup)
-        report = al.audit(root, "2026-09-17")
-        self.assertEqual(len(report.orphans), 1, report.lines)
-        orphan = report.orphans[0]
-        self.assertIn("wt-unmerged", str(orphan))
-        self.assertIn("names a ref no ## Sessions row carries", str(orphan))
-
-    # A context that is the name of a session listed in `## Sessions` is that session's row, not a task-name key:
-    # a session's File ownership row may be the bare session name, and a task named for the session must not take it.
-    def test_a_bare_session_row_is_not_keyed_on_a_done_task_named_for_the_session(self) -> None:
-        """`arch`'s row is the session's own running work; the done task named `arch` is kim's and has no tree."""
-        tmp, root = named_workspace(
-            self.named("arch", "Delete the old importer", "kim")
-            + "\n" + self.named("docs", "Edit the guide", "arch", "running 09:10"),
-            "| arch | worktree wt-unmerged (feat/open) |",
-            sessions=session_row("arch") + "\n" + session_row("kim", "b2c3d4"))
-        self.addCleanup(tmp.cleanup)
-        report = al.audit(root, "2026-09-17")
-        self.assertEqual(report.reopen, [], report.lines)
-
-    def test_a_bare_session_row_with_a_ref_is_not_keyed_on_a_task_named_for_the_session(self) -> None:
-        """Guard: `arch [a1b2c3]` is not the name `arch`, so the ref spelling never joined by name."""
-        tmp, root = named_workspace(
-            self.named("arch", "Delete the old importer", "kim"),
-            "| arch [a1b2c3] | worktree wt-unmerged (feat/open) |",
-            sessions=session_row("arch [a1b2c3]") + "\n" + session_row("kim", "b2c3d4"))
-        self.addCleanup(tmp.cleanup)
-        report = al.audit(root, "2026-09-17")
-        self.assertEqual(report.reopen, [], report.lines)
-
     def test_a_bare_row_named_for_no_listed_session_is_still_its_tasks_row(self) -> None:
-        """Guard: with no session called `arch`, a bare `arch` row is indistinguishable from a one-shot's row keyed
-        on its task's name, so it stays live through that task's listed owner. (No red orphan-side shape exists: a
-        row for a listed session is live by its own context whether or not a task shares the name.)"""
+        """A started line keyed on its task's name stays live through that task's listed owner."""
         tmp, root = named_workspace(
             self.named("arch", "Review the architecture", "kim", "running 09:10"),
-            "| arch | worktree wt-unmerged (feat/open) |", sessions=session_row("kim"))
+            started("arch", "wt-unmerged"), sessions=session_row("kim"))
         self.addCleanup(tmp.cleanup)
         report = al.audit(root, "2026-09-17")
         self.assertEqual(report.orphans, [], report.lines)
@@ -3409,9 +3192,9 @@ class OwnershipRowKeyedOnNameTest(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertIn("ambiguous", note)
 
-    # A one-shot's row keyed on its task's name: the task's owner, not the row's context, is what `## Sessions` lists.
+    # A started line keyed on its task's name: the task's owner, not the row's context, is what `## Sessions` lists.
     SAM_ALPHA = "| alpha | Tidy the importer | sam | done 10:00 | 09:00 |  | S | Checklist: Tidy |"
-    UNPUSHED = "| alpha | worktree wt-unmerged (feat/open) |"
+    UNPUSHED = started("alpha", "wt-unmerged")
 
     def task(self, name: str, owner: str = "sam", item: str = "Tidy the importer") -> Task:
         return Task(item=item, owner=owner, state="running 09:10", since="09:00", due="", checklist="", name=name)
@@ -3452,7 +3235,7 @@ class OwnershipRowKeyedOnNameTest(unittest.TestCase):
         self.assertFalse(self.claim(self.row("beta"), tasks, {"sam"}).live)
 
     def test_a_blank_task_name_never_claims_a_row(self) -> None:
-        """`parse_ownership` yields a row with an empty context, so this can occur."""
+        """A row with an empty context claims through no task."""
         for context in ("", "   "):
             with self.subTest(context=repr(context)):
                 row = al.OwnerRow(context, ["wt-a"])
@@ -3468,7 +3251,7 @@ class AuditThroughTheViewTest(unittest.TestCase):
 
     ROWS = ("| Unsaved work | robin | done 10:00 | 09:00 |  | Checklist: Unsaved work |\n"
             "| Open branch work | robin | done 10:00 | 09:00 |  | Checklist: Open branch work |",
-            "| robin | worktree wt-dirty (feat/dirty), worktree wt-unmerged (feat/open) |")
+            started("Unsaved work", "wt-dirty") + "\n" + started("Open branch work", "wt-unmerged"))
 
     def setUp(self) -> None:
         tmp, self.root = workspace(*self.ROWS)
@@ -3688,6 +3471,7 @@ class UnreadableTreeTest(unittest.TestCase):
     def gone(self, refused: tuple[str, ...]):
         """`wt-unmerged` (branch feat/open, work only there) removed, and each of `refused` unreadable."""
         git("worktree", "remove", "--force", str(self.trees / "wt-unmerged"), cwd=self.clone)
+        git("branch", "-m", "feat/open", "wt-unmerged", cwd=self.clone)  # a started line names no branch (#1039)
         for name in refused:
             refuse(self.trees / name)
         return al.audit(self.root, "2026-09-17")
@@ -3697,7 +3481,7 @@ class UnreadableTreeTest(unittest.TestCase):
         itself, and the line must say so rather than that the tree was never created."""
         line = next(ln for ln in self.gone(("wt-dirty",)).lines if ln.startswith("wt-unmerged: no worktree"))
         self.assertNotIn("never created", line)
-        self.assertIn("feat/open", line)
+        self.assertIn("branch wt-unmerged", line)
         self.assertIn("not on main", line)
 
     def test_with_every_tree_unreadable_the_missing_one_is_not_called_never_created(self) -> None:
@@ -3733,14 +3517,12 @@ class UnreadableTreeTest(unittest.TestCase):
 
     # R5
     def test_a_tracker_named_tree_that_looks_like_an_option_is_still_read_through_the_view(self) -> None:
-        """R5: a File ownership row naming `--git-dir`, and a ref of that name, made `missing_tree` pass the token to `git()`,
+        """R5: a tracker naming `--git-dir`, and a ref of that name, made `missing_tree` pass the token to `git()`,
         which read the worker's tree outside the view because the argument list held `--git-dir`. Every audit read goes through
         the view, whatever the tracker says."""
         git("update-ref", "refs/heads/--git-dir", git("rev-parse", "HEAD", cwd=self.clone), cwd=self.clone)
         tracker = self.root / "daily" / "2026-09-17-tracker.md"
-        tracker.write_text(tracker.read_text().replace(
-            "| robin | worktree wt-dirty (feat/dirty), worktree wt-unmerged (feat/open) |",
-            "| robin | worktree wt-dirty (feat/dirty), worktree wt-unmerged (feat/open), worktree `--git-dir` (feat/x) |"))
+        tracker.write_text(tracker.read_text() + started("Option work", "--git-dir") + "\n")
         real, plain = subprocess.run, []
 
         def watch(argv, *a, **kw):

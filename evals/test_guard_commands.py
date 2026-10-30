@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from guard_commands import OWNED, UNPARSED, denial_reason
+from guard_commands import HISTORY, OWNED, UNPARSED, denial_reason
 
 
 class CommandTest(unittest.TestCase):
@@ -263,8 +263,8 @@ class CommandTest(unittest.TestCase):
                         'git-push -u origin HEAD:feat/widget', 'git-push origin feat/widget'):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
-        for command in ('git-custom-merge-alias', 'docker exec container git-merge topic',
-                        'docker exec container /usr/lib/git-core/git-push origin HEAD:main'):
+        for command in ('git-custom-merge-alias', 'runner exec box git-merge topic',
+                        'runner exec box /usr/lib/git-core/git-push origin HEAD:main'):
             with self.subTest(command=command):
                 self.assertIsNotNone(denial_reason(command, ("main", "develop")))
 
@@ -408,7 +408,7 @@ class CommandTest(unittest.TestCase):
                         'curl https://labs.example.test:8443/api/v4?query=issues',
                         'env FLAG=yes /usr/bin/curl https://uploads.github.com/repos/o/r/releases',
                         'true && curl https://api.github.com/repos/o/r/issues/12',
-                        'docker exec container curl https://labs.example.test/api/v4/projects/12'):
+                        'runner exec box curl https://labs.example.test/api/v4/projects/12'):
             with self.subTest(command=command):
                 self.assertIsNotNone(denial_reason(command, ("main", "develop")))
 
@@ -452,7 +452,7 @@ class CommandTest(unittest.TestCase):
     def test_unparsed_execution_and_comments_cannot_hide_writes(self):
         for command in ("true # a comment\ngh pr merge 12", "time gh pr merge 12", "timeout 5 gh pr merge 12",
                         "nice -n 10 glab mr merge 12", "setsid git merge topic",
-                        "docker exec container gh pr merge 12", "gh custom-merge-alias 12",
+                        "runner exec box gh pr merge 12", "gh custom-merge-alias 12",
                         "true;\n\ngh pr merge 12", "true &&\n gh pr merge 12",
                         "git custom-merge-alias", "git pull origin main",
                         "env -S 'gh pr merge 12'", "git -c alias.m='merge topic' m",
@@ -486,6 +486,34 @@ class WildcardProtectedBranchTest(unittest.TestCase):
 
     def test_gh_pr_create_head_matches_wildcards(self):
         self.assertTrue(self.denied("gh pr create --head release/1.0 --title t --body b"))
+
+
+class DecisionHistoryBypassTest(unittest.TestCase):
+    """§17: workers must not read decision history by calling the store, sqlite3 or the decisions CLI."""
+
+    def test_sqlite_and_decisions_cli_bypasses_are_denied_at_pretooluse(self):
+        for command in (
+            'sqlite3 store.db "select * from decision_graph_rejected"',
+            'sqlite3 ./store.db "select decision, reason from decision_graph_node"',
+            'sqlite store.db .dump',
+            'chief-of-stuff decisions read --role owner',
+            'chief-of-stuff decisions leaves',
+            'chief-of-stuff --root . decisions grants',
+            'python3 scripts/decisions_cli.py read --role owner',
+            'env -u CHIEF_ISSUE_KEY -u CHIEF_SESSION_ID python3 scripts/decisions_cli.py --root . read --role owner',
+            'env -u CHIEF_ISSUE_KEY chief-of-stuff decisions read --role owner',
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main",)), HISTORY)
+
+    def test_inbox_and_other_chief_commands_remain_available(self):
+        for command in (
+            'chief-of-stuff inbox wait --recipient worker --timeout 300',
+            'chief-of-stuff inbox list --recipient worker --unread',
+            'chief-of-stuff performance --since 2026-10-01',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main",)))
 
 
 if __name__ == "__main__":

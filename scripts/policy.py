@@ -5,11 +5,15 @@ Zach, 2026-10-10: "everything is policy driven. We have default policies, and ba
 configurable at a stage / room level." Every policy field starts from the base `[policy]` table and is overridden, in
 order, by the persona's, the stage's and the room's own `policy` table, so a value set for one stage or room holds only
 there. A field is replaced whole, never merged. This module reads no file: `settings.load_policy` reads the TOML.
+
+A workspace may name an overlay (#827): a policy TOML whose keys are merged over the shipped policy's, by `overlay`.
+It changes keys of tables the shipped policy has; it adds no persona, stage, room or workflow.
 """
 
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from math import isfinite
@@ -47,6 +51,18 @@ class Policy:
     time_minutes: float | None = None
 
 
+def breach(resolved: Policy, usage) -> str | None:
+    """The first configured limit that measured usage has reached. An unset limit, or usage not yet measured, is not a breach."""
+    # shortcut: ping when usage reaches the limit, until a warn fraction is configured
+    if not usage:
+        return None
+    for field, kind in (("spend_usd", "spend"), ("quota_percent", "quota"), ("time_minutes", "time")):
+        limit, used = getattr(resolved, field), usage.get(field)
+        if limit is not None and type(used) in (int, float) and used >= limit:
+            return kind
+    return None
+
+
 @dataclass(frozen=True)
 class Persona:
     """A reviewer or actor profile. With `agent` it is an agent: a full Claude Code agent that may use personas."""
@@ -58,6 +74,10 @@ class Persona:
     agent: str | None = None
     uses: tuple[str, ...] = ()
     policy: dict = field(default_factory=dict)
+
+    @property
+    def agent_type(self) -> str | None:
+        return self.agent
 
 
 @dataclass(frozen=True)
@@ -154,6 +174,8 @@ def _trio(where: str, value, personas: set[str]) -> tuple[str, ...]:
     trio = _names(where, value)
     if len(trio) != 3 or len(set(trio)) != 3 or not set(trio) <= personas:
         raise PolicyError(f"{where} must be three distinct personas of {', '.join(sorted(personas))}")
+    if "architect" in trio:
+        raise PolicyError(f"{where}: architect cannot be a decision-trio member")
     return trio
 
 
@@ -182,20 +204,19 @@ def _policy(where: str, value, personas: set[str], gates: set[str]) -> dict:
             if not isinstance(v, list):
                 raise PolicyError(f"{at} must be a list of tables")
             v = tuple(_approval(f"{at}[{i}]", x) for i, x in enumerate(v))
-        named = v if key == "zach_gates" else {a.gate for a in v} if key == "approvals" else ()
-        if unknown := sorted(set(named) - gates):
-            raise PolicyError(f"{at}: {', '.join(unknown)} is no gate on any workflow edge")
+        # Legacy gate names are inert and may outlive the workflow edges that named them.
         out[key] = v
     return out
 
 
 def _persona(name: str, value, personas: set[str], gates: set[str]) -> Persona:
     where = f"[personas.{name}]"
-    t = _table(where, value, {"role", "model", "effort", "rules", "agent", "uses", "policy"})
+    t = _table(where, value, {"role", "model", "effort", "rules", "agent", "agent_type", "uses", "policy"})
     effort = t.get("effort")
     if effort is not None and effort not in EFFORTS:
         raise PolicyError(f"{where} effort must be one of {', '.join(EFFORTS)}")
-    agent, uses = _text(f"{where} agent", t.get("agent"), required=False), _names(f"{where} uses", t.get("uses", []))
+    raw_agent = t.get("agent") if t.get("agent") is not None else t.get("agent_type")
+    agent, uses = _text(f"{where} agent", raw_agent, required=False), _names(f"{where} uses", t.get("uses", []))
     if uses and not agent:
         raise PolicyError(f"{where} uses: only an agent uses personas")
     if unknown := sorted(set(uses) - (personas - {name})):
@@ -241,6 +262,36 @@ def _workflow(name: str, value, stages: set[str]) -> Workflow:
     if not reached - {e.source for e in edges}:
         raise PolicyError(f"{where} has no end: every stage has an edge out")
     return Workflow(name, start, tuple(edges), _names(f"{where} issue_types", t.get("issue_types", [])))
+
+
+_NAMED = ("personas", "stages", "rooms", "workflows")
+
+
+def overlay(shipped: dict, over: dict, where: str = "overlay") -> dict:
+    """The shipped policy's tables with an overlay's keys merged over them (#827). A table merges key by key and a
+    field is replaced whole; a section the shipped policy does not have is refused with its name. `parse` then
+    refuses any unknown key, as it does in the shipped file."""
+    merged = deepcopy(shipped)
+    for section, value in over.items():
+        if section == "default_workflow":
+            merged[section] = value
+            continue
+        if section != "policy" and section not in _NAMED:
+            raise PolicyError(f"{where}: unknown section [{section}]")
+        _table(f"{where} [{section}]", value)
+        if section == "policy":
+            merged["policy"] = {**merged.get("policy", {}), **value}
+            continue
+        for name, table in value.items():
+            entry = merged.get(section, {}).get(name)
+            if entry is None:
+                raise PolicyError(f"{where}: unknown section [{section}.{name}]")
+            for key, field_value in _table(f"{where} [{section}.{name}]", table).items():
+                if key == "policy" and section != "workflows":
+                    entry["policy"] = {**entry.get("policy", {}), **_table(f"{where} [{section}.{name}.policy]", field_value)}
+                else:
+                    entry[key] = field_value
+    return merged
 
 
 def parse(data: dict) -> Policies:
