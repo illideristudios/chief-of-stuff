@@ -48,6 +48,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parent.parent / "scripts"), str(Pat
 import board_sources as bs  # noqa: E402
 import one_shot  # noqa: E402
 import pages as pg  # noqa: E402
+import workers_page  # noqa: E402
 from test_pages import get  # noqa: E402
 from test_tab_bar import TABS, VOID, Node, name, parse  # noqa: E402
 
@@ -89,7 +90,7 @@ USAGE = ({"input_tokens": 100, "output_tokens": 200, "cache_creation_input_token
 TOKENS = 56000
 # Today's launcher end lines: worker -> (Log time, what the line says, state chip, summary, task ref).
 ENDED = {"impl-c3": ("00:20", "done", "DONE", "merged cleanly. Changes: x.py.", "120"),
-         "impl-d4": ("00:30", "human_review", "CRASHED", "tests failed. Changes: x.py.", "121"),
+         "impl-d4": ("00:30", "human_review", "HUMAN REVIEW", "tests failed. Changes: x.py.", "121"),
          "impl-e5": ("00:40", "relaunch", "CRASHED", "timed out.", "122")}
 REASON = {"impl-c3": "merged cleanly", "impl-d4": "tests failed", "impl-e5": "timed out"}
 TASK = {"impl-c3": "Review r1", "impl-d4": "Verify r1", "impl-e5": "Fix r1"}
@@ -395,8 +396,8 @@ class ActivityTest(unittest.TestCase):
 
 
 class EndedTodayTest(unittest.TestCase):
-    """(#195, #235) ENDED TODAY: a row per launcher end line today: state chip (`DONE`, `CRASHED`), time, worker, task,
-    one-line summary, and a link or `re-dispatch`."""
+    """(#195, #235) ENDED TODAY: a row per launcher end line today: outcome chip (`DONE`, `HUMAN REVIEW`, `CRASHED`),
+    time, worker, task, one-line summary, and a link to the task (a relaunch line says `relaunch requested`)."""
 
     def test_a_row_per_end_line_today_and_none_from_yesterday(self):
         t = table(page(), "ended today")
@@ -413,11 +414,68 @@ class EndedTodayTest(unittest.TestCase):
                 self.assertIn(state, chips(tr))
                 self.assertIn(summary, text)
                 self.assertIn(f"/issues/{ref}", links(tr))
-                if state == "DONE":
-                    self.assertNotIn("re-dispatch", text)
-                    self.assertIn(f"/issues/{ref}", links(cells(tr)[-1]))
+                self.assertNotIn("re-dispatch", text)  # #997: no inert control, no unverified promise
+                if state == "CRASHED":
+                    self.assertEqual(words(cells(tr)[-1]), "relaunch requested")  # the tracker's own record
                 else:
-                    self.assertIn("re-dispatch", words(cells(tr)[-1]))
+                    self.assertIn(f"/issues/{ref}", links(cells(tr)[-1]))
+
+    def test_rows_run_newest_end_first(self):
+        times = [column(table(page(), "ended today"), tr, "at") for tr in rows(table(page(), "ended today"))]
+        self.assertEqual(times, sorted(times, reverse=True))
+
+
+class StoreEndedTodayTest(unittest.TestCase):
+    """(#969, #997, #922) ENDED TODAY from the store: the chip names the stored outcome, no row offers `re-dispatch`,
+    and rows run by end time, newest first, however the segments were started."""
+
+    NOW = datetime(2026, 10, 9, 14, 0, tzinfo=ZONE)
+    # runner -> (stored outcome, minutes before NOW it ended, chip). Listed in start order, not end order.
+    SEGMENTS = {"s-done": ("done", 50, "DONE"), "s-failed": ("failed", 5, "CRASHED"),
+                "s-review": ("human_review", 30, "HUMAN REVIEW"), "s-blocked": ("blocked", 40, "BLOCKED"),
+                "s-quota": ("quota", 10, "QUOTA"), "s-unknown": ("unknown", 20, "UNKNOWN")}
+
+    def setUp(self):
+        import store
+        import task_forge
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        store.migrate(self.dir / "store.db")
+        db = store.Store(self.dir / "store.db")
+        self.addCleanup(db.engine.dispose)
+        key = "github:example/repo#12"
+        db.upsert_item(key, workflow="build", stage="implement", forge_state="open", title="Upload size limit")
+        for n, (runner, (outcome, ago, _)) in enumerate(self.SEGMENTS.items(), 1):
+            ended = (self.NOW - timedelta(minutes=ago)).isoformat()
+            db.record_segment(key, "implement", n, started_at=(self.NOW - timedelta(hours=1)).isoformat(), ended_at=ended,
+                              outcome=outcome, runner=runner)
+        self.html = workers_page.render("", bs.EMPTY, self.NOW, self.dir / "trees", 4, db=task_forge.page_data(db))
+        self.table = table(self.html, "ended today")
+
+    def test_every_outcome_class_is_named_and_none_offers_redispatch(self):
+        for runner, (_, _, chip) in self.SEGMENTS.items():
+            with self.subTest(runner=runner):
+                tr = row(self.table, runner)
+                self.assertEqual(chips(tr), [chip])
+                self.assertIn("/issues/", " ".join(links(cells(tr)[-1])))
+        self.assertNotIn("redispatch", self.html)
+        self.assertNotIn("re-dispatch", self.html)
+
+    def test_only_a_failure_is_drawn_as_a_crash(self):
+        crashed = [r for r in self.SEGMENTS if "CRASHED" in chips(row(self.table, r))]
+        self.assertEqual(crashed, ["s-failed"])
+
+    def test_unrecognized_outcome_cannot_inject_markup(self):
+        chip = workers_page._end_chip('other"><script>alert(1)</script>')
+        self.assertNotIn("<script>", chip)
+        self.assertIn("&lt;SCRIPT&gt;", chip)
+        self.assertIn("&quot;", chip)
+
+    def test_rows_run_by_end_time_newest_first(self):
+        order = [next(r for r in self.SEGMENTS if re.search(rf"(?<![\w-]){r}(?![\w-])", words(tr))) for tr in rows(self.table)]
+        self.assertEqual(order, sorted(self.SEGMENTS, key=lambda r: self.SEGMENTS[r][1]))
+        times = [column(self.table, tr, "at") for tr in rows(self.table)]
+        self.assertEqual(times, sorted(times, reverse=True))
 
 
 class HeaderTest(unittest.TestCase):

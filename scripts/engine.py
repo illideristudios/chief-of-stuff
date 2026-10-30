@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
+import plistlib
+import signal
+import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable, Collection
 from dataclasses import is_dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import cache, partial
 from pathlib import Path
 from typing import Any
@@ -27,6 +31,7 @@ import engine_facts
 import engine_merge
 import forge
 import guard_commands
+import heartbeat_store
 import host_adapter
 import issue_gate
 import limits_history
@@ -36,6 +41,7 @@ import notify
 import policy
 import readiness
 import reconcile
+import release_selection
 import runtimes
 import settings
 import shell_setup
@@ -47,7 +53,7 @@ import trio_gate
 import worker
 from forge_port import ForgeError
 from reconcile import OP_DECISION_COMMENT, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN
-from workspace import worktrees_dir
+from workspace import read_engine_status, worktrees_dir, write_engine_status
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 TRIO_PASS_BUDGET_S = 480  # #927: trio calls stop here in one pass; above TIMEOUT_S so a slow vote leaves room for two more
@@ -128,6 +134,7 @@ def _planning_inputs(store: Any, items: list) -> dict:
         "usage": {key: nums for key, state in states.items() if (nums := _measured(state))},
         "waived_gates": {key: tuple(state.get("waived_gates") or ())
                          for key, state in states.items() if state.get("waived_gates")},
+        "failure_acknowledged": {key: state.get("failure_acknowledged", ()) for key, state in states.items()},
     }
 
 
@@ -579,30 +586,26 @@ class HoldReleaseFailed(ForgeError):
 
 
 def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) -> None:
-    """Retry pending suite labels; only a published label's explicit removal accepts its segment."""
-    observed = {row["issue_key"]: row.get("human_review") for row in snapshots}
+    """Retire legacy owner-release suite gates into the normal issue failure/retry path."""
     for item in store.items():
         key = item.issue_key
         data = _resume(store, key)
         if "suite_hold" not in data:
             continue
         try:
-            action = reconcile.suite_hold_action(item, data["suite_hold"], store.segments(key),
-                                                  observed=observed.get(key))
-            if action in ("retire", "accept"):
-                store.finish_suite_hold(key, accept=action == "accept")
-                if action == "accept":
-                    store.add_log(key, "suite hold released: accepted completion", at)
-                continue
-            store.set_human_review(key, True)
-            if action == "publish":
-                error = forge.add_human_hold(int(key.rpartition("#")[2]))
-                if error:
-                    raise ForgeError(error)
-                data["suite_hold"]["published"] = True
-                store.set_resume(key, data)
-        except Exception as exc:
-            # A corrupt record or one unavailable forge operation must not halt unrelated work.
+            hold = data["suite_hold"]
+            history = store.segments(key)
+            reconcile.suite_hold_action(item, hold, history, observed=None)  # validate the saved identity
+            segment = next(s for s in history if s.stage == hold["stage"] and s.attempt == hold["attempt"])
+            data.pop("suite_hold")
+            if item.forge_state != "closed":
+                store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
+                                     segment.ended_at, "failed")
+                # The attempt-owned release protocol preserves stage and worktree on a retry.
+                data["launcher_hold"] = {"stage": segment.stage, "attempt": segment.attempt}
+                store.add_log(key, "legacy suite hold retired: failed check enters automatic retry", at)
+            store.set_resume(key, data)
+        except (ValueError, KeyError, TypeError, StopIteration) as exc:
             store.set_human_review(key, True)
             message = f"suite hold: {exc}"
             logged = store.log(key)
@@ -637,8 +640,90 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
         outcome = verdict.outcome
         reason = "; ".join(part for part in (reason, verdict.reason) if part)
     if verdict.suite_hold:
-        _arm_suite_hold(store, key, segment.stage, segment.attempt)
+        # A failed automated check spends the issue failure budget; it needs no owner release.
+        outcome, held = "failed", False
     _close_segment(forge, store, key, segment.stage, segment.attempt, outcome, reason, held, now)
+
+
+def _wait_log(store: Any, key: str, reason: str, at: str) -> None:
+    message = f"wait: {reason}"
+    last = next((entry.message for entry in reversed(store.log(key)) if entry.message.startswith("wait: ")), None)
+    if last != message:
+        store.add_log(key, message, at)
+
+
+def _stop_stall(store: Any, root: Path, key: str, at: str, teardown_command: str) -> None:
+    """Resume a durable stop intent. Only a verified stop releases the slot; no files are removed."""
+    data = _resume(store, key)
+    recovery = data["stall_recovery"]
+    stage, attempt = recovery["stage"], recovery["attempt"]
+    record = data.get("runs", {}).get(f"{stage}-{attempt}", {})
+    worker.stop(record)
+    worker.teardown_once(store, root, key, stage, attempt, teardown_command, at)
+    with store.transaction():
+        store.end_segment(key, stage, attempt, at, "stopped")
+        store.update_resume(key, lambda d: d["stall_recovery"].update(phase="stopped", stopped_at=at))
+        store.add_log(key, f"suspected stall recovery: {stage} attempt {attempt} stopped; awaiting relaunch", at)
+
+
+def _complete_stall_relaunch(store: Any, key: str, at: str) -> None:
+    data = _resume(store, key)
+    recovery = data.get("stall_recovery", {})
+    if recovery.get("phase") != "stopped":
+        return
+    stage, attempt = recovery["stage"], recovery["attempt"]
+    history = store.segments(key)
+    replacement = next((s for s in history if s.stage == stage and s.attempt > attempt
+                        and data.get("runs", {}).get(f"{stage}-{s.attempt}")), None)
+    if replacement is None:
+        return  # a reservation or refused launch is not a relaunch
+    old = next(s for s in history if s.stage == stage and s.attempt == attempt)
+    with store.transaction():
+        store.record_segment(key, stage, attempt, old.started_at, old.ended_at, "stalled")
+        def complete(d):
+            d["runs"][f"{stage}-{attempt}"]["recovery"] = {
+                **d.pop("stall_recovery"), "relaunched_as": f"{stage}-{replacement.attempt}"}
+        store.update_resume(key, complete)
+        store.add_log(key, f"stall relaunch: {stage} attempt {attempt} counts as a failure; "
+                          f"replacement attempt {replacement.attempt}", at)
+
+
+def _stall_action(store: Any, root: Path, key: str, workers: settings.Workers, at: str,
+                  teardown_command: str) -> str:
+    data = _resume(store, key)
+    segment = next((s for s in store.segments(key) if s.ended_at is None), None)
+    if segment is None:
+        return "suspected stall"
+    record = data.get("runs", {}).get(f"{segment.stage}-{segment.attempt}", {})
+    if workers.stall.action == "wait":
+        return "suspected stall"
+    if record.get("launcher") == "t3":
+        return "suspected stall: T3 cannot cancel a thread"
+    acknowledged = data.get("failure_acknowledged", ())
+    restarts = sum(s.outcome == "stalled" and f"{s.stage}-{s.attempt}" not in acknowledged
+                   for s in store.segments(key))
+    if restarts >= workers.stall.max_restarts:
+        return "suspected stall: max_restarts reached"
+    store.update_resume(key, lambda d: d.update(stall_recovery={
+        "stage": segment.stage, "attempt": segment.attempt, "phase": "stopping", "requested_at": at}))
+    try:
+        _stop_stall(store, root, key, at, teardown_command)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return f"suspected stall: recovery waiting for verified termination: {exc}"
+    return "suspected stall: prior process ended; relaunch pending"
+
+
+def _remember_health(store: Any, facts: reconcile.Facts) -> None:
+    for key, evidence in facts.activity:
+        segment = next((s for s in store.segments(key) if s.ended_at is None), None)
+        if segment is None:
+            continue
+        store.update_resume(key, lambda d: d.update(worker_health={
+            "run": f"{segment.stage}-{segment.attempt}", "status": evidence.status,
+            "launcher": evidence.launcher, "pending_requests": evidence.pending_requests,
+            "pending_since": evidence.pending_since.isoformat() if evidence.pending_requests and evidence.pending_since else None,
+            "last_activity_at": evidence.last_activity_at.isoformat() if evidence.last_activity_at else None,
+            "error": evidence.error}))
 
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
@@ -669,15 +754,21 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
 
+    worker.deliver_messages(store, root, clock)
     facts = worker.collect(store, root, clock, trees,
                    gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
                                   now=clock(), require_green=require_green,
+                                  stall_after=timedelta(minutes=workers.stall.after_minutes),
+                                  account=workers.claude_as_profile,
                                   hold_observations=tuple((row["issue_key"], row.get("human_review")) for row in snapshots)),
                    finish=partial(_finish_worker, forge, store, policies=policies),
                    require_green=require_green, teardown_command=teardown_command)
 
     now = clock()
     at = now.isoformat()
+    _remember_health(store, facts)
+    for item in store.items():
+        _complete_stall_relaunch(store, item.issue_key, at)
     _sync_suite_holds(forge, store, snapshots, at)
     for item in store.items():
         _promote_merge_pending(store, item)
@@ -770,14 +861,42 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                      for item in store.items() for row in store.asks(item.issue_key))
         if asks != facts.asks:
             facts = replace(facts, asks=asks)
+    for item in store.items():
+        key = item.issue_key
+        if _resume(store, key).get("stall_recovery", {}).get("phase") != "stopping":
+            continue
+        history = store.segments(key)
+        segment = next((s for s in history if s.ended_at is None), None)
+        if segment is None:
+            continue
+        verdict = reconcile.stall_state(key, segment, facts, now, store.decisions(key), history,
+                                        _workflow_for(policies, store, item).start)
+        if verdict in ("ok", "watch", "waiting"):
+            store.update_resume(key, lambda d: d.pop("stall_recovery", None))
+            _wait_log(store, key, "stall recovery cancelled: worker is active or waiting", at)
+        elif verdict in ("suspected", "gone"):
+            try:
+                _stop_stall(store, root, key, at, teardown_command)
+            except (OSError, ValueError, RuntimeError) as exc:
+                _wait_log(store, key, f"suspected stall: recovery waiting for verified termination: {exc}", at)
+        else:
+            _wait_log(store, key, "stall recovery waiting for verified worker evidence", at)
     items = [item for item in store.items()
-             if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
+             if _resume(store, item.issue_key).get("stall_recovery", {}).get("phase") != "stopping"
+             and (not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold"))]
     _remember_verified(store, facts)
     inputs = _planning_inputs(store, items)
-    actions = reconcile.plan(items, policies=policies,
-                             free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
-                             hold_stages=board.hold_stages if board is not None else (),
-                             facts=facts, **inputs)
+    free_slots = slots.free_slots(max_concurrency, slots.running(store))
+
+    def plan():
+        return reconcile.plan(items, policies=policies, free_slots=free_slots, now=now,
+                              hold_stages=board.hold_stages if board is not None else (),
+                              failure_limit=workers.failure_limit, facts=facts, **inputs)
+
+    actions = plan()
+    if reviews := engine_merge.consultations(forge, store, actions, at):
+        inputs["architect_reviews"] = reviews
+        actions = plan()
     intents = {key: decision_actions.current_intent(rows) for key, rows in inputs["decisions"].items()}  # what planning saw
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
@@ -866,6 +985,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     raise
                 _clear_waived_gates(store, key)
                 _clear_interrupt(store, key, "limit", scope={"stage": stage})
+                # A successful relaunch after a raised limit must not keep the exhausted interrupt (#963).
+                _clear_interrupt(store, key, "exhausted", scope={})
+                store.update_resume(key, lambda d: d.pop("park", None))
+                _complete_stall_relaunch(store, key, at)
                 if planned is not None:
                     # The intent's worker launched: a re-route is done, and a reversal's done phase is its restart.
                     _settle(store, key, decision_actions.advance, planned.intent_id, stage, action.attempt)
@@ -873,12 +996,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     for rev in decision_escalation.restarted(store.decisions(key), stage, action.attempt):
                         trio_gate.record(store, key, rev)
             elif isinstance(action, reconcile.Merge):
-                if board is not None and board.holds("merge") and stages[key] != "merge":
-                    # Enter the hold before merging; a later pass observes the human's release.
-                    stage = "merge"
-                elif engine_merge.execute(action, forge, store, at, policies=policies,
-                                         inputs=_planning_inputs(store, [by_key[key]]),
-                                         hold_stages=board.hold_stages if board is not None else ()):
+                if engine_merge.execute(action, forge, store, at, policies=policies,
+                                        inputs={**_planning_inputs(store, [by_key[key]]), "failure_limit": workers.failure_limit}, hold_stages=()):
                     stage = "merge"
                     _clear_waived_gates(store, key)
             elif isinstance(action, reconcile.Close):
@@ -887,17 +1006,6 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     _arm_suite_hold(store, key, action.stage, action.attempt)
                 _close_segment(forge, store, key, action.stage, action.attempt, action.outcome,
                                action.reason, action.human_review, now)
-            elif isinstance(action, reconcile.Ask):
-                resolved = _resolved(policies, store, key, action.source)
-                if _consultation_blocked(store, key, resolved, at, stage=action.source):
-                    continue
-                choice = _choice(store, key, action.gate, action.reason, ("approve", "hold"),
-                                 resolved, policies.personas, model, context=action.context, stage=action.stage,
-                                 attempt=action.attempt, gate=True, clock=clock)
-                if choice == "approve":
-                    data = _resume(store, key)
-                    data["waived_gates"] = sorted(set(data.get("waived_gates") or ()) | {action.gate})
-                    store.set_resume(key, data)
             elif isinstance(action, (reconcile.Escalate, reconcile.Limit)):
                 kind = "exhausted" if isinstance(action, reconcile.Escalate) else "limit"
                 _interrupt(store, key, kind, action.reason, at, scope={"stage": action.stage})
@@ -905,14 +1013,31 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     # A spent retry limit blocks the intent's own decision, which keeps holding the issue.
                     _settle(store, key, decision_actions.block, planned.intent_id, action.reason)
                 if isinstance(action, reconcile.Escalate):
+                    # Preparation is durable before the issue is parked and the owner is notified.
+                    data = _resume(store, key)
+                    data["park"] = {
+                        "reason": action.reason,
+                        "research": {
+                            "attempts": [{"stage": segment.stage, "attempt": segment.attempt,
+                                          "outcome": segment.outcome, "runtime": segment.runtime,
+                                          "model": segment.model} for segment in store.segments(key)],
+                            "reports": [{"summary": report.summary, "findings": report.findings}
+                                        for report in store.reports(key)],
+                            "log": [entry.message for entry in store.log(key)],
+                        },
+                        "options": ["Resolve the architectural question with the architect",
+                                    "Investigate the recorded failures and prepare a revised approach",
+                                    "Close the issue if the work is no longer needed"],
+                        "recommendation": "Use the recorded findings and failures to settle the cause before retrying; preserve the worktree.",
+                    }
+                    store.set_resume(key, data)
                     # A permanent refusal or exhausted budget ends automatic release; removing the
                     # hold later works without editing the engine's resume records.
                     _retire_ownership(forge, store, key, stages[key], at)
             elif isinstance(action, reconcile.Wait):
-                message = f"wait: {action.reason}"
-                last = next((entry.message for entry in reversed(store.log(key)) if entry.message.startswith("wait: ")), None)
-                if last != message:
-                    store.add_log(key, message, at)
+                reason = (_stall_action(store, root, key, workers, at, teardown_command)
+                          if action.reason == "suspected stall" else action.reason)
+                _wait_log(store, key, reason, at)
             if stage is not None and stage != stages[key]:
                 op = OP_STAGE_WRITE
                 pending = {"stage": stage, "expected": stages[key]}  # the engine's own move: it names no decision
@@ -1019,12 +1144,83 @@ def _prepare_handoff(release: Path) -> Path | None:
 
 
 def _handoff(release: Path, python: Path, root: Path, interval: float, once: bool) -> None:
-    os.execv(str(python), [str(python), str(release / "scripts/engine.py"),
-                              "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []))
+    release_selection.validate_handoff(root, release, supervisor)
+    argv = release_selection.isolated_release_argv(python, release / "scripts/engine.py",
+                                            "--root", str(root), "--interval", str(interval),
+                                            *(["--once"] if once else []))
+    previous_cwd = os.getcwd()
+    try:
+        os.chdir("/")
+        os.execve(str(python), argv, release_selection.python_environment())
+    finally:  # exec failures and tests that intercept exec must restore the caller's cwd
+        os.chdir(previous_cwd)
+
+
+def _pending_explicit_install(root: Path) -> bool:
+    intent = release_selection.explicit_intent(root, supervisor)
+    return bool(intent and intent["operation"] == "install" and intent["pending"])
+
+
+def _persist_launchd_handoff(root: Path, release: Path) -> bool:
+    """Reload launchd from a detached helper while this engine holds its pass lock."""
+    path = supervisor.job_path(supervisor.label("engine", root), None)
+    if "commit-handoff" not in supervisor.ACTIONS or sys.platform != "darwin" or not path.exists():
+        return False
+    job = plistlib.loads(path.read_bytes())
+    if (supervisor.current_release_from_job(job) != supervisor.RELEASE
+            and not (supervisor.state_dir(root) / getattr(supervisor, "HANDOFF_MARKER", "engine-handoff.json")).exists()
+            and not _pending_explicit_install(root)):
+        return False
+    target = f"gui/{os.getuid()}/{supervisor.label('engine', root)}"
+    if not supervisor.launchctl("print", target, missing_ok=True):
+        return False
+    child = subprocess.Popen([sys.executable, "-I", str(Path(supervisor.__file__).resolve()), "--root", str(root),
+                              "--release", str(release), "commit-handoff"],
+                             stdin=subprocess.DEVNULL, start_new_session=True, cwd="/",
+                             env=release_selection.python_environment())
+    if child.wait(timeout=1500):
+        raise supervisor.ServiceError("launchd handoff failed; see engine log")
+    return True
+
+
+def _beat(db: Any, forge: Any, root: Path, trees: Path, workers: settings.Workers, tick: datetime) -> None:
+    """Deliver the heartbeat after a pass (#1179). A failure is logged to the engine log and never stops the engine."""
+    try:
+        now = datetime.now(timezone.utc)
+        limit = timedelta(minutes=workers.stall.after_minutes)
+        facts = engine_facts.gather(forge=forge, store=db, root=root, trees=trees, now=now, stall_after=limit)
+        failures = heartbeat_store.beat(db, now, tick, dict(facts.progress), limit, sinks=heartbeat_store.sinks(root))
+    except Exception as exc:
+        failures = [f"heartbeat: {exc}"]
+    for failure in failures:
+        db.add_engine_log(failure, "heartbeat")
+
+
+def _message_loop(root: Path, stop: threading.Event, *, every: float = 1.0) -> None:
+    """Settle and hand off messages promptly, independently of slow forge passes.
+
+    Its store is private to this thread. Mailbox locks and store claims serialize it with a normal pass.
+    """
+    db = None
+    try:
+        while not stop.is_set():
+            try:
+                if db is None:
+                    db = store_access.migrated_store(root)
+                worker.deliver_messages(db, root)
+            except Exception as exc:
+                print(f"engine: message delivery sweep failed: {exc}", file=sys.stderr, flush=True)
+                if db is not None:
+                    db.engine.dispose()
+                    db = None
+            stop.wait(every)
+    finally:
+        if db is not None:
+            db.engine.dispose()
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run passes until stopped, or one with --once; `install`, `uninstall` and `status` manage the LaunchAgent.
+    """Run passes until stopped, or one with --once; `install`, `uninstall`, `ensure` and `status` manage the LaunchAgent.
 
     Exits 0 when stopped, 1 when a --once pass failed, 2 on startup or driver errors (including failed exec).
     A different valid install pointer, including rollback, hands off before startup or after a pass
@@ -1043,50 +1239,119 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     newer = None
     adopt_login_path()
+    previous_sigterm = None
+    if threading.current_thread() is threading.main_thread():
+        def _on_sigterm(_signum: int, _frame: Any) -> None:
+            raise KeyboardInterrupt
+        previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
     try:
-        if (installed := supervisor.current_release()) != supervisor.RELEASE:
-            if (python := _prepare_handoff(installed)) is not None:
+        installed = release_selection.selected_release(root, supervisor)
+        if ((supervisor.state_dir(root) / getattr(supervisor, "HANDOFF_MARKER", "engine-handoff.json")).exists()
+                or _pending_explicit_install(root)):
+            with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
+                if _persist_launchd_handoff(root, installed):
+                    return 0
+        if installed != supervisor.RELEASE:
+            if (python := _prepare_handoff(installed)) is not None and release_selection.selected_release(root, supervisor) == installed:
+                with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
+                    if _persist_launchd_handoff(root, installed):
+                        return 0
                 _handoff(installed, python, root, args.interval, args.once)
                 return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
-            text, config, source = startup.workspace_forge(root)
-            if source is None:
-                refused = issue_gate.start(None, None, "")
-                raise ValueError(f"{refused.refused}\n{refused.setup}")
-            if config.kanban is None:
-                raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
-            policies = settings.workspace_policy(root, config.policy_overlay)
-            # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
-            unmapped = settings.unmapped_stages(config.kanban, policies)
-            if unmapped:
-                raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
-            dispatch_prompt.validate_worker_rules(root, config, policies)
-            trees = root / worktrees_dir(text)
-            trees.mkdir(parents=True, exist_ok=True)
-            db = store_access.migrated_store(root, engine_owned=True)
-            _note_policy(root, settings.workspace_policy_data(root, config.policy_overlay), config.policy_overlay, db)
-            # Match the forge repository to a configured clone; a repository workspace needs no [repos] entry.
-            repo = source.home.repo if getattr(source, "github", False) else getattr(getattr(source, "home", None), "project", "")
-            selected = config.repos.get(repo) or config.repos.get(repo.rpartition("/")[2])
-            if not selected and len(config.repos) == 1:
-                selected = next(iter(config.repos.values()))
-            if not selected and config.repos:
-                raise ValueError("no [repos] clone matches the workspace backlog")
-            launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
-                             clone=root / selected if selected else root,
-                             claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
-                             require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
-            model = model_port.Port(partial(_judge, claude_as_profile=config.workers.claude_as_profile),
-                                    rotation=config.models.get("trio", ()), pick=config.model_picks.get("trio", "first"),
-                                    launchable=_judges)
+            prior = read_engine_status(root)
+            mode = "once" if args.once else "service"
+            release = str(supervisor.RELEASE)
+            started_at = datetime.now(timezone.utc)
+            last_pass_at = prior.last_pass_at if prior is not None and prior.present else None
+            last_attempt_at = prior.last_attempt_at if prior is not None and prior.present else None
+            last_error = (
+                prior.last_error
+                if prior is not None and prior.present and prior.error_kind != "startup"
+                else None
+            )
+            error_kind = (
+                prior.error_kind
+                if prior is not None and prior.present and prior.error_kind != "startup"
+                else None
+            )
+            try:
+                text, config, source = startup.workspace_forge(root)
+                if source is None:
+                    refused = issue_gate.start(None, None, "")
+                    raise ValueError(f"{refused.refused}\n{refused.setup}")
+                if config.kanban is None:
+                    raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
+                policies = settings.workspace_policy(root, config.policy_overlay)
+                # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
+                unmapped = settings.unmapped_stages(config.kanban, policies)
+                if unmapped:
+                    raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
+                dispatch_prompt.validate_worker_rules(root, config, policies)
+                trees = root / worktrees_dir(text)
+                trees.mkdir(parents=True, exist_ok=True)
+                db = store_access.migrated_store(root, engine_owned=True)
+                _note_policy(root, settings.workspace_policy_data(root, config.policy_overlay), config.policy_overlay, db)
+                # Match the forge repository to a configured clone; a repository workspace needs no [repos] entry.
+                repo = source.home.repo if getattr(source, "github", False) else getattr(getattr(source, "home", None), "project", "")
+                selected = config.repos.get(repo) or config.repos.get(repo.rpartition("/")[2])
+                if not selected and len(config.repos) == 1:
+                    selected = next(iter(config.repos.values()))
+                if not selected and config.repos:
+                    raise ValueError("no [repos] clone matches the workspace backlog")
+                launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
+                                 clone=root / selected if selected else root,
+                                 claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
+                                 require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown,
+                                 launcher=config.workers.worker_launcher)
+                model = model_port.Port(partial(_judge, claude_as_profile=config.workers.claude_as_profile),
+                                        rotation=config.models.get("trio", ()), pick=config.model_picks.get("trio", "first"),
+                                        launchable=_judges)
+            except Exception as exc:
+                failed_at = datetime.now(timezone.utc)
+                with contextlib.suppress(OSError):
+                    write_engine_status(
+                        root,
+                        started_at=started_at,
+                        last_pass_at=last_pass_at,
+                        last_attempt_at=failed_at,
+                        stopped_at=failed_at,
+                        interval=args.interval,
+                        mode=mode,
+                        last_error=str(exc).strip() or type(exc).__name__,
+                        error_kind="startup",
+                        release=release,
+                    )
+                raise
+            with contextlib.suppress(OSError):
+                write_engine_status(
+                    root,
+                    started_at=started_at,
+                    last_pass_at=last_pass_at,
+                    last_attempt_at=last_attempt_at,
+                    stopped_at=None,
+                    interval=args.interval,
+                    mode=mode,
+                    last_error=last_error,
+                    error_kind=error_kind,
+                    release=release,
+                )
             stop_pages = threading.Event()
             page_thread = None
+            message_thread = None
             try:
                 if not args.once:
                     import pages  # deferred: --once never serves the board
-                    page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
+                    page_thread = threading.Thread(target=pages.supervise_with_retry, args=(root, stop_pages), daemon=True)
                     page_thread.start()
+                    message_thread = threading.Thread(target=_message_loop, args=(root, stop_pages), daemon=True)
+                    message_thread.start()
                 while True:
+                    with contextlib.suppress(OSError):
+                        write_engine_status(root, started_at=started_at, last_pass_at=last_pass_at,
+                                            last_attempt_at=last_attempt_at, stopped_at=None,
+                                            pass_started_at=datetime.now(timezone.utc), interval=args.interval,
+                                            mode=mode, last_error=last_error, error_kind=error_kind, release=release)
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
@@ -1094,19 +1359,67 @@ def main(argv: list[str] | None = None) -> int:
                                  require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
                     except Exception as exc:
                         failed = True
+                        last_attempt_at = datetime.now(timezone.utc)
+                        last_error = str(exc).strip() or type(exc).__name__
+                        error_kind = "pass"
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)
+                    else:
+                        done = datetime.now(timezone.utc)
+                        last_pass_at = done
+                        last_attempt_at = done
+                        last_error = None
+                        error_kind = None
                     if args.once:
                         return 1 if failed else 0
+                    _beat(db, source, root, trees, config.workers, datetime.now(timezone.utc))
+                    with contextlib.suppress(OSError):
+                        write_engine_status(
+                            root,
+                            started_at=started_at,
+                            last_pass_at=last_pass_at,
+                            last_attempt_at=last_attempt_at,
+                            stopped_at=None,
+                            interval=args.interval,
+                            mode=mode,
+                            last_error=last_error,
+                            error_kind=error_kind,
+                            release=release,
+                        )
                     time.sleep(args.interval)
-                    if (installed := supervisor.current_release()) != supervisor.RELEASE:
-                        if (python := _prepare_handoff(installed)) is not None:
+                    installed = release_selection.selected_release(root, supervisor)
+                    if (installed != supervisor.RELEASE or
+                            _pending_explicit_install(root)):
+                        if (python := _prepare_handoff(installed)) is not None and release_selection.selected_release(root, supervisor) == installed:
                             newer = installed, python
                             break
+                    if page_thread is not None and not page_thread.is_alive():
+                        # A temporary supervisor-lock conflict or unexpected thread exit must not
+                        # disable board recovery for the remainder of this engine process.
+                        print("engine: page supervisor exited; restarting it", file=sys.stderr, flush=True)
+                        page_thread = threading.Thread(target=pages.supervise_with_retry, args=(root, stop_pages), daemon=True)
+                        page_thread.start()
             finally:
                 stop_pages.set()
+                if message_thread is not None and message_thread.ident is not None:
+                    message_thread.join()
                 if page_thread is not None and page_thread.ident is not None:
                     page_thread.join()  # supervise's I/O is bounded; cancellation reaps unrecorded children before exec
                 db.engine.dispose()
+                with contextlib.suppress(OSError):
+                    write_engine_status(
+                        root,
+                        started_at=started_at,
+                        last_pass_at=last_pass_at,
+                        last_attempt_at=last_attempt_at,
+                        stopped_at=datetime.now(timezone.utc),
+                        interval=args.interval,
+                        mode=mode,
+                        last_error=last_error,
+                        error_kind=error_kind,
+                        release=release,
+                    )
+            if newer is not None and _persist_launchd_handoff(root, newer[0]):
+                return 0
         if newer is not None:  # after the lock and board thread are released, so the new release can take them
             _handoff(*newer, root, args.interval, args.once)
         return 0
@@ -1115,6 +1428,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"engine: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

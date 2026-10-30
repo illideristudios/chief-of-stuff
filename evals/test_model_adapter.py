@@ -145,6 +145,18 @@ class EventsTest(unittest.TestCase):
                 self.assertEqual(claude_adapter.classify(code, raw, stderr, keep_events=True).kind, kind)
 
 
+class DefaultClaudeLoginTest(unittest.TestCase):
+    def test_default_login_does_not_set_config_override_but_records_transcript_directory(self):
+        environment = dict(os.environ)
+        environment.pop("CLAUDE_CONFIG_DIR", None)
+        with mock.patch.dict(os.environ, environment, clear=True), \
+             mock.patch.object(claude_adapter, "command", return_value=["claude", "--", "p"]), \
+             mock.patch.object(claude_adapter, "spawn") as spawn:
+            claude_adapter.start(Request(prompt="p", session_id=SID), Path("/tmp/run"))
+        self.assertNotIn("CLAUDE_CONFIG_DIR", spawn.call_args.args[3])
+        self.assertEqual(spawn.call_args.kwargs["config_dir"], str(Path(environment["HOME"]) / ".claude"))
+
+
 class StartTest(unittest.TestCase):
     def test_runner_spawn_failure_removes_launch_evidence_and_reraises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -160,6 +172,55 @@ class StartTest(unittest.TestCase):
 
 
 class CancelTest(unittest.TestCase):
+    def test_cancellation_waits_until_killed_leader_is_recorded_as_reaped(self):
+        process = mock.Mock(pid=4242, returncode=None)
+        seen = []
+        previous = signal.signal(signal.SIGTERM, lambda *_: seen.append(process.returncode))
+        def reap(*, timeout):
+            os.kill(os.getpid(), signal.SIGTERM)
+            process.returncode = -signal.SIGKILL
+        process.wait.side_effect = reap
+        try:
+            with mock.patch.object(claude_adapter.os, "killpg"):
+                claude_adapter._stop_after_write_failure(process)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(seen, [-signal.SIGKILL])
+
+    def test_write_failure_does_not_claim_cleanup_if_group_signal_is_denied(self):
+        process = mock.Mock(pid=4242, returncode=None)
+        with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                claude_adapter._stop_after_write_failure(process)
+        process.wait.assert_not_called()
+
+    def test_write_failure_does_not_signal_a_reaped_hosts_reusable_group_id(self):
+        process = mock.Mock(pid=4242, returncode=0)
+        with mock.patch.object(claude_adapter.os, "killpg") as killpg:
+            claude_adapter._stop_after_write_failure(process)
+        killpg.assert_not_called()
+
+    def test_serve_cleanup_signals_once_and_never_claims_a_denied_cleanup(self):
+        for denied in (False, True):
+            with self.subTest(denied=denied), tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                process = mock.Mock(pid=4242, returncode=None)
+                process.wait.side_effect = lambda **_: setattr(process, "returncode", -signal.SIGKILL)
+                prepared = {"argv": ["host"], "cwd": tmp, "session_id": SID, "stdin_prompt": "p"}
+                with mock.patch.object(claude_adapter.subprocess, "Popen", return_value=process), \
+                     mock.patch.object(claude_adapter, "_serve", side_effect=OSError("stream failed")), \
+                     mock.patch.object(claude_adapter, "_close_intake", side_effect=OSError("close failed")), \
+                     mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError if denied else None) as killpg:
+                    if denied:
+                        with self.assertRaises(PermissionError):
+                            claude_adapter._messaging_worker(run_dir, prepared)
+                        self.assertFalse((run_dir / "exit.json").exists())
+                        process.wait.assert_not_called()
+                    else:
+                        claude_adapter._messaging_worker(run_dir, prepared)
+                        self.assertNotEqual(json.loads((run_dir / "exit.json").read_text())["exit_code"], 0)
+                    killpg.assert_called_once_with(4242, signal.SIGKILL)
+
     def test_a_host_that_ignores_sigterm_is_killed_and_reaped(self):
         process = mock.Mock(pid=4242)
         process.wait.side_effect = [subprocess.TimeoutExpired("host", 5), 0]
@@ -508,6 +569,20 @@ class CallTest(unittest.TestCase):
                     os.kill(int((artifacts / "stdout").read_text().strip()), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+    def test_timeout_cleanup_tolerates_permission_error_after_leader_exits(self):
+        process = mock.Mock(pid=123)
+        process.poll.return_value = 0
+        process.communicate.return_value = ("partial", "")
+        with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError):
+            self.assertEqual(claude_adapter._kill_and_drain(process), ("partial", ""))
+
+    def test_timeout_cleanup_does_not_hide_permission_error_for_live_leader(self):
+        process = mock.Mock(pid=123)
+        process.poll.return_value = None
+        with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                claude_adapter._kill_and_drain(process)
 
     def test_truncated_utf8_output_is_saved_and_classified(self):
         self.cli.write_text(f"#!{sys.executable}\nimport os,time\nos.write(1,b'partial: \\xe2')\ntime.sleep(30)\n")

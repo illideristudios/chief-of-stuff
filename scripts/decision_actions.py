@@ -293,8 +293,13 @@ def human_answer(decisions: Sequence[Any], update: DecisionUpdate) -> Any | None
     return row if row is not None and row.decided_by == "user" and (row.answer or "").strip() else None
 
 
-def tab_counts(items, decisions, segments) -> dict:
-    """Lead counts from engine rows. Tabs without a store source omit their count."""
+def tab_counts(items, decisions, segments, resumes: dict | None = None) -> dict:
+    """Lead counts from engine rows. Tabs without a store source omit their count.
+
+    An exhausted retry with no live segment is held (#963): it is not ready to dispatch.
+    """
+    from readiness import retry_exhaustion
+
     opened = {i.issue_key: i for i in items if i.forge_state != "closed"}
     pending = [d for d in states([d for d in decisions if d.issue_key in opened]) if d.status in OPEN_STATES]
     held = {d.issue_key for d in pending}
@@ -302,5 +307,12 @@ def tab_counts(items, decisions, segments) -> dict:
     waiting = {i.issue_key for i in opened.values() if i.human_review}
     waiting.update(key for key, seg in last.items() if key in opened and seg.outcome == "human_review")
     held.update(waiting)
+    segs_by_key: dict[str, list] = {}
+    for seg in segments:
+        segs_by_key.setdefault(seg.issue_key, []).append(seg)
+    for key in opened:
+        if retry_exhaustion((resumes or {}).get(key), segs_by_key.get(key, ())):
+            held.add(key)
+            waiting.add(key)
     running = {s.issue_key for s in segments if s.issue_key in opened and not s.ended_at}
     return {"workers": len(waiting), "dispatch": len(opened.keys() - held - running), "decisions": len(pending)}
