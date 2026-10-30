@@ -303,8 +303,34 @@ def ask_decision(decisions: Sequence[Any], ask: Any) -> Any | None:
         linked = _ask_link(row, decisions)
         matches = linked == ask.id if linked is not None else identity(row) == ("ask", ask.question, f"ask-{ask.id}")
         if (matches and row.question == ask.question and prior.get("context", "") == ask.context
-                and tuple(prior.get("options") or ()) == tuple(ask.options)):
+                and tuple(prior.get("options") or ()) in (tuple(ask.options), _consulted_options(ask))):
             return row
+    return None
+
+
+def _consulted_options(ask: Any) -> tuple[str, ...]:
+    """The engine consults a permission ask raised before #874, which carries no options, as allow/deny."""
+    if not ask.options and permission_event(ask) is not None:
+        return ("allow", "deny")
+    return tuple(ask.options)
+
+
+def permission_event(ask: Any) -> dict | None:
+    """The event a worker's permission ask records (#874), or None for any other ask."""
+    try:
+        event = json.loads(ask.context or "")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(event, dict):
+        return None
+    # #893: new asks carry kind, so recognition does not depend on the question text.
+    if event.get("kind") == "permission" and "tool_name" in event:
+        return event
+    # Asks raised before #874 carry no options; they are permission requests all the same (#890 follow-up).
+    # Contexts with no kind keep the prefix check, so asks already on the store still settle as permissions.
+    if ("kind" not in event and "tool_name" in event and tuple(ask.options) in (("allow", "deny"), ())
+            and str(ask.question).startswith("Permission requested for ")):
+        return event
     return None
 
 
@@ -323,9 +349,24 @@ def committed_ask_answer(decisions: Sequence[Any], ask: Any) -> str | None:
 
 
 def answer_ask(decisions: Sequence[Any], ask: Any) -> DecisionUpdate | None:
-    """Settle an answered ask without reviving an old context or changing the trio's votes."""
+    """Settle an answered ask without reviving an old context or changing the trio's votes.
+
+    An answer that landed before any consultation is itself the user's row. A user row, a reversed
+    row, and an answer the latest row already records stay as they are.
+    """
+    if not ask.answer:
+        return None
     row = ask_decision(decisions, ask)
-    if (not ask.answer or row is None or row.answer or is_reversed(row) or is_restarted(row)):
+    if row is None:
+        ident = ("ask", ask.question, f"ask-{ask.id}")
+        if any(identity(d) == ident for d in decisions):
+            return None
+        return DecisionUpdate("ask", ask.question, ask.answer, "user", {
+            "recommendation": ask.answer,
+            "decision": {"options": list(ask.options), "context": ask.context,
+                         "stage": getattr(ask, "stage", ""), "attempt": getattr(ask, "attempt", 0),
+                         "instance": f"ask-{ask.id}"}})
+    if is_reversed(row) or is_restarted(row) or row.decided_by == "user" or row.answer == ask.answer:
         return None
     return DecisionUpdate(row.topic, row.question, ask.answer, "user",
                           {**row.record, "recommendation": ask.answer})

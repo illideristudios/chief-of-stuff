@@ -317,7 +317,6 @@ def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
         return []
 
     ready: list[tracker.Task] = []
-
     for t in tasks:
         if t.kind != "open" or t.owner.strip() != "unassigned":
             continue
@@ -386,6 +385,7 @@ class PageData:
     issue_logs: tuple = ()
     engine_logs: tuple = ()
     decision_rows: tuple = ()  # every decision row, oldest first: a decision page's history and address (#945)
+    decision_graph_nodes: tuple = ()  # detached AncestorDecision snapshot for /decisions/graph (#1181)
 
     def items(self):
         return self.work_items
@@ -398,6 +398,9 @@ class PageData:
 
     def decisions(self):
         return self.board_decisions
+
+    def graph_nodes(self):
+        return self.decision_graph_nodes
 
     def reports(self, key, *, stage, attempt):
         return [r for r in self.stage_reports if (r.issue_key, r.stage, r.attempt) == (key, stage, attempt)]
@@ -421,7 +424,8 @@ def page_data(store) -> PageData:
     """Read the store through the use case once, before handing rows to presenters."""
     items = tuple(store.items())
     rows = tuple(store.decisions())
+    graph_nodes = tuple(store.decision_graph_nodes()) if hasattr(store, "decision_graph_nodes") else ()
     # Decision rows are append-only; presenters see each decision's latest row only, a decision page all of them.
     return PageData(items, tuple(store.segments()), tuple(decision_actions.current_rows(rows)), tuple(store.reports()),
                     {i.issue_key: store.resume(i.issue_key) for i in items}, tuple(store.log()), tuple(store.engine_log()),
-                    rows)
+                    rows, graph_nodes)

@@ -158,17 +158,25 @@ class CaseMatchesTheRendererTest(unittest.TestCase):
     """A case's `html_match` is the renderer's markup, so the board grader fails on the agent, never on a stale pattern."""
 
     def test_the_done_card_pattern_matches_a_rendered_done_task(self) -> None:
+        # #1153: a done task leaves every Build stage column but main, so the grader looks for the
+        # audit's absence from Build (one card left; review empty), not a done chip on the card.
         case = EVALS / "cases" / "board-republish-on-task-change"
         spec = json.loads((case / "case.json").read_text())
         pattern = next(g["html_match"] for g in spec["graders"] if g.get("html_match"))
         work = Path(tempfile.mkdtemp())
         run.render_tree(case / "fixture", work, run.context(spec["tz"], datetime.now(ZoneInfo(spec["tz"]))))
         tracker = next((work / "daily").glob("*-tracker.md"))
-        tracker.write_text(tracker.read_text().replace("| Security audit | Security audit | coordinator | open |", "| Security audit | Security audit | coordinator | done 10:00 |"))
-        subprocess.run([sys.executable, str(run.PLUGIN_ROOT / "scripts" / "render_board.py"), "--root", str(work)], check=True, capture_output=True)
-        html = next((work / "pages").glob("*-board.html")).read_text()
-        self.assertRegex(html, pattern)
-        self.assertNotRegex(html.replace('columns-chip" data-cat="done">', 'columns-chip" data-cat="open">'), pattern)
+        board = run.PLUGIN_ROOT / "scripts" / "render_board.py"
+        subprocess.run([sys.executable, str(board), "--root", str(work)], check=True, capture_output=True)
+        open_html = next((work / "pages").glob("*-board.html")).read_text()
+        self.assertNotRegex(open_html, pattern)
+        tracker.write_text(tracker.read_text().replace(
+            "| Security audit | Security audit | coordinator | open |",
+            "| Security audit | Security audit | coordinator | done 10:00 |"))
+        subprocess.run([sys.executable, str(board), "--root", str(work)], check=True, capture_output=True)
+        done_html = next((work / "pages").glob("*-board.html")).read_text()
+        self.assertRegex(done_html, pattern)
+        self.assertNotIn('<div class="columns-card-name">Security audit</div>', done_html)
 
 
 if __name__ == "__main__":

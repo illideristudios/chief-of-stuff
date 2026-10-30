@@ -259,7 +259,9 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
 
-    laned = [t for t in tasks if t.lane.strip() and t.stage.strip()]
+    # Done means done (#1153): a finished task leaves the stage columns; only `main` holds finished work.
+    laned = [t for t in tasks if t.lane.strip() and t.stage.strip()
+             and (t.kind != "done" or effective_stage(t, sources, lanes) == "main")]
     at = {t: effective_stage(t, sources, lanes) for t in laned}
     order = list(dict.fromkeys(stage_order(lanes) + list(at.values())))
     # No PR column: a card at `pr` draws in the stage after it, normally review.

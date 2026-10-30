@@ -6,9 +6,22 @@ Sessions are stored in cwd for resume tests. SLEEP hangs; QUOTA and FAIL exercis
 
 import json
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
+
+
+if sys.argv[-3:] == ["plugin", "list", "--json"]:
+    if "--setting-sources" not in sys.argv or sys.argv[sys.argv.index("--setting-sources") + 1] != "user":
+        print("plugin list requires --setting-sources user", file=sys.stderr)
+        sys.exit(2)
+    payload = Path(tempfile.mkdtemp(prefix="fake-clock-"))
+    (payload / "hooks").mkdir()
+    (payload / "hooks" / "hooks.json").write_text("{}")
+    print(json.dumps([{"id": "datetime-inject@ai-additions", "version": "1.0.0",
+                       "scope": "user", "enabled": True, "installPath": str(payload)}]))
+    sys.exit(0)
 
 
 def one_answer(args):
