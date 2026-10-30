@@ -7,20 +7,12 @@ No JavaScript: the clocks carry `datetime` attributes a host script may keep tic
 
 from __future__ import annotations
 
+from collections.abc import Callable
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
 from fragment import colour as _colour, css_str as _css_str, esc as _esc, href as _href, kind as _kind
-
-# Okabe-Ito on parchment: a kind's accent, its top rule and its count.
-PALETTE: dict[str, str] = {
-    "blocked": "#c9533a", "decisions": "#a7843e", "approved": "#009E73", "running": "#0072B2",
-    "drift": "#c9533a", "orphaned": "#6e6470", "merge": "#009E73", "workers": "#0072B2",
-}
-TOKENS: dict[str, str] = {
-    "ink": "#2f2630", "muted": "#6e6470", "card": "#fbf8ef", "rule": "#ddd3bd", "edge": "#a7843e", "link": "#8a6c30",
-    "hot": "#c9533a", "hot-ink": "#fbf8ef",
-}
 
 
 @dataclass(frozen=True)
@@ -39,6 +31,7 @@ class Tile:
     count: int
     anchor: str  # the id it links to
     kind: str
+    route: str = ""  # a page it links to instead of the anchor
 
 
 @dataclass(frozen=True)
@@ -97,35 +90,35 @@ def header(h: Header) -> str:
 
 def tiles(ts: list[Tile]) -> str:
     return ('<nav class="panels-tiles" aria-label="counts">'
-            + "".join(f'<a class="panels-tile" data-kind="{_kind(t.kind)}" href="#{_kind(t.anchor)}">'
+            + "".join(f'<a class="panels-tile" data-kind="{_kind(t.kind)}" {_href(t.route or "#" + _kind(t.anchor))}>'
                       f'<span class="panels-label">{_esc(t.label)}</span><b class="panels-count">{t.count}</b></a>' for t in ts)
             + "</nav>")
 
 
-def _row(r: Row) -> str:
+def _row(r: Row, inline: Callable[[str], str] = _esc) -> str:
     num = f'<span class="panels-num">{_esc(r.num)}</span>' if r.num else ""
     ref = ((f'<a class="panels-ref" {_href(r.href)}>{_esc(r.ref)}</a>' if r.href else f'<span class="panels-ref">{_esc(r.ref)}</span>')
            if r.ref else "")
     name = (f'<a class="panels-name" {_href(r.href)}>{_esc(r.name)}</a>' if r.href and not r.ref
             else f'<span class="panels-name">{_esc(r.name)}</span>')
     side = f'<span class="panels-side">{_esc(r.side)}</span>' if r.side else ""
-    facts = f'<span class="panels-facts">{_esc(r.facts)}</span>' if r.facts else ""
+    facts = f'<span class="panels-facts">{inline(r.facts)}</span>' if r.facts else ""
     return f'<div class="panels-row">{num}{ref}{name}{side}{facts}</div>'
 
 
-def _panel(p: Panel) -> str:
+def _panel(p: Panel, inline: Callable[[str], str] = _esc) -> str:
     note = f'<span class="panels-note">{_esc(p.note)}</span>' if p.note else ""
     link = f'<a class="panels-link" {_href(p.link[1])}>{_esc(p.link[0])}</a>' if p.link else ""
     foot = f'<div class="panels-foot">{_esc(p.foot)}</div>' if p.foot else ""
-    rows = "".join(map(_row, p.rows)) or '<div class="panels-row panels-empty">none</div>'
+    rows = "".join(_row(r, inline) for r in p.rows) or '<div class="panels-row panels-empty">none</div>'
     return (f'<section class="panels-panel" id="{_kind(p.id)}" data-kind="{_kind(p.kind)}">'
             f'<div class="panels-panel-head"><h3 class="panels-title">{f'<a {_href(p.href)}>{_esc(p.title)}</a>' if p.href else _esc(p.title)}</h3>{note}{link}'
             f'<b class="panels-count">{p.count}</b></div>{rows}{foot}</section>')
 
 
-def panels(ps: list[Panel]) -> str:
+def panels(ps: list[Panel], inline: Callable[[str], str] = _esc) -> str:
     """The panels as one row that stacks on a narrow screen."""
-    return '<div class="panels">' + "".join(map(_panel, ps)) + "</div>"
+    return '<div class="panels">' + "".join(_panel(p, inline) for p in ps) + "</div>"
 
 
 BASE_CSS = """\
@@ -159,8 +152,11 @@ BASE_CSS = """\
 """
 
 
-def css(colors: dict[str, str] = PALETTE, tokens: dict[str, str] = TOKENS) -> str:
-    """The stylesheet: layout, the `--panels-*` tokens and one accent per kind."""
+def css(colors: dict[str, str], tokens: dict[str, str]) -> str:
+    """Layout and kind accents; raise ValueError if the host omits any layout token."""
+    missing = set(re.findall(r"var\(--panels-([a-z-]+)\)", BASE_CSS)) - tokens.keys()
+    if missing:
+        raise ValueError("Missing panel tokens: " + ", ".join(sorted(missing)))
     root = ";".join(f"--panels-{_kind(k)}:{_colour(v)}" for k, v in tokens.items())
     rules = [f'.panels-tile[data-kind="{_css_str(k)}"],.panels-panel[data-kind="{_css_str(k)}"]{{--k:{_colour(v)}}}'
              for k, v in colors.items()]

@@ -12,7 +12,7 @@
       "notes/.keep": ""
     }
   },
-  "description": "The tree and the session are created on the yes, once each, and never before it. The File ownership row is written from what the script printed.",
+  "description": "The tree and the session are created on the yes, once each, and never before it.",
   "turns": [
     {
       "prompt": "Start the security audit.",
@@ -61,12 +61,6 @@
           "pattern": "(?m)^\\|\\s*Security audit[^|]*\\|[^\\n]*\\| running \\d{1,2}:\\d{2}"
         },
         {
-          "name": "File ownership names the tree that was made",
-          "type": "file_matches",
-          "path": "daily/{{today}}-tracker.md",
-          "pattern": "(?im)^[-|].*(worktree|trees/)[^\\n]*"
-        },
-        {
           "name": "a Decisions row quotes the yes",
           "type": "file_matches",
           "path": "daily/{{today}}-tracker.md",
@@ -89,5 +83,6 @@
     }
   ],
   "max_turns": 18,
-  "timeout_seconds": 600
+  "timeout_seconds": 600,
+  "superseded_by": "autonomy-interactive-dispatch"
 }

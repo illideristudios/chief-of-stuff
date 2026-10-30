@@ -1,0 +1,32 @@
+{
+  "tz": "America/Chicago",
+  "peers": "sessions.json",
+  "description": "A concrete security defect advances straight to a fix and new review with no owner triage or plan yes.",
+  "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: full @ 3f9c2a1\nPR: https://github.com/o/app/pull/12\nTests: pass \u2014 41/41\nR1 | Security | Critical | Confirmed | src/a/upload.py:4 | a symlink inside the root escapes it because resolve() is missing before the prefix check | resolve before checking the prefix and add a regression test | suggested: fix\nAssessment: one concrete defect; no design choice or architecture change.\n</cross-session-message>",
+  "graders": [
+    {
+      "name": "sends the concrete fix to its worker",
+      "type": "peer_calls",
+      "tool": "send",
+      "to_ref": "d4e5f6",
+      "text_match": "R1|resolve|symlink",
+      "min": 1
+    },
+    {
+      "name": "no owner triage question",
+      "type": "regex",
+      "pattern": "\\?(?:\\s|$)",
+      "match": "absent"
+    },
+    {
+      "name": "no plan yes sent to the worker",
+      "type": "peer_calls",
+      "tool": "send",
+      "to_ref": "d4e5f6",
+      "text_match": "(?i)(?:wait|nothing|not).*approv|approv.*plan",
+      "max": 0
+    }
+  ],
+  "max_turns": 16,
+  "timeout_seconds": 450
+}

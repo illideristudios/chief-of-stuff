@@ -15,6 +15,8 @@ import panels  # noqa: E402
 
 CT = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 9, 26, 2, 10, 37, tzinfo=CT)
+TOKENS = {"ink": "var(--fg)", "muted": "#234567", "card": "#123456", "rule": "#345678",
+          "edge": "#456789", "link": "#56789a", "hot": "#6789ab", "hot-ink": "#789abc"}
 
 
 def _due(name: str, at: datetime, now: datetime = NOW) -> str:
@@ -157,20 +159,47 @@ class Panel(unittest.TestCase):
 
 class Css(unittest.TestCase):
     def test_one_rule_per_kind_from_the_palette(self) -> None:
-        css = panels.css({"merge": "var(--stage-review)", "hot": "#c9533a"})
+        css = panels.css({"merge": "var(--stage-review)", "hot": "#c9533a"}, TOKENS)
         self.assertIn('[data-kind="merge"]{--k:var(--stage-review)}', css)
         self.assertIn('[data-kind="hot"]{--k:#c9533a}', css)
 
     def test_a_value_cannot_escape_its_declaration(self) -> None:
         with self.assertRaises(ValueError):
-            panels.css({"x": "red;}body{display:none"})
+            panels.css({"x": "red;}body{display:none"}, TOKENS)
 
-    def test_the_default_palette_covers_the_six_tiles_and_three_panels(self) -> None:
-        self.assertLessEqual({"blocked", "decisions", "approved", "running", "drift", "orphaned", "merge", "workers"},
-                             set(panels.PALETTE))
+    def test_colours_and_tokens_must_both_come_from_the_host(self) -> None:
+        self.assertIsNone(panels.css.__defaults__)
+        for kwargs in ({}, {"colors": {}}, {"tokens": {}}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(TypeError):
+                panels.css(**kwargs)
+
+    def test_tokens_come_from_the_host(self) -> None:
+        css = panels.css({}, TOKENS)
+        for name, value in TOKENS.items():
+            with self.subTest(token=name):
+                self.assertIn(f"--panels-{name}:{value}", css)
+
+    def test_every_required_token_must_be_supplied(self) -> None:
+        for name in TOKENS:
+            with self.subTest(token=name), self.assertRaisesRegex(ValueError, f"Missing panel tokens: {name}$"):
+                panels.css({}, {k: v for k, v in TOKENS.items() if k != name})
+
+    def test_empty_tokens_lists_all_missing_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Missing panel tokens: " + ", ".join(sorted(TOKENS)) + "$"):
+            panels.css({}, {})
+
+    def test_a_misspelling_does_not_supply_the_required_token(self) -> None:
+        tokens = {k: v for k, v in TOKENS.items() if k != "hot-ink"}
+        for typo in ("hotink", "hot_ink"):
+            with self.subTest(typo=typo), self.assertRaisesRegex(ValueError, "Missing panel tokens: hot-ink$"):
+                panels.css({}, {**tokens, typo: "#123456"})
+
+    def test_a_token_value_cannot_escape_its_declaration(self) -> None:
+        with self.assertRaises(ValueError):
+            panels.css({}, {**TOKENS, "ink": "red;}body{display:none"})
 
     def test_the_layout_wraps_on_a_phone(self) -> None:
-        css = panels.css()
+        css = panels.css({}, TOKENS)
         self.assertRegex(css, r"\.panels-tiles\{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(")
         self.assertRegex(css, r"\.panels\{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(")
         self.assertRegex(css, r"\.panels-head\{[^}]*flex-wrap:wrap")
