@@ -36,15 +36,15 @@ BOOTSTRAP = ("Read the file {dispatch} — that is your assignment, in full, and
              "the assignment names is inside it.")
 # Pin cwd in argv because the terminal may ignore its configured directory.
 ENV_BIN = "/usr/bin/env"
-# Enforce planning at launch and pass the assigned session name explicitly.
+# Pass the assigned name; routine work starts with write access and no plan approval.
 CLAUDE_ARGV = ["claude", "--agent", "{type}", "--name", "{title}", "--model", "{model}",
-               *runtimes.get("claude").effort_argv, "--permission-mode", "plan", BOOTSTRAP]
+               *runtimes.get("claude").effort_argv, BOOTSTRAP]
 # Antigravity gets its name from the tab and assignment and reads workspace rules explicitly.
 AGY_BOOTSTRAP = BOOTSTRAP + " Then read {root}/CLAUDE.md: its house rules bind you."
-AGY_ARGV = ["agy", "--model", "{model}", *runtimes.get("agy").effort_argv, "--mode", "plan", "-i", AGY_BOOTSTRAP]
-CODEX_ARGV = ["codex", "-C", "{cwd}", "--sandbox", "read-only", "--model", "{model}",
+AGY_ARGV = ["agy", "--model", "{model}", *runtimes.get("agy").effort_argv, "--mode", "accept-edits", "-i", AGY_BOOTSTRAP]
+CODEX_ARGV = ["codex", "-C", "{cwd}", "--sandbox", "workspace-write", "--model", "{model}",
               *runtimes.get("codex").effort_argv, AGY_BOOTSTRAP]
-CURSOR_ARGV = ["agent", "--workspace", "{cwd}", "--mode", "plan", "--model", "{model}", AGY_BOOTSTRAP]
+CURSOR_ARGV = ["agent", "--workspace", "{cwd}", "--model", "{model}", AGY_BOOTSTRAP]
 TEMPLATES = {"claude": CLAUDE_ARGV, "agy": AGY_ARGV, "codex": CODEX_ARGV, "cursor": CURSOR_ARGV}
 MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # The eval harness may override this template; normal launches use Ghostty tabs.
@@ -411,7 +411,7 @@ def main(argv_in: list[str] | None = None) -> int:
                     help="one of " + ", ".join(e for e in EFFORTS if e) + "; not supported for " + ", ".join(r.name for r in runtimes.RUNTIMES if not r.takes_effort))
     ap.add_argument("--dry-run", action="store_true", help="print the argv and start nothing")
     ap.add_argument("--check", action="store_true",
-                    help="print the assignment the task row composes, or the refusal; checks the Tasks and File ownership rows only: "
+                    help="print the assignment the task row composes, or the refusal; checks the Tasks row only: "
                          "needs no --cwd, makes no worktree, starts nothing and writes nothing; "
                          "--name checks a standing row, --one-shot a one-shot task; other launch flags are ignored")
     mode = ap.add_mutually_exclusive_group()

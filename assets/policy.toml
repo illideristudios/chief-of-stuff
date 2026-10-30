@@ -4,19 +4,14 @@
 # Reviewer profiles and topic tags remain placeholders for Zach (design decisions 5 and 5a).
 #
 # Every policy field starts from [policy] and is overridden, in order, by the persona's, the stage's and the room's own
-# `policy` table, so a value set for one stage or room holds only there. A standing approval is a policy exception and
-# must carry an expiry with its offset, for example:
-#   [[rooms.<name>.policy.approvals]]
-#   gate = "merge"
-#   expires = 2026-10-12T00:00:00-07:00
+# `policy` table. Legacy owner gates and standing approvals no longer hold work.
 # spend_usd, quota_percent and time_minutes are limits with no default: set in 1.1 from what 1.0 measures.
 
 default_workflow = "standard"
 
 [policy]
-zach_gates = []              # decision 6: no gate needs Zach's own word by default
 blocking_severity = "minor"  # burn down to no open findings
-retry_limit = 3              # Zach, 2026-10-11: 3 fix rounds, then an unrecoverable-failure ping
+retry_limit = 3              # Zach, 2026-10-11: three fix rounds, then park with findings and a recommendation
 launch = "adapter"           # Zach, 2026-10-11: the adapter by default, a full session where a persona or stage says so
 trio = ["implementer", "senior-architect", "senior-staff-engineer"]
 trios = {}                   # PLACEHOLDER: decision topic tag -> three personas; the tags are Open
@@ -66,9 +61,9 @@ persona = "implementer"
 [workflows.standard]
 start = "plan"
 edges = [
-  { from = "plan", to = "implement", gate = "plan" },
+  { from = "plan", to = "implement" },
   { from = "implement", to = "review" },
   { from = "review", to = "fix" },
   { from = "fix", to = "review" },
-  { from = "review", to = "merge", gate = "merge" },
+  { from = "review", to = "merge" },
 ]

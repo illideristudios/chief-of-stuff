@@ -6,8 +6,8 @@ For the existing six-column GitLab board, configure the workspace TOML like this
 
 ```toml
 [lanes]
-designed = { stages = ["design", "design yes", "test", "implement", "pr", "review", "triage", "fix", "verify", "merge", "main"], gates = ["design yes", "triage", "merge"] }
-build = { stages = ["plan", "plan yes", "test", "implement", "pr", "review", "triage", "fix", "verify", "merge", "main"], gates = ["plan yes", "triage", "merge"] }
+designed = { stages = ["design", "test", "implement", "pr", "review", "triage", "fix", "verify", "merge", "main"] }
+build = { stages = ["plan", "test", "implement", "pr", "review", "triage", "fix", "verify", "merge", "main"] }
 
 [kanban]
 stages = [
@@ -19,14 +19,11 @@ stages = [
   "05 - REFACTOR / ADDRESS ISSUES",
 ]
 human_review_label = "!! - HUMAN REVIEW REQUIRED"
-hold_stages = ["design yes", "plan yes", "triage", "merge"]
 terminal_stages = ["main"]
 
 [kanban.map]
 design = 0
 plan = 0
-"design yes" = 1
-"plan yes" = 1
 test = 2
 implement = 3
 pr = 4
@@ -37,7 +34,7 @@ verify = 4
 merge = 4
 ```
 
-New code tasks pass through planning, plan approval, test implementation, implementation, and code review. A review that needs fixes moves to `05` and returns to `04` for verification. The `!!` hold remains until the user's decision. A Triage pass that leaves nothing for the user passes the `triage` gate without the `!!` hold, by the automatic-fix rule, and is recorded in the Log. Existing tasks already in a later stage stay there; the migration does not pretend they passed earlier columns.
+New code tasks pass through planning, tests, implementation and review without owner yes-gates. Fixes return to review. Legacy lane `gates` and kanban `hold_stages` settings are accepted and ignored. A problem hold records an architectural question or two failures, with research, options and a recommendation; a split or retry-exhausted trio also waits on the owner. The worker guard remains in force. Existing tasks already in later stages stay there.
 
 For a GitHub backlog, omit `[kanban.github_project]` to use issue labels as the columns. To use a GitHub Project's single-select Status field instead, add:
 

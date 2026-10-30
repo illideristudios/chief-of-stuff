@@ -228,6 +228,12 @@ class HostAdapterTest(unittest.TestCase):
         self.assertIn("develop gained commits the engine did not merge: " + "w" * 12, held)
         self.assertNotIn("main gained", held)
 
+    def test_a_t3_run_with_no_recorded_heads_holds_rather_than_passing_unchecked(self):
+        # #1178: an adopted T3 run whose heads were lost is unknown, and unknown is never safe (ledger F3).
+        store = SimpleNamespace(items=lambda: [], resume=lambda key: {})
+        record = {"tree": str(self.dir), "runtime": "claude", "launcher": "t3"}
+        self.assertIn("holding for human review", host_adapter.moved_outside_engine(store, record, "now"))
+
     def test_branch_heads_reads_every_branch_in_one_call_and_marks_absent_ones(self):
         calls = []
 
