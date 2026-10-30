@@ -2074,6 +2074,21 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([a.answer for a in self.db.asks(KEY)], ["allow", "allow"])  # the rule, then the trio's choice
         self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
 
+    def test_an_answered_permission_ask_with_no_options_closes_its_allow_deny_decision(self):
+        # The trio consults a pre-#874 ask as allow/deny, so its row must still match the ask with no options;
+        # otherwise the ask's answer never reaches the row and the board shows it open to the owner forever.
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        context = json.dumps({"tool_name": "Bash", "tool_input": {"command": "rtk ls; git log --oneline -5"}})
+        ask = self.db.add_ask(KEY, "plan", 1, "session", "Permission requested for Bash", [], context)
+        self.db.answer_ask(KEY, ask, "deny")
+        self.db.add_decision(KEY, "ask", "Permission requested for Bash", None, "", {"decision": {
+            "issue_key": KEY, "topic": "ask", "question": "Permission requested for Bash", "options": ["allow", "deny"],
+            "context": context, "instance": f"ask-{ask}", "stage": "plan", "attempt": 1}})
+        model = mock.Mock()
+        self.run_pass(model=model)
+        model.assert_not_called()
+        self.assertEqual(decision_actions.states(self.db.decisions(KEY))[0].answer, "deny")
+
     def test_a_permission_marker_is_settled_by_the_rule_without_the_question_prefix(self):
         # #893: kind marks the ask, so recognition does not depend on the question text.
         self.db.upsert_item(KEY, title="Parser", stage="implement")
