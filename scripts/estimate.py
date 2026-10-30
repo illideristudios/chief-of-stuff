@@ -10,7 +10,6 @@ from datetime import date, datetime, time, timedelta
 
 from clock import DATE, done_clock as _done_clock, dur as _dur, hhmm as _hhmm
 from tracker import NOBODY, UNASSIGNED, Task, bare_name as _bare_name, resolve_due as _resolve_due
-from workspace import Config, Deadline
 
 SIZES = ("S", "M", "L", "XL")
 ALL_SIZES = "all"
@@ -33,7 +32,15 @@ class Bar:
     size: str = ""
 
 
-def nearest_deadline(cfg: Config, now: datetime) -> Deadline:
+@dataclass(frozen=True)
+class _DayEnd:
+    """The synthetic end of a day. A configured deadline still comes from the caller as `cfg.deadlines`."""
+
+    name: str
+    at: datetime
+
+
+def nearest_deadline(cfg, now: datetime):
     """The first deadline at or after `now`, else today's end of day.
 
     The clock and `data-deadline` use it. A deadline that has already passed is not a countdown;
@@ -45,11 +52,11 @@ def nearest_deadline(cfg: Config, now: datetime) -> Deadline:
     return _end_of_day(cfg, now)
 
 
-def _end_of_day(cfg: Config, now: datetime) -> Deadline:
-    return Deadline("end of day", datetime.combine(now.date(), time(23, 59), tzinfo=cfg.zone))
+def _end_of_day(cfg, now: datetime):
+    return _DayEnd("end of day", datetime.combine(now.date(), time(23, 59), tzinfo=cfg.zone))
 
 
-def governing_deadline(cfg: Config, now: datetime) -> Deadline:
+def governing_deadline(cfg, now: datetime):
     """The nearest deadline ahead that unnamed tasks fall to, else end of day.
 
     A task that names no deadline is drawn or estimated toward this one. A deadline marked `named tasks
@@ -114,7 +121,7 @@ def _owner_key(owner: str) -> str:
     return key
 
 
-def horizon(cfg: Config, now: datetime) -> tuple[datetime, str]:
+def horizon(cfg, now: datetime) -> tuple[datetime, str]:
     """The nearest governing deadline still ahead, or midnight once none is."""
     d = governing_deadline(cfg, now)
     if d.at > now and d.name != "end of day":
@@ -122,7 +129,7 @@ def horizon(cfg: Config, now: datetime) -> tuple[datetime, str]:
     return datetime.combine(now.date(), time(0, 0), tzinfo=cfg.zone) + timedelta(days=1), "end of day"
 
 
-def estimates(active: list[Task], cfg: Config, now: datetime, hist: dict[str, tuple[timedelta, int]] | None = None) -> dict[str, Estimate]:
+def estimates(active: list[Task], cfg, now: datetime, hist: dict[str, tuple[timedelta, int]] | None = None) -> dict[str, Estimate]:
     """A derived end for every owned task with no `due`, keyed by item. Nothing here is written to the tracker.
 
     Per owner, the active tasks that are blank or due by the horizon form a queue of N, running first, then
@@ -173,7 +180,7 @@ def estimates(active: list[Task], cfg: Config, now: datetime, hist: dict[str, tu
     return out
 
 
-def history(tasks: list[Task], cfg: Config, now: datetime) -> dict[str, tuple[timedelta, int]]:
+def history(tasks: list[Task], cfg, now: datetime) -> dict[str, tuple[timedelta, int]]:
     """Mean elapsed time per size over done tasks that kept their running start, plus an `all` row.
 
     Only `done HH:MM–HH:MM` counts: `since` is a date and `done HH:MM` alone has no start (finding 70), so
@@ -204,7 +211,7 @@ def queue_durations(active: list[Task], hist: dict[str, tuple[timedelta, int]]) 
     return {t.item: (hist[size] if (size := t.size.strip().upper()) and size in hist else hist[ALL_SIZES])[0] for t in active}
 
 
-def task_end(task: Task, cfg: Config, now: datetime, start: datetime, est: dict[str, Estimate] | None = None) -> tuple[datetime, str, str | None]:
+def task_end(task: Task, cfg, now: datetime, start: datetime, est: dict[str, Estimate] | None = None) -> tuple[datetime, str, str | None]:
     today = now.date()
     if (due := _resolve_due(task.due, cfg, today)) is not None:
         return due, "due", None
@@ -217,7 +224,7 @@ def task_end(task: Task, cfg: Config, now: datetime, start: datetime, est: dict[
     return governing_deadline(cfg, now).at, "deadline", NO_ESTIMATE
 
 
-def day_bar(task: Task, cfg: Config, now: datetime, est: dict[str, Estimate] | None = None) -> Bar:
+def day_bar(task: Task, cfg, now: datetime, est: dict[str, Estimate] | None = None) -> Bar:
     today, zone = now.date(), cfg.zone
     day_start = datetime.combine(today, time(0, 0), tzinfo=zone)
     if task.kind == "running" and (t := task.state_time):

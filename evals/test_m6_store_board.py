@@ -33,7 +33,7 @@ import store  # noqa: E402
 import store_access  # noqa: E402
 import task_forge  # noqa: E402
 import workers_page  # noqa: E402
-from workspace import parse_coordinator  # noqa: E402
+from workspace import parse_coordinator, read_config  # noqa: E402
 
 ZONE = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 10, 9, 14, 0, tzinfo=ZONE)
@@ -1023,6 +1023,73 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
         workers = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data)
         # The previous exhaustion no longer applies, and ended rows offer task links.
         self.assertNotIn(task_forge.EXHAUSTED_CHIP, workers)
+
+
+class TaskHistoryWorkerReportTest(unittest.TestCase):
+    """#920: store task history keeps worker reports in a collapsed block, not inline on the step line."""
+
+    def setUp(self) -> None:
+        self.root, self.db = make_store_workspace()
+        (self.root / "CLAUDE.md").write_text(
+            CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n", encoding="utf-8",
+        )
+        self.addCleanup(self.db.engine.dispose)
+        self.db.upsert_item(KEY, workflow="build", stage="plan", forge_state="open", title="Upload size limit")
+
+    def _history(self, page: str) -> str:
+        match = re.search(r'How it got here.*?<div class="card timeline">(.*?)</div>\s*</div>', page, re.S)
+        self.assertIsNotNone(match, page[:500])
+        return match.group(1)
+
+    def _render(self) -> str:
+        cfg = read_config(self.root)
+        return issue_page.render(KEY, [], bs.EMPTY, NOW, root=self.root,
+                                 db=task_forge.page_data(self.db), cfg=cfg)
+
+    def test_suite_not_green_collapses_markdown_worker_said_report(self) -> None:
+        from test_page_markdown import Structure
+
+        long_report = (
+            "## Implementation Plan\n\n### 1. Root Cause\n- **File**: `src/app.py`\n"
+            "1. First step\n2. Second step\n" + ("detail line\n" * 80)
+        )
+        msg = (
+            "worker plan attempt 2: human_review: suite is not green; "
+            "Suite: passed=missing or invalid, failed=0, skipped=0, xfailed=0; "
+            f"worker said: {long_report}"
+        )
+        self.db.add_log(KEY, msg, NOW.isoformat())
+        history = self._history(self._render())
+        self.assertIn("worker plan attempt 2: human_review: suite is not green", history)
+        self.assertNotIn("## Implementation Plan", history)
+        self.assertNotIn("### 1. Root Cause", history)
+        self.assertNotIn("**File**", history)
+        self.assertIn('<details class="step-report">', history)
+        self.assertNotIn('<details class="step-report" open', history)
+        self.assertIn('<h2>Implementation Plan</h2>', history)
+        self.assertIn('<h3>1. Root Cause</h3>', history)
+        self.assertIn("<b>File</b>", history)
+        self.assertFalse(Structure(history).blocks_in_p)
+
+    def test_blocked_multiline_report_collapses_with_rendered_markdown(self) -> None:
+        msg = (
+            'worker plan attempt 2: blocked: Blocked as stated in issue #12 ("Blocked on #10, #11").\n\n'
+            "### Why #12 Cannot Proceed Yet\n1. **Missing module**: `scripts/store.py`..."
+        )
+        self.db.add_log(KEY, msg, NOW.isoformat())
+        history = self._history(self._render())
+        self.assertIn("worker plan attempt 2: blocked: Blocked as stated in issue #12", history)
+        self.assertIn('<details class="step-report">', history)
+        self.assertRegex(history, r"<h3>Why .*#12.*Cannot Proceed Yet</h3>")
+        self.assertIn("<b>Missing module</b>", history)
+        self.assertIn('data-k="issue"', history)
+        self.assertIn("#10", history)
+
+    def test_short_worker_log_stays_one_line_without_details(self) -> None:
+        self.db.add_log(KEY, "worker plan attempt 1: human_review: no report call", NOW.isoformat())
+        history = self._history(self._render())
+        self.assertIn("worker plan attempt 1: human_review: no report call", history)
+        self.assertNotIn('class="step-report"', history)
 
 
 if __name__ == "__main__":

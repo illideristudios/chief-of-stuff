@@ -357,7 +357,11 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
         if ref.host == GITHUB and config.github_project:
             if project_items is None:
                 project_items, project_error = forge.project_items(
-                    gh or backlog.run_gh, config.github_project)
+                    gh or backlog.run_gh, config.github_project,
+                    tuple(rows[0][1] for rows in grouped.values()
+                          if rows[0][1].host == GITHUB
+                          and (issue := states[(rows[0][1].host, rows[0][1].repo)].get(rows[0][1].number))
+                          and issue.state != CLOSED))
             if project_error:
                 faults.append(KanbanFault(clip_name(furthest.label), project_error))
                 continue

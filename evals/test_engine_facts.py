@@ -376,6 +376,40 @@ class GatherTest(unittest.TestCase):
         facts = engine_facts.gather(forge=forge, store=self.db, root=self.root, trees=self.trees, now=NOW)
         self.assertIsNone(facts.blockers)
 
+    def test_a_recorded_landing_commit_skips_landings_and_reports_green_on_main(self):
+        self.db.upsert_item(KEY, forge_state="closed", merge_state="merged")
+        self.db.upsert_item(OTHER, forge_state="closed", merge_state="merged")
+        self.db.set_resume(KEY, {"verified_landing": "squashed", "verified_landing_head": "source-head"})
+        source = mock.Mock(**{"blocked_by.return_value": {}})
+        source.branch_head = lambda ref: forge.Pipeline(1, "main", "squashed", "passed", "")
+        landings = mock.Mock(return_value={OTHER: (True, True)})
+        source.landings = landings
+        facts = self.gather(source)
+        landings.assert_called_once()
+        self.assertEqual(landings.call_args.args[1], [OTHER])
+        self.assertEqual(dict(facts.on_main), {KEY: True, OTHER: True})
+        self.assertEqual(dict(facts.suite_on_main), {KEY: True, OTHER: True})
+        self.assertEqual(dict(facts.landing_heads), {KEY: "source-head"})
+
+    def test_a_legacy_true_landing_memo_is_remembered_without_landings(self):
+        self.db.upsert_item(KEY, forge_state="closed", merge_state="merged")
+        self.db.set_resume(KEY, {"verified_landing": True})
+        source = mock.Mock(**{"blocked_by.return_value": {}})
+        source.branch_head = lambda ref: forge.Pipeline(1, "main", "main-sha", "passed", "")
+        source.landings = mock.Mock(side_effect=AssertionError("landings"))
+        facts = self.gather(source)
+        self.assertEqual(dict(facts.on_main), {KEY: True})
+        self.assertEqual(dict(facts.suite_on_main), {KEY: True})
+
+    def test_an_open_item_with_a_landing_memo_is_not_passed_to_landings(self):
+        self.db.upsert_item(KEY, forge_state="open", merge_state="")
+        self.db.set_resume(KEY, {"verified_landing": "squashed"})
+        source = mock.Mock(**{"blocked_by.return_value": {}})
+        source.branch_head = lambda ref: forge.Pipeline(1, "main", "squashed", "passed", "")
+        source.landings = mock.Mock(side_effect=AssertionError("landings"))
+        facts = self.gather(source)
+        self.assertNotIn(KEY, dict(facts.on_main))
+
 
 class BlockedByTest(unittest.TestCase):
     def test_github_blocked_by_is_the_open_nodes(self):
@@ -389,13 +423,25 @@ class BlockedByTest(unittest.TestCase):
         with self.assertRaisesRegex(engine_facts.ForgeError, "auth required"):
             source.blocked_by()
 
+    @staticmethod
+    def blocker(iid, state="opened", path="example/project"):
+        return {"iid": str(iid), "state": state,
+                "webUrl": f"https://gitlab.example.test/{path}/-/issues/{iid}"}
+
+    @staticmethod
+    def issue_page(nodes, *, next_page=False):
+        """One GraphQL page: each node is (iid, blockers, nested hasNextPage)."""
+        return {"data": {"project": {"issues": {
+            "pageInfo": {"hasNextPage": next_page, "endCursor": "c1" if next_page else None},
+            "nodes": [{"iid": str(iid), "blockedByIssues": {"pageInfo": {"hasNextPage": links_next}, "nodes": links}}
+                      for iid, links, links_next in nodes]}}}}
+
     def test_a_gitlab_links_list_with_a_next_page_is_partial(self):
-        fake = SimpleNamespace(issues=lambda: SimpleNamespace(ok=True, issues=[SimpleNamespace(iid=1)]),
-                               _token=lambda: "token", home=SimpleNamespace(issues_url="https://gl/issues"),
-                               key=lambda n: f"gitlab:p#{n}")
-        with mock.patch.object(backlog, "_get", return_value=([], {"x-next-page": "2"}, "")):
+        source = forge.Forge(backlog.Backlog("https://gitlab.example.test", "example/project"), token="t")
+        page = self.issue_page([(1, [self.blocker(2)], True)])
+        with mock.patch.object(backlog, "_call", return_value=(page, {}, "")):
             with self.assertRaisesRegex(engine_facts.ForgeError, "more than one page"):
-                forge._gitlab_blocked(fake)
+                source.blocked_by()
 
     def test_a_github_list_of_blockers_is_keyed_by_issue(self):
         from evals.test_forge import FakeGh, gh_issue
@@ -412,12 +458,33 @@ class BlockedByTest(unittest.TestCase):
         source = forge.Forge(backlog.GitHubBacklog("example/project"), gh=FakeGh(issues=[issue]))
         self.assertEqual(source.blocked_by(), {KEY: ("github:elsewhere/lib#2",)})
 
+    def test_gitlab_blocker_pages_follow_the_cursor_and_stop_when_a_page_is_missing(self):
+        source = forge.Forge(backlog.Backlog("https://gitlab.example.test", "example/project"), token="t")
+        first = self.issue_page([(1, [self.blocker(2)], False)], next_page=True)
+        second = self.issue_page([(3, [self.blocker(4)], False)])
+        with mock.patch.object(backlog, "_call", side_effect=[(first, {}, ""), (second, {}, "")]) as call:
+            got = source.blocked_by()
+        self.assertEqual(got, {
+            "gitlab:gitlab.example.test/example/project#1": ("gitlab:gitlab.example.test/example/project#2",),
+            "gitlab:gitlab.example.test/example/project#3": ("gitlab:gitlab.example.test/example/project#4",),
+        })
+        self.assertEqual(call.call_args_list[1].args[4]["variables"]["after"], "c1")
+        self.assertTrue(all(c.args[1].endswith("/api/graphql") and "/links" not in c.args[1] for c in call.call_args_list))
+        with mock.patch.object(backlog, "MAX_PAGES", 1), \
+             mock.patch.object(backlog, "_call", return_value=(first, {}, "")):
+            with self.assertRaisesRegex(engine_facts.ForgeError, "partial"):
+                source.blocked_by()
+
+    def test_a_graphql_error_does_not_become_an_empty_blocker_map(self):
+        source = forge.Forge(backlog.Backlog("https://gitlab.example.test", "example/project"), token="t")
+        with mock.patch.object(backlog, "_call", return_value=({"errors": [{"message": "too complex"}]}, {}, "")):
+            with self.assertRaisesRegex(engine_facts.ForgeError, "unreadable"):
+                source.blocked_by()
+
     def test_a_foreign_gitlab_blocker_keeps_its_project(self):
         source = forge.Forge(backlog.Backlog("https://gitlab.example.test", "example/project"), token="t")
-        link = {"iid": 2, "link_type": "is_blocked_by", "state": "opened",
-                "web_url": "https://gitlab.example.test/elsewhere/lib/-/issues/2"}
-        with mock.patch.object(forge.Forge, "issues", return_value=SimpleNamespace(ok=True, issues=[SimpleNamespace(iid=1)])), \
-             mock.patch.object(backlog, "_get", return_value=([link], {}, "")):
+        page = self.issue_page([(1, [self.blocker(2, path="elsewhere/lib")], False)])
+        with mock.patch.object(backlog, "_call", return_value=(page, {}, "")):
             self.assertEqual(source.blocked_by(), {"gitlab:gitlab.example.test/example/project#1":
                                                    ("gitlab:gitlab.example.test/elsewhere/lib#2",)})
 

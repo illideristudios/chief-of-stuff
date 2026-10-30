@@ -513,8 +513,10 @@ class CardFactsTest(unittest.TestCase):
     def test_finished_tasks_have_no_looping_mark(self):
         log = "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n- 11:00 stage: Cut the release → fix\n"
         lanes = {"build": st.Lane(("implement", "review", "fix", "merge", "main"))}
+        # A done task draws no card at all outside `main` (#1153), so it carries no mark.
+        self.assertNotRegex(self.cols([], log, tracker=TRACKER.replace("running 10:30", "done 10:30"), lanes=lanes),
+                            r">Cut the release</(?:a|div)>")
         for tracker, changes in (
-                (TRACKER.replace("running 10:30", "done 10:30"), []),
                 (TRACKER.replace("| build | review |", "| build | main |"), []),
                 (TRACKER, [change("!3", state="merged", issues=("#9",))])):
             with self.subTest(tracker=tracker, changes=changes):

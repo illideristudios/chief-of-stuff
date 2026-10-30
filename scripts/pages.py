@@ -77,8 +77,9 @@ REFRESH = 60  # seconds between forge reads
 POLL = 5  # seconds between healthy server checks
 RETRY_MIN = 1
 RETRY_MAX = 60
-RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|report\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
+RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|report\.html|decisions\.html|decisions-graph(?:-[1-9][0-9]{0,18})?\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
+GRAPH_NODE_ROUTE = re.compile(r"/decisions/graph/([1-9][0-9]{0,18})")
 WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
 WORKER_MESSAGE = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})/messages")
 MAX_WORKER_MESSAGE = 8 * 1024
@@ -477,6 +478,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
     render consumed, inside one of `slots`. Returns the render error, or "". On an error the last good file stays
     where it is."""
     # The renderers are imported here, not at the top, to keep `pages.py --ensure` light.
+    import decision_graph_page
     import decision_page
     import heartbeat_page
     import issue_page
@@ -496,12 +498,13 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
         cfg = read_config(root)
         today = datetime.now(cfg.zone).date().isoformat()
         store_decision = name.startswith("decision-") and name[len("decision-"):-5].isdigit()  # a store id (#945)
+        decision_graph = name == "decisions-graph.html" or name.startswith("decisions-graph-")
         if name.startswith("decision-") and not store_decision:
             if not (pages_dir / f"{name[:-5]}.json").is_file():
                 return ""
             days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
             day = today if (root / "store.db").is_file() or today in days or not days else days[-1]
-        elif store_decision or name.startswith("issue-") or name in ("workers.html", "report.html"):
+        elif store_decision or decision_graph or name.startswith("issue-") or name in ("workers.html", "report.html"):
             day = today
         elif name == "decisions.html":
             days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
@@ -537,6 +540,13 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                 data = _page_data(root)
                 if name == "report.html":
                     heartbeat_page.write(root, pages_dir)
+                elif decision_graph:
+                    navigation = _navigation(root, pages_dir, data)
+                    if name == "decisions-graph.html":
+                        decision_graph_page.write_index(root, pages_dir, day, db=data, navigation=navigation)
+                    else:
+                        decision_graph_page.write_node(root, pages_dir, int(name[len("decisions-graph-"):-5]), day,
+                                                       db=data, navigation=navigation)
                 elif name.startswith("decision-") and not store_decision:
                     decision_page.write(root, pages_dir, name[len("decision-"):-5], day,
                                         navigation=_navigation(root, pages_dir, data))
@@ -683,6 +693,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return False
         elif path in ("/workers", "/decisions", "/report"):
             self.path = f"{path}.html"
+        elif path == "/decisions/graph":
+            self.path = "/decisions-graph.html"
+        elif path.startswith("/decisions/graph/"):
+            m = GRAPH_NODE_ROUTE.fullmatch(path)
+            if not m:
+                self._refusal(404, "No such decision. Return to the decisions list or board.")
+                return False
+            self.path = f"/decisions-graph-{m[1]}.html"
         elif path.startswith("/decisions/"):
             m = ROUTE.fullmatch(path)
             # A path of digits is a store decision, rendered below or a 404; any other is an authored page's JSON.
@@ -718,7 +736,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if name.startswith("issue-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
             self._refusal(404, "No task names this issue. Return to the board or Workers.")
             return False
-        if name.startswith("decision-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
+        if (name.startswith("decision-") or name.startswith("decisions-graph-")) and not self.banner and not ((page := self._page(name)) and page.is_file()):
             self._refusal(404, "No such decision. Return to the decisions list or board.")
             return False
         return True
@@ -1194,6 +1212,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.headers.get("Host", "") not in own or (origin is not None and origin not in [f"http://{h}" for h in own]):
             return self.send_error(403, "not a page of this server")
         route_path = re.split(r"[?#]", self.path, maxsplit=1)[0]
+        if route_path == "/decisions/graph" or route_path.startswith("/decisions/graph/"):
+            return self.send_error(405, "decision graph is read-only")
         message_route = WORKER_MESSAGE.fullmatch(route_path)
         if message_route:
             return self._post_worker_message(int(message_route[1]))
@@ -1228,6 +1248,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except decision_page.BAD:
                 return self._refusal(409, "The decision cannot be read. Your answer was not saved; try reloading it later.",
                                      answer=draft, words_name="words", link=f"/decisions/{m[1]}")
+            try:
+                answered = decision_page.is_answered(d, m[1], getattr(self.server, "root", None))
+            except (OSError, ValueError, ConfigError) as e:
+                return self.send_error(503, f"cannot tell whether the decision is answered: {e}")
+            if answered:
+                return self.send_error(409, "the decision is already answered")
             if (key and key not in [o["key"] for o in d["options"]]) or not (key or words):
                 root = getattr(self.server, "root", None)
                 pages_dir = Path(self.directory)
