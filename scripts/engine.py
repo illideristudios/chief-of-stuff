@@ -89,8 +89,30 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def _remember_verified(store: Any, facts: reconcile.Facts) -> None:
+def _clear_stale_verified_landings(store: Any, snapshots: list[dict]) -> None:
+    """Drop a recorded landing when forge state changed or main's merge commit no longer matches."""
+    by_key = {row["issue_key"]: row for row in snapshots}
+    for item in store.items():
+        data = _resume(store, item.issue_key)
+        if "verified_landing" not in data:
+            continue
+        snap = by_key.get(item.issue_key, {})
+        closed_merged = item.forge_state == "closed" and item.merge_state == "merged"
+        if not closed_merged:
+            data.pop("verified_landing", None)
+            data.pop("verified_landing_head", None)
+            store.set_resume(item.issue_key, data)
+            continue
+        landing_sha = snap.get("landing_sha")
+        if isinstance(landing_sha, str) and landing_sha and data.get("verified_landing") != landing_sha:
+            data.pop("verified_landing", None)
+            data.pop("verified_landing_head", None)
+            store.set_resume(item.issue_key, data)
+
+
+def _remember_verified(store: Any, facts: reconcile.Facts, landing_shas: dict[str, str] | None = None) -> None:
     """A closed merge proved on main with green CI is not re-read on later gathers."""
+    landing_shas = landing_shas or {}
     on_main = dict(facts.on_main)
     suite = dict(facts.suite_on_main)
     for item in store.items():
@@ -100,9 +122,11 @@ def _remember_verified(store: Any, facts: reconcile.Facts) -> None:
         if on_main.get(key) is not True or suite.get(key) is not True:
             continue
         data = _resume(store, key)
-        if data.get("verified_landing") is True:
+        memo = data.get("verified_landing")
+        if memo is True or isinstance(memo, str) and memo:
             continue
-        data["verified_landing"] = True
+        sha = landing_shas.get(key)
+        data["verified_landing"] = sha if isinstance(sha, str) and sha else True
         if head := dict(facts.landing_heads).get(key):
             data["verified_landing_head"] = head
         store.set_resume(key, data)
@@ -207,7 +231,10 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
     decision = trio_gate.Decision(key, topic, question, options, context=context, instance=instance,
                                   stage=stage, attempt=attempt, gate=gate)
     earlier = store.decisions(key)
-    retry_key = json.dumps([topic, question, instance, stage, attempt, context, options])
+    # Context and options stay out of the resume blob; a legacy key still starts with the same identity.
+    retry_key = json.dumps([topic, question, instance, stage, attempt,
+                           hashlib.sha256(context.encode()).hexdigest(),
+                           hashlib.sha256(json.dumps(list(options)).encode()).hexdigest()])
     retry = (_resume(store, key).get("trio_retries") or {}).get(retry_key, {})
     prior = decision_escalation.latest(earlier).get((topic, question, instance))
     failures = max(retry.get("failures", 0), decision_escalation.stamped_failures(prior, context, options, stage, attempt))
@@ -254,6 +281,41 @@ def _consultation_blocked(store: Any, key: str, resolved: policy.Policy, at: str
     return bool(quota and datetime.fromisoformat(quota["retry_at"]) > datetime.fromisoformat(at))
 
 
+def _forget_trio_retry(store: Any, key: str, update: decision_escalation.DecisionUpdate) -> None:
+    """A user's answer drops every retry for that question, including a legacy key that still holds context."""
+    if update.decided_by != "user":
+        return
+    decision = update.record.get("decision") if isinstance(update.record, dict) else {}
+    instance = decision.get("instance", "") if isinstance(decision, dict) else ""
+    wanted = (update.topic, update.question, instance)
+    data = _resume(store, key)
+    retries = dict(data.get("trio_retries") or {})
+    kept = {}
+    for token, value in retries.items():
+        try:
+            parts = json.loads(token)
+        except (TypeError, ValueError):
+            kept[token] = value
+            continue
+        if isinstance(parts, list) and len(parts) >= 3 and tuple(parts[:3]) == wanted:
+            continue
+        kept[token] = value
+    if kept == retries:
+        return
+    if kept:
+        data["trio_retries"] = kept
+    else:
+        data.pop("trio_retries", None)
+    store.set_resume(key, data)
+
+
+def _record_ask_answer(store: Any, key: str, update: decision_escalation.DecisionUpdate | None) -> None:
+    if update is None:
+        return
+    trio_gate.record(store, key, update)
+    _forget_trio_retry(store, key, update)
+
+
 def _link_replacement_asks(store: Any, key: str, replacements: list) -> None:
     for origin, segment in replacements:
         pending = decision_escalation.replacement_ask(origin, segment, store.decisions(key), store.asks(key))
@@ -275,11 +337,13 @@ def _settle_asks(store: Any, key: str) -> None:
             rows = store.decisions(key)
         answer = decision_escalation.committed_ask_answer(rows, ask)
         if answer is not None:
-            store.answer_ask(key, ask.id, answer)
+            try:
+                store.answer_ask(key, ask.id, answer)
+            except KeyError:
+                ask = next(item for item in store.asks(key) if item.id == ask.id)
+                _record_ask_answer(store, key, decision_escalation.answer_ask(store.decisions(key), ask))
         elif ask.answer:
-            settled = decision_escalation.answer_ask(rows, ask)
-            if settled is not None:
-                trio_gate.record(store, key, settled)
+            _record_ask_answer(store, key, decision_escalation.answer_ask(rows, ask))
 
 
 def _sync_decision_interrupts(store: Any, item: Any, at: str, start: str = "implement",
@@ -358,20 +422,25 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                              model, context=ask.context, instance=instance, stage=stage, attempt=ask.attempt, clock=clock,
                              until=until)
             if choice:
-                store.answer_ask(key, ask.id, choice)
+                try:
+                    store.answer_ask(key, ask.id, choice)
+                except KeyError:
+                    _settle_asks(store, key)  # a person answered while the trio was voting
             elif permission is not None:
                 _settle_permission(store, key, ask, "deny", "the trio did not adopt an answer", at)
         for row, segment in replacements:
             resolved = _resolved(policies, store, key, segment.stage)
-            if spent() or _consultation_blocked(store, key, resolved, at, stage=segment.stage):
+            if spent():
                 break
             prior = row.record.get("decision")
             if not isinstance(prior, dict):
                 _interrupt(store, key, "ambiguity", row.question, at, scope={"stage": segment.stage})
                 continue
             context = decision_escalation.replacement_context(row, segment)
+            # Quota backoff still records the unavailable consultation, so the owner gets the ask.
+            consult = None if _consultation_blocked(store, key, resolved, at, stage=segment.stage) else model
             _choice(store, key, row.topic, row.question, tuple(prior.get("options") or ()),
-                    resolved, policies.personas, model, context=context,
+                    resolved, policies.personas, consult, context=context,
                     instance=prior.get("instance", ""), stage=segment.stage, attempt=segment.attempt, clock=clock,
                     until=until)
         _link_replacement_asks(store, key, replacements)
@@ -734,6 +803,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
+    _clear_stale_verified_landings(store, snapshots)
+    landing_shas = {row["issue_key"]: row["landing_sha"] for row in snapshots
+                    if isinstance(row.get("landing_sha"), str) and row["landing_sha"]}
 
     worker.deliver_messages(store, root, clock)
     facts = worker.collect(store, root, clock, trees,
@@ -743,7 +815,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                   account=workers.claude_as_profile,
                                   hold_observations=tuple((row["issue_key"], row.get("human_review")) for row in snapshots)),
                    finish=partial(_finish_worker, forge, store, policies=policies),
-                   require_green=require_green, teardown_command=teardown_command)
+                   require_green=require_green, teardown_command=teardown_command,
+                   transcript_max_bytes=workers.transcript_max_bytes)
 
     now = clock()
     at = now.isoformat()
@@ -756,13 +829,16 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for item in store.items():
         data = _resume(store, item.issue_key)
         quota = data.get("quota")
-        if quota and datetime.fromisoformat(quota["retry_at"]) <= now and "quota_percent" in data:
-            data.pop("quota_percent")
+        if quota and datetime.fromisoformat(quota["retry_at"]) <= now:
+            removed = "quota_percent" in data
+            data.pop("quota_percent", None)
             # The planner stamps the evaluated stage, which need not be item.stage.
             interrupt = data.get("interrupt") or {}
             if (interrupt.get("kind"), interrupt.get("reason")) == ("limit", "reached quota limit"):
                 data.pop("interrupt")
-            store.set_resume(item.issue_key, data)
+                removed = True
+            if removed:
+                store.set_resume(item.issue_key, data)
     # Retry label writes even when a successful merge closed the issue since the last pass.
     for item in store.items():
         key = item.issue_key
@@ -865,7 +941,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     items = [item for item in store.items()
              if _resume(store, item.issue_key).get("stall_recovery", {}).get("phase") != "stopping"
              and (not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold"))]
-    _remember_verified(store, facts)
+    _remember_verified(store, facts, landing_shas)
     inputs = _planning_inputs(store, items)
     free_slots = slots.free_slots(max_concurrency, slots.running(store))
 
@@ -942,6 +1018,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     data = _resume(store, key)
                     data["pending_stage"] = {"stage": stage, "expected": stages[key], "attempt": action.attempt}
                     store.set_resume(key, data)
+                segment_existed = any(s.stage == stage and s.attempt == action.attempt
+                                      for s in store.segments(key))
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
@@ -954,15 +1032,15 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                              model=failed_entry.model if failed_entry else "",
                                              effort=(failed_entry.effort or "") if failed_entry else "",
                                              agent_type=agent_name)
-                    # A rejected claim or failed launch leaves no segment. A crash
-                    # after a durable claim must keep the route for recovery.
-                    # #750 ruling 2: a failed launch keeps _fail_start's stage move and hold, whose pending_stage
-                    # supersedes the route; only a claim refused before any launch rolls the route back.
-                    if restart and not launch_failed and not any(s.stage == stage and s.attempt == action.attempt
-                                                                 for s in store.segments(key)):
+                    # An existing segment is not this claim. A claim that left none did not start.
+                    # #750 ruling 2: a failed launch keeps _fail_start's pending stage; a release hold is not a restart route.
+                    if restart and not launch_failed:
                         data = _resume(store, key)
-                        data.pop("pending_stage", None)
-                        store.set_resume(key, data)
+                        pending = data.get("pending_stage") or {}
+                        still = any(s.stage == stage and s.attempt == action.attempt for s in store.segments(key))
+                        if not pending.get("release_hold") and (segment_existed or not still):
+                            data.pop("pending_stage", None)
+                            store.set_resume(key, data)
                     raise
                 _clear_waived_gates(store, key)
                 _clear_interrupt(store, key, "limit", scope={"stage": stage})
@@ -1284,7 +1362,7 @@ def main(argv: list[str] | None = None) -> int:
                                  clone=root / selected if selected else root,
                                  claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
                                  require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown,
-                                 launcher=config.workers.worker_launcher)
+                                 launcher=config.workers.worker_launcher, t3_providers=config.workers.t3_providers)
                 model = model_port.Port(partial(_judge, claude_as_profile=config.workers.claude_as_profile),
                                         rotation=config.models.get("trio", ()), pick=config.model_picks.get("trio", "first"),
                                         launchable=_judges)
