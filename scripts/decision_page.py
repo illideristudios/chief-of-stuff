@@ -28,8 +28,10 @@ inflight or designed; `hot` marks what waits on this decision. A reference's `at
 
 Text is escaped; `code`, **bold** and http(s) URLs are marked up, and references link to the forge the
 `Backlog:` line names: `#12`, `!58` (`!58#note_1`), a commit sha, `pipeline #8812`, `path/file.py:42`
-(`:24-58`, `:symbol`), `docs/x.md §4.2` or `docs/x.md#anchor`, `src/dir/`. A section or symbol is placed from a
-copy under `--root` when there is one. With no forge, or a reference it cannot place, the text stays text.
+(`:24-58`, `:symbol`), `docs/x.md §4.2` or `docs/x.md#anchor`, `src/dir/`. A path links only when `--root`
+contains it in the repository whose `origin` is that forge, committed at the reference's `at`, or at HEAD when
+unpinned. A section or symbol is placed from the bounded local copy. With no forge, no root, a different origin,
+or a path the repository does not contain, the text stays text.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from html import escape
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 import board_sources
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
@@ -54,7 +57,7 @@ from decision_actions import DecisionState, OPEN_STATES, addresses, state_of, st
 from fragment import DECISIONS_ANCHOR, FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
 from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
-from module_graph import section as _graph
+from module_graph import reference_path, section as _graph
 from notify_service import atomic_write
 from settings import Graph, SettingsError, load as load_settings
 from task_forge import PageData
@@ -148,23 +151,44 @@ GITHUB = {"issue": "issues/{}", "MR": "pull/{}", "commit": "commit/{}", "blob": 
 GITLAB = {"issue": "-/issues/{}", "MR": "-/merge_requests/{}", "commit": "-/commit/{}", "blob": "-/blob/{at}/{}",
           "tree": "-/tree/{at}/{}", "pipeline": "-/pipelines/{}"}
 DOCS = (".md", ".markdown", ".rst", ".adoc", ".txt")
+def _forge_identity(forge: Backlog | GitHubBacklog) -> tuple[str, str] | None:
+    """(host, project) the backlog names. GitHub is always github.com."""
+    if isinstance(forge, GitHubBacklog):
+        host, project = "github.com", forge.repo
+    else:
+        host, project = (urlsplit(forge.host).hostname or "").lower(), forge.project
+    project = project.strip("/")
+    return (host, project) if host and project else None
+
+
 REFERENCE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
 class Linker:
-    """Turns a reference into its place on the workspace's forge (the `Backlog:` line). `root` holds local copies
-    that place a `§` section or a symbol; `at` pins files to a commit. With no forge nothing is linked."""
+    """Turns a reference into its place on the workspace's forge (the `Backlog:` line). A path links only when
+    `root` contains it in the repository whose origin is that forge, committed at `at` (HEAD when unpinned);
+    otherwise it stays text. `root` also places a `§` section or a symbol in its bounded local copy. `cache` lives
+    for one render and is shared with every pinned row linker."""
 
     forge: Backlog | GitHubBacklog | None = None
     root: Path | None = None
     at: str | None = None
     _files: dict[str, tuple[str, ...]] = field(default_factory=dict, compare=False, repr=False)
+    cache: dict = field(default_factory=dict, compare=False, repr=False)
 
     def _url(self, what: str, target: str) -> str:
         gh = isinstance(self.forge, GitHubBacklog)
         base = f"https://github.com/{self.forge.repo}" if gh else f"{self.forge.host.rstrip('/')}/{self.forge.project}"
-        return f"{base}/" + (GITHUB if gh else GITLAB)[what].format(target, at=self.at or "HEAD")
+        rev = quote(self.at, safe="") if isinstance(self.at, str) else "HEAD"
+        if what in ("blob", "tree"):
+            target = "/".join(quote(part, safe="") for part in target.split("/"))
+        return f"{base}/" + (GITHUB if gh else GITLAB)[what].format(target, at=rev)
+
+    def _lookup(self, workspace_path: str, need: str) -> str | None:
+        if self.root is None or self.forge is None:
+            return None
+        return reference_path(self.root, workspace_path, _forge_identity(self.forge), self.at, need, self.cache)
 
     def _find(self, path: str, sec: str | None, sym: str | None) -> str:
         """The `#` fragment for a section heading or a symbol's definition in a local copy, or "" (never guessed)."""
@@ -211,18 +235,23 @@ class Linker:
         path = m["path"]
         if not path:
             return None
-        if path.endswith("/"):
-            return "code", m[0], self._url("tree", path.rstrip("/")) + "/"
-        if "/" not in path and not (m["line"] or m["sym"] or m["sec"] or m["anchor"]):
+        directory = path.endswith("/")
+        bare = path[:-1] if directory else path
+        if not bare or (not directory and "/" not in bare and not (m["line"] or m["sym"] or m["sec"] or m["anchor"])):
             return None  # a bare `name.ext` is too often a word
+        repo_rel = self._lookup(bare, "tree" if directory else "blob")
+        if not repo_rel:
+            return None
+        if directory:
+            return "code", m[0], self._url("tree", repo_rel) + "/"
         frag = ""
         if m["line"]:
             frag = f"#L{m['line']}" + (f"-{'L' if gh else ''}{m['end']}" if m["end"] else "")
         elif m["anchor"]:
             frag = f"#{m['anchor']}"
         elif m["sec"] or m["sym"]:
-            frag = self._find(path, m["sec"], m["sym"])
-        return ("doc" if path.lower().endswith(DOCS) else "code"), m[0], self._url("blob", path) + frag
+            frag = self._find(bare, m["sec"], m["sym"])
+        return ("doc" if bare.lower().endswith(DOCS) else "code"), m[0], self._url("blob", repo_rel) + frag
 
     def href(self, text: str) -> str | None:
         """The first placeable reference in `text` (already escaped)."""
@@ -400,7 +429,7 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     if d.get("references"):
         rows = []
         for r in d["references"]:
-            pin = Linker(forge, root, r.get("at"))
+            pin = Linker(forge, root, r.get("at"), cache=link.cache)
             label = f" {escape(r['label'])}" if r.get("kind") and r.get("label") else ""
             one = TOKEN.fullmatch(escape(r["value"], quote=False))
             one = one and pin.resolve(one)
