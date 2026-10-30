@@ -8,6 +8,7 @@ parseability together, never `subtype` alone.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import selectors
@@ -18,11 +19,15 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import clock
+import private_state
 import runtimes
+import session_logs
 from model_port import Failure, Reply, Request, quota_reset
 from shell_setup import ShellError, clean_env, login_argv, resolve
 
@@ -93,19 +98,56 @@ def require_worker_clock(claude_as_profile: str = "", cwd: str | None = None) ->
         )
 
 
+def _pin_config_dir(environment: dict[str, str], claude_as_profile: str) -> None:
+    # A named profile wins over a default-login directory. An empty profile keeps one the caller set.
+    if claude_as_profile:
+        environment["CLAUDE_CONFIG_DIR"] = str(session_logs.claude_home(claude_as_profile))
+    elif "CLAUDE_CONFIG_DIR" not in environment and os.environ.get("CLAUDE_CONFIG_DIR"):
+        environment["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
+
+
 def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
           env: dict[str, str] | None = None) -> subprocess.Popen:
-    """Detached adapter runner: durable stdout, stderr and exit status survive an engine restart."""
-    return spawn(command(request, claude_as_profile), request, run_dir, env)
+    """Detached adapter runner: durable stdout, stderr and exit status survive an engine restart.
+
+    Claude workers take stream input (#1160): the runner owns the only stdin pipe, sends the assignment as the first
+    message, and later delivers operator messages from its mailbox. --replay-user-messages echoes each caller uuid.
+    """
+    overlay = dict(env or {})
+    _pin_config_dir(overlay, claude_as_profile)
+    prepared = command(replace(request, keep_events=True), claude_as_profile,
+                       extra_args=("--input-format", "stream-json", "--replay-user-messages"))
+    prepared.pop()  # stream input has no positional prompt, as in drive_turns
+    config_dir = overlay.get("CLAUDE_CONFIG_DIR") or str(session_logs.claude_home())
+    return spawn(prepared, request, run_dir, overlay, stdin_prompt=request.prompt, config_dir=config_dir)
 
 
-def spawn(prepared: list[str], request: Request, run_dir: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
-    """The detached runner for any host's prepared login argv (#700: shared by every host adapter)."""
-    (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
-                                                    "session_id": request.session_id,
-                                                    "env": env or {}}))
+def spawn(prepared: list[str], request: Request, run_dir: Path, env: dict[str, str] | None = None,
+          *, stdin_prompt: str | None = None, config_dir: str | None = None) -> subprocess.Popen:
+    """The detached runner for any host's prepared login argv (#700: shared by every host adapter).
+
+    Only a run given `stdin_prompt` has a mailbox; every other host keeps a closed stdin and cannot take messages.
+    """
+    launch = {"argv": prepared, "cwd": request.cwd, "session_id": request.session_id, "env": env or {}}
+    if config_dir is not None:
+        launch["config_dir"] = config_dir
+    if stdin_prompt is not None:
+        launch["stdin_prompt"] = stdin_prompt
+        private_state.directory(run_dir)
+        private_state.directory(run_dir / MAILBOX, create=True)
+        for name in BOXES:
+            private_state.directory(run_dir / MAILBOX / name, create=True)
+    if stdin_prompt is not None:
+        _private_write(run_dir / "command.json", json.dumps(launch).encode())
+    else:
+        (run_dir / "command.json").write_text(json.dumps(launch))
     try:
-        with (run_dir / "runner.stderr").open("w") as errors:
+        error_path = run_dir / "runner.stderr"
+        errors_file = (os.fdopen(private_state.file(error_path, create=True), "w") if stdin_prompt is not None
+                       else error_path.open("w"))
+        with errors_file as errors:
+            if stdin_prompt is not None:
+                errors.truncate(0)
             return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(run_dir),
                                      request.session_id], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=errors, env=model_env(), start_new_session=True)
@@ -134,12 +176,378 @@ def cancel(process: subprocess.Popen) -> None:
 def _write(run_dir: Path, name: str, record: dict) -> None:
     path = run_dir / name
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(record))
+    if run_dir.name == "acks" and run_dir.parent.name == MAILBOX:
+        _private_write(temporary, json.dumps(record).encode())
+    else:
+        temporary.write_text(json.dumps(record))
     temporary.replace(path)
+
+
+MAILBOX = "mailbox"
+BOXES = ("inbox", "taken", "acks", "rejected")
+POLL_S = 0.05
+ECHO_WAIT_S = 30.0  # after the final result, how long a written message may wait for its echo before stdin closes
+WRITE_WAIT_S = 5.0  # maximum time to write one complete input line, including the assignment
+
+
+class InputWriteError(Exception):
+    """The input stream is incomplete or its delivery is ambiguous."""
+
+
+def _private_write(path: Path, data: bytes) -> None:
+    fd = private_state.file(path, create=True)
+    with os.fdopen(fd, "wb") as handle:
+        handle.truncate(0)
+        handle.write(data)
+
+
+def _protect_run(run_dir: Path) -> None:
+    private_state.directory(run_dir)
+    for name in ("command.json", "stream.jsonl", "stdout", "stdout.tmp", "stderr", "runner.stderr"):
+        private_state.existing_file(run_dir / name)
+    box = run_dir / MAILBOX
+    private_state.directory(box, create=True)
+    for name in BOXES:
+        directory = box / name
+        private_state.directory(directory, create=True)
+        for path in directory.iterdir():
+            private_state.existing_file(path)
+    for name in ("lock", "open", "closed"):
+        private_state.existing_file(box / name)
+
+
+def messaging(run_dir: Path) -> bool:
+    """Detect messaging runs and secure pre-existing state before recovery."""
+    try:
+        fd = os.open(run_dir / "command.json", os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as handle:
+            enabled = "stdin_prompt" in json.load(handle)
+    except (FileNotFoundError, ValueError, TypeError):
+        return False
+    if enabled:
+        _protect_run(run_dir)
+    return enabled
+
+
+@contextmanager
+def mailbox_lock(run_dir: Path, *, timeout: float | None = None):
+    """Serializes a handoff (claim + inbox write), intake closing and the recovery sweep's judgement.
+
+    The OS drops a flock when its holder dies, so a crashed handoff never wedges the mailbox.
+    """
+    with os.fdopen(private_state.file(run_dir / MAILBOX / "lock", create=True), "a") as handle:
+        if timeout is None:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("mailbox lock timed out")
+                    time.sleep(min(POLL_S, max(0, deadline - time.monotonic())))
+        yield
+
+
+def intake_open(run_dir: Path) -> bool:
+    box = run_dir / MAILBOX
+    return (box / "open").exists() and not (box / "closed").exists()
+
+
+def post(run_dir: Path, message: dict) -> None:
+    """Hand one claimed message to the runner. Call under mailbox_lock; the rename is the handoff."""
+    path = run_dir / MAILBOX / "inbox" / f"{message['delivery_id']}.json"
+    temporary = path.with_suffix(".tmp")
+    with os.fdopen(private_state.file(temporary, create=True), "w") as handle:
+        handle.truncate(0)
+        json.dump(message, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+
+
+def handoff_state(run_dir: Path, delivery_id: str) -> tuple[str, dict | None]:
+    """Where a handed-off message is. Checked in the direction files move (inbox → taken|rejected), so a move during
+    the check is still seen; an ack is only ever added beside a taken file."""
+    box = run_dir / MAILBOX
+    name = f"{delivery_id}.json"
+    for state in ("inbox", "taken", "rejected"):
+        if (box / state / name).exists():
+            if state == "taken" and (box / "acks" / name).exists():
+                return "acked", json.loads((box / "acks" / name).read_text())
+            return state, None
+    return "missing", None
+
+
+def revoke(run_dir: Path, delivery_id: str) -> bool:
+    """Withdraw a message the runner has not taken. The runner's take is the same rename, so exactly one wins."""
+    name = f"{delivery_id}.json"
+    try:
+        (run_dir / MAILBOX / "inbox" / name).rename(run_dir / MAILBOX / "rejected" / name)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def replayed(run_dir: Path, delivery_id: str, session_id: str, body: str) -> bool:
+    """Recover a replay from this attempt's durable stream, only for its matching taken handoff."""
+    try:
+        command = json.loads((run_dir / "command.json").read_text())
+        started = json.loads((run_dir / "started.json").read_text())
+        taken = json.loads((run_dir / MAILBOX / "taken" / f"{delivery_id}.json").read_text())
+        if (command.get("session_id") != session_id or started.get("session_id") != session_id
+                or taken.get("session_id") != session_id or taken.get("delivery_id") != delivery_id
+                or taken.get("body") != body):
+            return False
+        with (run_dir / "stream.jsonl").open("rb") as stream:
+            for line in stream:
+                if not line.endswith(b"\n"):
+                    break  # an event still being appended is not evidence yet
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(event, dict) and event.get("type") == "user" and event.get("isReplay") is True
+                        and event.get("uuid") == delivery_id and event.get("session_id", session_id) == session_id):
+                    return True
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return False
+
+
+def _close_intake(run_dir: Path, *, timeout: float | None = None) -> None:
+    box = run_dir / MAILBOX
+    with mailbox_lock(run_dir, timeout=timeout):
+        os.close(private_state.file(box / "closed", create=True))
+    # No handoff can follow the marker; anything still untaken was never written to the session.
+    for path in (box / "inbox").glob("*.json"):
+        revoke(run_dir, path.stem)
+
+
+def _send(process: subprocess.Popen, content: str, session_id: str, uuid_: str | None = None) -> None:
+    line = {"type": "user", "message": {"role": "user", "content": content},
+            "parent_tool_use_id": None, "session_id": session_id}
+    if uuid_:
+        line["uuid"] = uuid_
+    data = memoryview((json.dumps(line) + "\n").encode())
+    fd = process.stdin.fileno()
+    os.set_blocking(fd, False)
+    deadline = time.monotonic() + WRITE_WAIT_S
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_WRITE)
+        while data:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise TimeoutError("Claude stdin write timed out")
+            try:
+                count = os.write(fd, data)
+            except BlockingIOError:
+                continue
+            if not count:
+                raise BrokenPipeError("Claude stdin closed during write")
+            data = data[count:]
+
+
+def _stop_after_write_failure(process: subprocess.Popen) -> None:
+    """Kill the host's owned group before reaping its leader, keeping its group id reserved."""
+    # A cancellation handler must not interrupt waitpid between reaping the leader
+    # and Popen recording returncode, then signal a group ID that can be reused.
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    try:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Do not publish exit evidence if signalling or reaping fails. In particular, do not
+            # mistake macOS EPERM for proof that a group with descendants has stopped.
+            process.wait(timeout=1)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+class _RunnerCancelled(BaseException):
+    pass
+
+
+def _exited_without_reaping(pid: int) -> bool:
+    if hasattr(os, "waitid"):
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    if sys.platform != "darwin":
+        raise OSError("waitid with WNOWAIT is required")
+    # CPython does not expose waitid on macOS. Darwin's siginfo_t begins with
+    # three ints and si_pid; use aligned, zeroed storage large enough for it.
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    waitid = libc.waitid
+    waitid.argtypes = (ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_int)
+    waitid.restype = ctypes.c_int
+    info = (ctypes.c_long * 32)()
+    if waitid(1, pid, ctypes.byref(info), 0x04 | 0x01 | 0x20) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return ctypes.cast(ctypes.byref(info), ctypes.POINTER(ctypes.c_int))[3] != 0
+
+
+def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: str) -> bytes:
+    """Own the host's stdin: send the assignment, deliver mailbox messages, record echoes, then close stdin once a
+    result has arrived and every written message has echoed (or waited ECHO_WAIT_S). Returns the final result line."""
+    box = run_dir / MAILBOX
+    stream = run_dir / "stream.jsonl"
+    offset, pending, final = 0, b"", b""
+    inflight: dict[str, float] = {}
+    finished = closed = False
+    try:
+        _send(process, prompt, session_id)
+    except OSError as exc:
+        print(f"assignment stdin write failed: {exc}", file=sys.stderr)
+        raise InputWriteError("assignment stdin write failed") from exc
+    os.close(private_state.file(box / "open", create=True))
+    while True:
+        # Observe exit without reaping: until intake is closed, cancellation must still
+        # be able to signal this group without risking a recycled process-group ID.
+        exited = _exited_without_reaping(process.pid)
+        with stream.open("rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read()
+        offset += len(chunk)
+        *lines, pending = (pending + chunk).split(b"\n")
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue  # login rc output stays in stream.jsonl, never an event
+            if not isinstance(event, dict):
+                continue
+            if (event.get("type") == "user" and event.get("isReplay") is True
+                    and event.get("session_id", session_id) == session_id and event.get("uuid") in inflight):
+                delivery = event["uuid"]
+                inflight.pop(delivery)
+                # Evidence of CLI acknowledgment only: the CLI read and replayed the line, not that the model acted on it.
+                _write(box / "acks", f"{delivery}.json", {"delivery_id": delivery, "session_id": session_id,
+                                                          "at": datetime.now(timezone.utc).isoformat()})
+            elif event.get("type") == "result":
+                finished, final = True, line
+        if exited:
+            break
+        if not finished:
+            for path in sorted((box / "inbox").glob("*.json")):
+                try:
+                    message = json.loads(path.read_text())
+                except (OSError, ValueError):
+                    continue
+                if message.get("session_id") != session_id or message.get("delivery_id") != path.stem \
+                        or not isinstance(message.get("body"), str):
+                    revoke(run_dir, path.stem)  # never written: not this session's message
+                    continue
+                try:
+                    path.rename(box / "taken" / path.name)
+                except FileNotFoundError:
+                    continue  # the engine revoked it first
+                # From here a failed or partial write is ambiguous; it stays taken and is never resent.
+                try:
+                    _send(process, message["body"], session_id, path.stem)
+                except OSError as exc:
+                    print(f"message stdin write failed: {exc}", file=sys.stderr)
+                    raise InputWriteError("message stdin write failed") from exc
+                inflight[path.stem] = time.monotonic() + ECHO_WAIT_S
+        elif not closed and all(deadline <= time.monotonic() for deadline in inflight.values()):
+            _close_intake(run_dir)
+            closed = True
+            try:
+                process.stdin.close()  # EOF lets the CLI finish queued turns and exit
+            except OSError:
+                pass
+        time.sleep(POLL_S)
+    if not closed:
+        _close_intake(run_dir)
+    return final
+
+
+def _messaging_worker(run_dir: Path, prepared: dict) -> None:
+    final = b""
+    _private_write(run_dir / "stdout", b"")
+    with os.fdopen(private_state.file(run_dir / "stream.jsonl", create=True), "w+b") as stream, \
+         os.fdopen(private_state.file(run_dir / "stderr", create=True), "w") as stderr:
+        stream.truncate(0)
+        stderr.truncate(0)
+        process = None
+        cancelled = False
+
+        def cancel_runner(_signum, _frame):
+            nonlocal cancelled
+            cancelled = True
+            if process is not None:
+                raise _RunnerCancelled()
+
+        previous = signal.signal(signal.SIGTERM, cancel_runner)
+        try:
+            try:
+                # A distinct group lets the runner stop all ordinary host descendants without
+                # signalling itself. It stays in the detached runner's session.
+                process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"],
+                                           env=model_env({**os.environ, **prepared.get("env", {})}),
+                                           stdin=subprocess.PIPE, stdout=stream, stderr=stderr, process_group=0)
+                if cancelled:
+                    raise _RunnerCancelled()
+            except OSError as exc:
+                stderr.write(str(exc))
+                try:
+                    _close_intake(run_dir, timeout=1)
+                except (OSError, TimeoutError) as close_error:
+                    stderr.write(f"\nintake close failed: {close_error}")
+                code = 127
+            else:
+                try:
+                    _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
+                                                     "session_id": prepared["session_id"]})
+                    final = _serve(run_dir, process, prepared["session_id"], prepared["stdin_prompt"])
+                    # Intake is closed and serving has completed. From here normal
+                    # completion wins over cancellation, before the leader is reaped.
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    code = process.wait()
+                except Exception as exc:
+                    # The leader has not been reaped during serving, so its group ID
+                    # remains reserved even when it has exited. Stop once before any
+                    # potentially blocked or failing mailbox operation.
+                    _stop_after_write_failure(process)
+                    stderr.write(f"\nworker serving failed: {exc}")
+                    try:
+                        _close_intake(run_dir, timeout=1)
+                    except (OSError, TimeoutError) as close_error:
+                        stderr.write(f"\nintake close failed: {close_error}")
+                    code = 1
+        except _RunnerCancelled:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            if process is not None:
+                _stop_after_write_failure(process)
+            return
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        if not final:
+            # The stream path may have disappeared; the open file still holds the host's output.
+            try:
+                stream.seek(0)
+                final = stream.read()
+            except OSError as exc:
+                stderr.write(f"\nstream recovery failed: {exc}")
+    # collect classifies stdout as one JSON answer, as `--output-format json` wrote it.
+    temporary = run_dir / "stdout.tmp"
+    _private_write(temporary, final)
+    temporary.replace(run_dir / "stdout")
+    _write(run_dir, "exit.json", {"exit_code": code, "ended_at": datetime.now(timezone.utc).isoformat()})
 
 
 def _worker(run_dir: Path) -> None:
     prepared = json.loads((run_dir / "command.json").read_text())
+    if "stdin_prompt" in prepared:
+        return _messaging_worker(run_dir, prepared)
     with (run_dir / "stdout").open("w") as stdout, (run_dir / "stderr").open("w") as stderr:
         try:
             process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"], env=model_env({**os.environ, **prepared.get("env", {})}),
@@ -157,7 +565,7 @@ def _worker(run_dir: Path) -> None:
 # environment. An unrelated secret must not become visible to a model subprocess.
 MODEL_ENV = {
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
-    "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "CLAUDE_AS_PROFILES_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
     "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_BEDROCK_BASE_URL",
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
@@ -186,6 +594,11 @@ def _kill_and_drain(process: subprocess.Popen) -> tuple[str, str]:
         os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+    except PermissionError:
+        # macOS can report EPERM for a process group whose leader already exited.
+        # Do not hide a failure to stop a leader that is still running.
+        if process.poll() is None:
+            raise
     try:
         return process.communicate(timeout=1)
     except subprocess.TimeoutExpired as exc:
@@ -227,6 +640,10 @@ def call(request: Request, *, claude_as_profile: str = "", extra_args: tuple[str
         return Failure("error", f"session_id {request.session_id!r} must be a UUID to start a session")
     source = os.environ if env is None else env
     environment = model_env(source)
+    try:
+        _pin_config_dir(environment, claude_as_profile)
+    except ValueError as exc:
+        return Failure("error", str(exc))
     try:
         prepared = command(request, claude_as_profile, extra_args=extra_args,
                            path_prefix=source.get("CHIEF_OF_STUFF_PATH_PREFIX", ""))

@@ -180,9 +180,10 @@ class OneBuildDrawing(Board):
         for name in IDLE:
             with self.subTest(task=name):
                 self.assertEqual(self.drawn(name, flow), 0)
+        rows = re.findall(r'<div class="gantt-row">.*?</div>', flow, re.S)
         for name in MOVED:
             with self.subTest(task=name):
-                self.assertEqual(self.drawn(name, flow), 2, "a row in each of the two Flow charts")
+                self.assertEqual(sum(self.drawn(name, row) for row in rows), 2, "a row in each of the two Flow charts")
 
     def test_the_cards_are_the_laned_tasks_and_no_more(self) -> None:
         self.assertEqual(sorted(re.findall(r'<(?:a|div) class="columns-card-name"[^>]*>([^<]+)<', self.build)), sorted(LANED))

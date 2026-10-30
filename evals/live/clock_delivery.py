@@ -46,11 +46,12 @@ PROMPT = (
 
 
 def _parse_stamp(lines: list[str]) -> datetime:
-    for line in lines:
-        match = STAMP.search(line)
-        if match:
-            return datetime.fromisoformat(f"{match[1]}{match[2]}")
-    raise AssertionError(f"no [Current TimeStamp: ...] line in {lines!r}")
+    """Exactly one `[Current TimeStamp: ...]` match across the returned lines; duplicates or none fail closed."""
+    found = [m for line in lines for m in STAMP.finditer(line)]
+    if len(found) != 1:
+        raise AssertionError(f"want exactly one [Current TimeStamp: ...] line, got {len(found)} in {lines!r}")
+    match = found[0]
+    return datetime.fromisoformat(f"{match[1]}{match[2]}")
 
 
 class ClockDeliveryLiveTest(unittest.TestCase):

@@ -30,7 +30,6 @@ import board_sources  # noqa: E402
 import tracker_log  # noqa: E402
 import forge  # noqa: E402
 import kanban as kanban_tool  # noqa: E402
-import ownership  # noqa: E402
 import git_trees  # noqa: E402
 import git_view  # noqa: E402
 from tree_state import UNCOMMITTED_UNKNOWN  # noqa: E402
@@ -38,13 +37,10 @@ from orphans import Claim, Orphan, Unclaimed, judge  # noqa: E402
 from process_status import process_exists, registrations, running_trees  # noqa: E402
 from tree_claims import Claims, one_shot_claims, registry_claims  # noqa: E402
 
-# Preserve branch names from ownership rows when worktrees disappear.
-WORKTREE = re.compile(r"\bworktrees?\s+(?P<tick>`)?(?P<name>[A-Za-z0-9._\-/]+)`?(?:\s*\((?P<branch>[^)]*)\))?")
 BRANCHISH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{1,60}")
 # Exclude prose from branch and worktree matches.
 NOT_A_BRANCH = {"now", "was", "then", "renamed", "from", "to", "branch", "on", "off", "and", "or", "merged", "clean", "dirty", "at"}
 NOT_A_NAME = {"only", "its", "it", "the", "that", "this", "those", "a", "an", "and", "in", "at", "for", "of", "is", "was", "with", "instead", "too", "here", "there"}
-TREE_SHAPED = re.compile(r"[-/_.0-9]")
 REF = re.compile(r"\s*\[[0-9a-f]{4,}\]\s*$")
 # Context refs can appear anywhere in a cell.
 ANY_REF = re.compile(r"\[([0-9a-f]{4,})\]")
@@ -63,6 +59,7 @@ ACKNOWLEDGED = r"(?i:\W+merged\b)"
 
 @dataclass(frozen=True)
 class OwnerRow:
+    """A task's claim on its trees: the Log's started line names the tree a one-shot ran in (#1039)."""
     context: str
     worktrees: list[str]
     branches: dict[str, str] = field(default_factory=dict)
@@ -131,7 +128,7 @@ def _closed_hhmm(closed_at: str, zone) -> str:
 
 
 def _tree_unlanded(root: Path | None, trees: str, owners: list, task, roster=(), refs=()) -> str:
-    """Does this task's File-ownership worktree carry a commit `main` never got? "unlanded" when git says
+    """Does this task's started worktree carry a commit `main` never got? "unlanded" when git says
     so (merge-base exit 1), "unknown" when git could not say (any other exit) and no tree is unlanded,
     else "". Reads `_merged`, the same check `_state` words, never `_state`'s prose (#221). No resolvable
     tree (none owns the task, or it is missing) answers "": nothing is there to unland."""
@@ -418,22 +415,8 @@ class Report:
     over: list[OverBudget] = field(default_factory=list)
 
 
-def _worktrees(cell: str) -> tuple[list[str], dict[str, str]]:
-    names: list[str] = []
-    branches: dict[str, str] = {}
-    for m in WORKTREE.finditer(cell):
-        name = m["name"].rstrip("/.,;:")
-        # A tree name is backticked or shaped like one; a bare word after "worktree" is prose (#72).
-        if not name or name in names or not (m["tick"] or TREE_SHAPED.search(name)):
-            continue
-        names.append(name)
-        if m["branch"]:
-            branches[name] = m["branch"]
-    return names, branches
-
-
 def branch_candidates(name: str, detail: str) -> list[str]:
-    """Every ref the ownership row could be naming, best first, then the tree name itself.
+    """Every ref a missing tree could be naming, best first, then the tree name itself.
 
     A live parenthetical reads `(now docs/local-toolchain, was fix/sample-data-stack-detect)`, so this
     guesses widely and cheaply and lets `git rev-parse` be the one that decides.
@@ -442,11 +425,6 @@ def branch_candidates(name: str, detail: str) -> list[str]:
     if name not in out:
         out.append(name)
     return out[:6]
-
-
-def parse_ownership(text: str) -> list[OwnerRow]:
-    """File ownership is prose, written as a table or as bullets; both name a context and its paths."""
-    return [OwnerRow(row.context, *_worktrees(row.paths)) for row in ownership.parse(text)]
 
 
 def _bare(name: str) -> str:
@@ -486,7 +464,7 @@ def owns(row: OwnerRow, owner: str) -> bool:
     """Same context? The ref decides where both sides carry one — finding 112's rule, which reaches
     here too and was left out of it. This tracker runs one ref under three names: `arch [768194]`,
     `architecture-review-setup [768194]` and `openemr-arch [768194]`, four of whose tasks matched no
-    ownership row and so were attributed no tree, and a task with no tree is checked for nothing at
+    row and so were attributed no tree, and a task with no tree is checked for nothing at
     all. The name decides only where one side or the other has no ref to ask."""
     if not owner.strip():
         return False
@@ -497,13 +475,13 @@ def owns(row: OwnerRow, owner: str) -> bool:
 
 
 def key_name(task, roster: set[str], refs: set[str]) -> str:
-    """The Tasks-table name a File ownership row may be keyed on: none when it is a listed session's name, since
+    """The Tasks-table name a row may be keyed on: none when it is a listed session's name, since
     that bare context is the session's own row, not the task's."""
     return "" if listed(task.name, roster, refs)[0] else task.name
 
 
 def keyed_on(row: OwnerRow, item: str, name: str) -> bool:
-    """A File ownership row keyed on a task's item, its colon prefix or board short name — the key set
+    """A row keyed on a task's item, its colon prefix or board short name — the key set
     dispatch writes (`task_keys`, #553) — or whose whole context is its Tasks-table `name`, is keyed on
     that task. The name is compared exactly, as dispatch does: a session's `arch (deletion)` is not a
     task named `arch`; the item's short forms read as audit reads prose, bare."""
@@ -517,7 +495,7 @@ def _tokens(text: str) -> set[str]:
 
 
 def _detail(context: str) -> str:
-    """The parenthetical of a File ownership row: with one context to several tasks, it is the only thing saying which."""
+    """The parenthetical of a row's context: with one context to several tasks, it is the only thing saying which."""
     return " ".join(PAREN.findall(context))
 
 
@@ -541,23 +519,25 @@ def rows_for(item: str, owner: str, owners: list[OwnerRow], name: str = "") -> t
     best = max(score for score, _ in scored)
     top = [r for score, r in scored if score == best]
     if best == 0 or len(top) > 1:
-        return [], f"ambiguous: {clip_name(item)} — {len(mine)} File ownership rows for {_bare(owner)} and none names it; no tree attributed"
+        return [], f"ambiguous: {clip_name(item)} — {len(mine)} rows for {_bare(owner)} and none names it; no tree attributed"
     return top, ""
 
 
 def row_claim(row: OwnerRow, tasks, roster: set[str], refs: set[str], user: str,
               sessions: tuple[Session, ...] = ()) -> Claim:
-    """A File ownership row's claim on its trees. Live when its context is in `## Sessions`, or when the
+    """A row's claim on its trees. Live when its context is in `## Sessions`, or when the
     task it is keyed on — a one-shot's row is keyed on its task, never a session — has a listed owner.
     An empty Sessions table cannot prove that workers are absent, so with no rows to ask every row is
     live; rows that are there but name no one do not re-arm that escape (#553): the join runs on what
     they say, and a row keyed on nothing is dead."""
-    owner = _bare(row.context)
+    keyed = next((t for t in tasks if keyed_on(row, t.item, t.name)), None)
+    # A started row is keyed on its task, so the task's owner is the one whose absence is named (#1039).
+    owner = _bare(keyed.owner if keyed else row.context)
     if not sessions:
         return Claim(owner, True)
     here, missing = listed(row.context, roster, refs, user)
-    keyed = next((t for t in tasks if keyed_on(row, t.item, t.name)), None)
-    here = here or (keyed is not None and listed(keyed.owner, roster, refs, user)[0])
+    if not here and keyed is not None:
+        here, missing = listed(keyed.owner, roster, refs, user)
     how = "names a ref no ## Sessions row carries" if missing else "is not in ## Sessions"
     return Claim(owner, here, how, missing)
 
@@ -844,7 +824,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     # still lands in the report.
     approved = tracker_log.approved_closes(tracker_text)
     tasks = tracker.tasks
-    owners = parse_ownership("\n".join(_section(tracker_text, "## File ownership")))
+    owners = [OwnerRow(task, [tree]) for task, tree in tracker_log.started_trees(tracker_text).items()]
     # An empty Sessions table cannot prove that workers are absent.
     roster = {_bare(s.name) for s in tracker.sessions if s.name.strip()}
     # Match refs when available, then fall back to names.
@@ -921,7 +901,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
                 for name in row.worktrees:
                     visit(row, name, task)
 
-        # Visit ownership rows even when no current task names their worktree.
+        # Visit started rows even when no current task names their worktree.
         for row in owners:
             for name in row.worktrees:
                 visit(row, name, None)

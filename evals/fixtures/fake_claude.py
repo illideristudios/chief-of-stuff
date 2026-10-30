@@ -23,7 +23,9 @@ def one_answer(args):
             sys.exit(0)
         print("Error: plugin list requires --setting-sources user --json", file=sys.stderr)
         sys.exit(1)
-    prompt = args[args.index("--") + 1]
+    # Stream input (engine workers, #1160): the prompt is the first stdin message.
+    tail = args[args.index("--") + 1:] if "--" in args else []
+    prompt = tail[0] if tail else json.loads(sys.stdin.readline())["message"]["content"]
     sessions = Path(".fake-claude-sessions")
     session = flag.get("--resume") or flag.get("--session-id") or str(uuid.uuid4())
     if "SLEEP" in prompt:

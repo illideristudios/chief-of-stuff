@@ -93,6 +93,17 @@ class ClockDependencyTest(unittest.TestCase):
         self.assertEqual(call.call_count, 2)
         self.assertTrue(call.call_args.args[0].worker)
 
+    def test_parse_stamp_requires_exactly_one_timestamp_line(self) -> None:
+        stamp = "[Current TimeStamp: Saturday | 2026-10-24 14:30:00 UTC (UTC+00:00)]"
+        other = "[Current TimeStamp: Saturday | 2026-10-24 14:30:02 UTC (UTC+00:00)]"
+        parsed = clock_delivery._parse_stamp([stamp])
+        self.assertEqual(parsed, datetime(2026, 10, 24, 14, 30, 0, tzinfo=timezone.utc))
+        for lines in ([], ["no stamp here"], [stamp, other], [stamp, stamp],
+                      [f"pre {stamp}", other], [f"{stamp} and {other}"]):
+            with self.subTest(lines=lines):
+                with self.assertRaisesRegex(AssertionError, "exactly one"):
+                    clock_delivery._parse_stamp(lines)
+
 
 class ClockTest(unittest.TestCase):
     def test_system_returns_aware_utc(self) -> None:

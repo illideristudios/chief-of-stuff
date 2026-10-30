@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -20,7 +21,9 @@ FAKE = ROOT / "evals" / "fixtures" / "fake_claude.py"
 SID = "6f1c2a3e-8a4b-4c1d-9e2f-0a1b2c3d4e5f"
 sys.path.insert(0, str(ROOT / "scripts"))
 import claude_adapter  # noqa: E402
+import limits_probe  # noqa: E402
 import model_port  # noqa: E402
+import session_logs  # noqa: E402
 from model_port import Failure, Reply, Request  # noqa: E402
 
 
@@ -142,6 +145,18 @@ class EventsTest(unittest.TestCase):
                 self.assertEqual(claude_adapter.classify(code, raw, stderr, keep_events=True).kind, kind)
 
 
+class DefaultClaudeLoginTest(unittest.TestCase):
+    def test_default_login_does_not_set_config_override_but_records_transcript_directory(self):
+        environment = dict(os.environ)
+        environment.pop("CLAUDE_CONFIG_DIR", None)
+        with mock.patch.dict(os.environ, environment, clear=True), \
+             mock.patch.object(claude_adapter, "command", return_value=["claude", "--", "p"]), \
+             mock.patch.object(claude_adapter, "spawn") as spawn:
+            claude_adapter.start(Request(prompt="p", session_id=SID), Path("/tmp/run"))
+        self.assertNotIn("CLAUDE_CONFIG_DIR", spawn.call_args.args[3])
+        self.assertEqual(spawn.call_args.kwargs["config_dir"], str(Path(environment["HOME"]) / ".claude"))
+
+
 class StartTest(unittest.TestCase):
     def test_runner_spawn_failure_removes_launch_evidence_and_reraises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,6 +172,55 @@ class StartTest(unittest.TestCase):
 
 
 class CancelTest(unittest.TestCase):
+    def test_cancellation_waits_until_killed_leader_is_recorded_as_reaped(self):
+        process = mock.Mock(pid=4242, returncode=None)
+        seen = []
+        previous = signal.signal(signal.SIGTERM, lambda *_: seen.append(process.returncode))
+        def reap(*, timeout):
+            os.kill(os.getpid(), signal.SIGTERM)
+            process.returncode = -signal.SIGKILL
+        process.wait.side_effect = reap
+        try:
+            with mock.patch.object(claude_adapter.os, "killpg"):
+                claude_adapter._stop_after_write_failure(process)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(seen, [-signal.SIGKILL])
+
+    def test_write_failure_does_not_claim_cleanup_if_group_signal_is_denied(self):
+        process = mock.Mock(pid=4242, returncode=None)
+        with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                claude_adapter._stop_after_write_failure(process)
+        process.wait.assert_not_called()
+
+    def test_write_failure_does_not_signal_a_reaped_hosts_reusable_group_id(self):
+        process = mock.Mock(pid=4242, returncode=0)
+        with mock.patch.object(claude_adapter.os, "killpg") as killpg:
+            claude_adapter._stop_after_write_failure(process)
+        killpg.assert_not_called()
+
+    def test_serve_cleanup_signals_once_and_never_claims_a_denied_cleanup(self):
+        for denied in (False, True):
+            with self.subTest(denied=denied), tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                process = mock.Mock(pid=4242, returncode=None)
+                process.wait.side_effect = lambda **_: setattr(process, "returncode", -signal.SIGKILL)
+                prepared = {"argv": ["host"], "cwd": tmp, "session_id": SID, "stdin_prompt": "p"}
+                with mock.patch.object(claude_adapter.subprocess, "Popen", return_value=process), \
+                     mock.patch.object(claude_adapter, "_serve", side_effect=OSError("stream failed")), \
+                     mock.patch.object(claude_adapter, "_close_intake", side_effect=OSError("close failed")), \
+                     mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError if denied else None) as killpg:
+                    if denied:
+                        with self.assertRaises(PermissionError):
+                            claude_adapter._messaging_worker(run_dir, prepared)
+                        self.assertFalse((run_dir / "exit.json").exists())
+                        process.wait.assert_not_called()
+                    else:
+                        claude_adapter._messaging_worker(run_dir, prepared)
+                        self.assertNotEqual(json.loads((run_dir / "exit.json").read_text())["exit_code"], 0)
+                    killpg.assert_called_once_with(4242, signal.SIGKILL)
+
     def test_a_host_that_ignores_sigterm_is_killed_and_reaped(self):
         process = mock.Mock(pid=4242)
         process.wait.side_effect = [subprocess.TimeoutExpired("host", 5), 0]
@@ -277,7 +341,7 @@ class CallTest(unittest.TestCase):
         names = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
                  "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_REGION",
                  "AWS_PROFILE", "AWS_SECRET_ACCESS_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
-                 "HTTPS_PROXY", "SSL_CERT_FILE", "CLAUDE_CONFIG_DIR")
+                 "HTTPS_PROXY", "SSL_CERT_FILE", "CLAUDE_CONFIG_DIR", "CLAUDE_AS_PROFILES_DIR")
         capture = self.dir / "environment"
         capture.write_text(f"#!{sys.executable}\nimport json,os\n"
                            "print(json.dumps({'type':'result','is_error':False,'result':json.dumps(dict(os.environ))}))\n")
@@ -288,6 +352,56 @@ class CallTest(unittest.TestCase):
         received = json.loads(got.text)
         self.assertEqual({name: received.get(name) for name in names}, env)
         self.assertNotIn("UNRELATED_SECRET", received)
+
+    def test_probe_and_launched_profile_share_one_account_directory(self):
+        profiles = self.dir / "profiles"
+        decoy = self.dir / "decoy"
+        account = profiles / "secondary"
+        transcript = account / "projects" / "any" / "session.jsonl"
+        transcript.parent.mkdir(parents=True)
+        decoy.mkdir()
+        stamp = datetime.now(timezone.utc)
+        transcript.write_text(json.dumps({"type": "rate_limit_event", "timestamp": stamp.isoformat(),
+                                          "rate_limit_info": {"rateLimitType": "weekly", "utilization": 0.4,
+                                                              "resetsAt": (stamp + timedelta(days=2)).timestamp()}}) + "\n")
+        capture = self.dir / "environment"
+        capture.write_text(f"#!{sys.executable}\nimport json,os\n"
+                           "print(json.dumps({'type':'result','is_error':False,'result':json.dumps(dict(os.environ))}))\n")
+        capture.chmod(0o755)
+        with mock.patch.dict(os.environ, {"CLAUDE_AS_PROFILES_DIR": str(profiles), "CLAUDE_CONFIG_DIR": str(decoy)}):
+            self.assertEqual(limits_probe.read("claude", "secondary")[0].used, 40)
+            self.assertEqual(session_logs.claude_home("secondary"), account)
+            with mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
+                got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary")
+            received = json.loads(got.text)
+            self.assertEqual(received.get("CLAUDE_AS_PROFILES_DIR"), str(profiles))
+            self.assertEqual(received.get("CLAUDE_CONFIG_DIR"), str(account))
+            run_dir = self.dir / "run"
+            run_dir.mkdir()
+            with mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
+                process = claude_adapter.start(Request(prompt="p", session_id=SID, cwd=str(self.dir)), run_dir,
+                                                claude_as_profile="secondary")
+                self.assertEqual(process.wait(timeout=5), 0)
+            self.assertTrue((run_dir / "exit.json").exists())
+            self.assertEqual(json.loads((run_dir / "command.json").read_text())["env"]["CLAUDE_CONFIG_DIR"], str(account))
+            child = json.loads(json.loads((run_dir / "stdout").read_text())["result"])
+            self.assertEqual(child.get("CLAUDE_CONFIG_DIR"), str(account))
+            self.assertEqual(child.get("CLAUDE_AS_PROFILES_DIR"), str(profiles))
+            os.symlink(account, profiles / "linked")
+            before = len(self.resolved)
+            # A trio consult reads a Failure; a raise would escape trio_gate._ask and fail the engine pass.
+            got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="linked")
+            self.assertIsInstance(got, Failure)
+            self.assertEqual((got.kind, got.retryable), ("error", False))
+            self.assertIn("symlink", got.message)
+            linked_run = self.dir / "linked-run"
+            linked_run.mkdir()
+            with self.assertRaises(ValueError):
+                claude_adapter.start(Request(prompt="p", session_id=SID, cwd=str(self.dir)), linked_run,
+                                     claude_as_profile="linked")
+            self.assertEqual(len(self.resolved), before)
+            self.assertFalse((linked_run / "command.json").exists())
+            self.assertFalse((linked_run / "exit.json").exists())
 
     def test_login_setup_cannot_replace_the_eval_shim_path(self):
         shell = self.dir / "bash"
@@ -456,6 +570,20 @@ class CallTest(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
+    def test_timeout_cleanup_tolerates_permission_error_after_leader_exits(self):
+        process = mock.Mock(pid=123)
+        process.poll.return_value = 0
+        process.communicate.return_value = ("partial", "")
+        with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError):
+            self.assertEqual(claude_adapter._kill_and_drain(process), ("partial", ""))
+
+    def test_timeout_cleanup_does_not_hide_permission_error_for_live_leader(self):
+        process = mock.Mock(pid=123)
+        process.poll.return_value = None
+        with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                claude_adapter._kill_and_drain(process)
+
     def test_truncated_utf8_output_is_saved_and_classified(self):
         self.cli.write_text(f"#!{sys.executable}\nimport os,time\nos.write(1,b'partial: \\xe2')\ntime.sleep(30)\n")
         artifacts = self.dir / "truncated-output"
@@ -493,15 +621,18 @@ class CallTest(unittest.TestCase):
         self.assertEqual((got.kind, got.retryable), ("unknown", True))
 
     def test_a_profile_launches_through_claude_as_and_reports_it_missing_never_falling_back(self):
-        # Ledger E12: no silent fallback to a bare `claude`.
-        self.assertEqual(claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary").text,
-                         "reply: p")
-        self.assertEqual(self.resolved, ["claude-as"])
-        self.resolved.clear()
-        with mock.patch.object(claude_adapter, "resolve", side_effect=lambda p: self.resolved.append(p)):
-            got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary")
-        self.assertEqual((got.kind, self.resolved), ("missing_program", ["claude-as"]))
-        self.assertIn("claude_as_profile", got.message)
+        # Ledger E12: no silent fallback to a bare `claude`. The pin stats this directory, not ~/.claude-profiles.
+        profiles = self.dir / "profiles"
+        (profiles / "secondary").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"CLAUDE_AS_PROFILES_DIR": str(profiles)}):
+            self.assertEqual(claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary").text,
+                             "reply: p")
+            self.assertEqual(self.resolved, ["claude-as"])
+            self.resolved.clear()
+            with mock.patch.object(claude_adapter, "resolve", side_effect=lambda p: self.resolved.append(p)):
+                got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary")
+            self.assertEqual((got.kind, self.resolved), ("missing_program", ["claude-as"]))
+            self.assertIn("claude_as_profile", got.message)
 
 
 class WorkerClockTest(unittest.TestCase):
