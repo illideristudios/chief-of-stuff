@@ -13,10 +13,6 @@ Coordinator: coordinator. Board: none.
 | time | item | Robin's words |
 |---|---|---|
 
-## File ownership
-
-- Security audit: src/a/
-
 ## Log
 
 - 09:00 opened the day

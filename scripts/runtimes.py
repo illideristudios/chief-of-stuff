@@ -8,6 +8,18 @@ plugin, so `start_coordinator` can load it as `scripts.runtimes` and the scripts
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence, TypeVar
+
+T = TypeVar("T")
+
+
+def following(rotation: Sequence[T], after: str = "") -> tuple[T, ...]:
+    """One circular pass after an entry's full identity; a removed entry starts at the beginning.
+
+    Callers filter availability after ordering, so an unavailable previous entry still anchors a retry.
+    """
+    start = next((i + 1 for i, entry in enumerate(rotation) if str(entry) == after), 0)
+    return tuple(rotation[start:]) + tuple(rotation[:start])
 
 
 @dataclass(frozen=True)

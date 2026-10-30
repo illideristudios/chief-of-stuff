@@ -19,10 +19,6 @@
 |---|---|---|
 | 09:00 | Upload path check | "yes, dispatch it" |
 
-## File ownership
-
-- impl-uploads: `trees/uploads` (branch `uploads`)
-
 ## Log
 
 - 09:00 opened the day

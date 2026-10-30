@@ -1,5 +1,7 @@
 # Worker guard and engine channel
 
+These are worker safeguards for architecture section 13, with no owner approval stage. Merges, protected pushes and stage writes stay with the engine's automated gate. The coordinator's former action list and stage yes-gates are retired.
+
 The engine can load this directory with `--plugin-dir`. `scripts.guard_binding` exposes `Binding` / `Binding.from_env`, plus `guard_plugin_dir` and `guard_env` that `worker.launch` uses when this directory is present in the release.
 
 The launch environment is the only record identity. Hook input and MCP arguments cannot select a different issue, stage, attempt or session. This binding is a guard rail within the worker process, not an isolation boundary against a process that changes its own environment or database files. The engine remains the authority and independently checks state before merging.
@@ -29,8 +31,10 @@ The hooks implement these gates:
 
 - SessionStart injects issue identity, title, assigned stage and attempt, cached forge stage, all asks with their answers, and previous reports. Answers and findings are store data for resume context.
 
-The MCP server runs over stdio and exports only `report` and `ask`:
+The MCP server runs over stdio and exports only `report`, `ask` and `decisions`:
 
 - `report(outcome, summary, findings=[], passed=None, failed=None, skipped=None, xfailed=None)` accepts `done`, `failed` or `blocked`. The four counts are the final suite run, non-negative integers, omitted when unknown. Findings require severity from `policy.SEVERITIES`, title, evidence and suggestion; path and a positive line number are optional. Findings reject unknown fields. Reports append with the bound identity; late older attempts cannot overwrite newer reports. Queries order attempts oldest to newest and can filter the exact run.
 
 - `ask(question, options=[], context="")` immediately returns an ask id and tells the worker to report blocked, stop and wait. The answer starts as null. Decision delivery and answer resolution belong to M5's trio gate. The channel never grants permission.
+
+- `decisions(action="leaves", leaf_id=None, other_leaf_id=None, requested_depth=1, approach="", justification="", evidence="")` returns current unreplaced decision leaves (each with full decision text, reason and parent links; never rejected alternatives) when `action="leaves"`. History (`action="ancestors"`) and narrow rejected-approach checks (`action="was_rejected"`) refuse unjustified calls with instructions to justify; justified calls forward the justification to the coordinator, block inside the single tool call until the coordinator records its verdict (without model-loop polling), log every approved grant, and return only the approved ancestor slice or the matching rejected alternative and its reason.
