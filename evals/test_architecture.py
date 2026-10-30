@@ -20,32 +20,43 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
 PAGES = frozenset({"render_board", "decision_page", "issue_page", "source_page", "workers_page", "pages",
-                   "flow_chart", "gantt", "panels", "columns", "fragment", "module_graph", "page_reload"})
+                   "flow_chart", "gantt", "panels", "columns", "fragment", "page_common", "module_graph", "page_reload", "heartbeat_page"})
 
 # The leaf page modules: each imports at most fragment (the shared escaping), so a chart or the reload check lifts out with it.
 LEAVES = ("fragment", "gantt", "columns", "panels", "page_reload")
 
 # Every script module that draws nothing. A new one belongs here unless it renders a page.
 DRAWS_NOTHING = (
-    "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "ownership", "forge_review",
+    "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "forge_review",
     "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "kanban_cli", "pipeline_cli", "audit_tasks",
     "one_shot", "spawn_session", "session_exec", "shell_setup", "process_status", "one_shot_result", "adopt_one_shots", "merge_approved", "merge_ready",
     "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog", "inbox",
     "probe_health", "runtimes", "estimate", "task_forge", "tracker_log", "findings", "tree_state", "orphans",
     "git_trees", "git_view", "tree_claims", "notify_service", "tracker_read",
-    "one_shot_report", "flow", "sync_page_theme", "store", "store_access",
+    "one_shot_report", "flow", "sync_page_theme", "store", "store_access", "private_state",
     "model_port",
     "claude_adapter",
+    "host_adapter",
+    "t3_adapter",
     "policy",
     "forge",
     "forge_port",
     "engine_merge",
     "issue_gate",
+    "architect_signals",
+    "architect_signal_store",
+    "architect_signals_cli",
     "trio_gate",
+    "decision_actions",
+    "decision_escalation",
+    "decision_graph",  # Entities: decision DAG leaves, ancestors and rejected alternatives.
+    "decision_history",  # Use Cases: harsh justification judgement and PrecedentSource seam.
+    "precedent_source",  # Interface Adapters: tracker and decision-graph PrecedentSource gateways.
+    "decisions_cli",  # Frameworks and Drivers: coordinator/architect/owner decision graph CLI.
     "performance",
     "performance_report",
-    "limits", "limits_history", "limits_probe", "limits_cli",
-    "supervisor",
+    "limits", "limits_history", "limits_probe", "limits_cli", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
+    "supervisor", "release_selection", "engine_intent",
     "startup",
     "guard_commands",  # Entities: pure shell command gate judgements.
     "guard_rules",  # Use Cases: pure Stop, permission-ask and resume judgements.
@@ -55,8 +66,14 @@ DRAWS_NOTHING = (
 
     "slots",
     "reconcile",
+    "readiness",
+    "completion",
+    "worker_health",
+    "heartbeat",
+    "heartbeat_store",
     "cleanup",
     "engine",
+    "engine_facts",
     "worker",
     "guard_commands",  # Entities: pure shell command gate judgements.
     "guard_rules",  # Use Cases: pure Stop, permission-ask and resume judgements.
@@ -64,6 +81,8 @@ DRAWS_NOTHING = (
     "worker_guard",  # Frameworks and Drivers: command hook JSON and store access.
     "engine_mcp",  # Frameworks and Drivers: MCP stdio tools over the store gateway.
     "work",
+    "decision_actions",  # Use Cases: pure decision lifecycle transitions.
+    "decision_escalation",  # Use Cases: pure trio-retry, owner-wait and ask-link judgements.
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
@@ -131,8 +150,8 @@ def forbidden_reach(scripts: Path, start: str, banned_scripts: set[str], banned_
 # `http` is `from urllib import request`; `urllib.parse` is not on the list.
 READER_BANS = ({"one_shot", "backlog"}, frozenset({*HTTP, "urllib", "http"}))
 
-# Design 7a: only the model adapter launches a host CLI, and the registry is where it learns the executable.
-ADAPTER = ("scripts/claude_adapter.py", "scripts/runtimes.py")
+# Design 7a and §4/§13: only the host adapters launch a host CLI, and the registry is where they learn the executable.
+ADAPTER = ("scripts/claude_adapter.py", "scripts/host_adapter.py", "scripts/runtimes.py")
 # The modules that named a host executable before the adapter. The list may only shrink; each entry must still name one.
 # session_exec execs the worker CLI for spawn_session, and process_status matches the executable to check liveness.
 # evals/run.py remains exempt only for its non-Claude backends until 1.1.
@@ -202,19 +221,23 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
 # they occupy until the §8 split lands. Root launchers are Drivers.
 CIRCLES: dict[str, frozenset[str]] = {
     "entities": frozenset({
-        "tracker", "md", "clock", "runtimes", "policy", "findings", "ownership", "orphans",
+        "tracker", "md", "clock", "runtimes", "policy", "findings", "orphans",
         "estimate", "tracker_log", "tree_state", "guard_commands", "limits",
+        "decision_graph",
     }),
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
-        "task_forge", "model_port", "issue_gate", "trio_gate", "engine_merge", "forge_port",
-        "reconcile", "guard_rules", "performance",
+        "task_forge", "model_port", "issue_gate", "architect_signals", "trio_gate", "decision_actions", "decision_escalation", "engine_merge",
+        "decision_history",
+        "forge_port",
+        "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance", "heartbeat",
     }),
     "adapters": frozenset({
-        "fragment", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
-        "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge",
+        "fragment", "page_common", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
+        "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge", "private_state",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
-        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history",
+        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
+        "architect_signal_store", "precedent_source", "heartbeat_store", "heartbeat_page",
         # §4: store's migrations/ — path keys, not top-level stems.
         "migrations/env",
         "migrations/versions/0001_initial",
@@ -223,15 +246,22 @@ CIRCLES: dict[str, frozenset[str]] = {
         "migrations/limits_versions/0001_limits",
         "migrations/versions/0004_report_suite",
         "migrations/versions/0005_segment_human_review",
+        "migrations/versions/0006_log_operation",
+        "migrations/versions/0007_engine_log",
+        "migrations/versions/0008_withdraw_scope_decisions",
+        "migrations/versions/0009_drop_ownership",
+        "migrations/versions/0010_worker_messages",
+        "migrations/versions/0011_rotation_records",
+        "migrations/versions/0012_decision_graph",
     }),
     "drivers": frozenset({
-        "claude_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
+        "claude_adapter", "host_adapter", "t3_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor", "release_selection", "engine_intent",
         "startup", "store_access", "kanban_cli", "pipeline_cli", "process_status", "session_exec", "spawn_session",
         "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
-        "one_shot_result", "shell_setup", "cleanup", "engine", "work", "worker", "worker_guard",
+        "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
-        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli",
+        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "architect_signals_cli", "decisions_cli",
         "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }
@@ -405,6 +435,16 @@ class DependencyRuleTest(unittest.TestCase):
         self.assertEqual(forbidden_reach(SCRIPTS, "guard_commands", set(),
                          frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
 
+    def test_decision_graph_imports_no_other_script_or_io(self) -> None:
+        self.assertEqual(import_graph(SCRIPTS)["decision_graph"], set())
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_graph", set(),
+                         frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
+
+    def test_decision_history_reaches_no_adapter_or_io_module(self) -> None:
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_history",
+                         {"store", "store_access", "forge", "claude_adapter", "settings", "trio_gate", "pages", "workspace"},
+                         frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
+
     def test_guard_rules_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_rules"], set())
         self.assertEqual(forbidden_reach(SCRIPTS, "guard_rules", set(),
@@ -414,6 +454,16 @@ class DependencyRuleTest(unittest.TestCase):
     def test_reconcile_reaches_no_adapter_or_io_module(self) -> None:
         self.assertEqual(forbidden_reach(SCRIPTS, "reconcile",
                          {"store", "forge", "claude_adapter", "settings", "trio_gate"},
+                         frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
+
+    def test_decision_actions_reaches_no_adapter_or_io_module(self) -> None:
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_actions",
+                         {"store", "store_access", "forge", "claude_adapter", "settings", "trio_gate", "pages"},
+                         frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
+
+    def test_decision_escalation_reaches_no_adapter_or_io_module(self) -> None:
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_escalation",
+                         {"store", "store_access", "forge", "claude_adapter", "settings", "trio_gate", "pages"},
                          frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
 
     def test_every_script_is_classified(self) -> None:

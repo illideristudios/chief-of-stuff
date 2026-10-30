@@ -57,6 +57,19 @@ def resolve(program: str, *, source: dict[str, str] | None = None) -> str | None
     return None
 
 
+def login_path(source: dict[str, str] | None = None) -> str:
+    """The login and interactive shell's PATH, or "" when it cannot be read (#871: launchd's PATH is short, E14).
+    Only the final output line counts, so rc chatter before it is never taken for the PATH."""
+    try:
+        out = subprocess.run([login_shell(source), "-lic", 'printf "\\n%s" "$PATH"'], env=clean_env(source),
+                             capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired, ShellError):
+        return ""
+    lines = out.stdout.splitlines()
+    path = lines[-1].strip() if out.returncode == 0 and lines else ""
+    return path if path and all(Path(part).is_absolute() for part in path.split(os.pathsep) if part) else ""
+
+
 def exec_login(command: list[str]) -> None:
     """Load login and interactive config, then replace the shell with exact argv."""
     os.execve(login_shell(), login_argv(command), clean_env())
@@ -113,7 +126,11 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
                         os.killpg(child.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                child.wait()
+                    try:
+                        child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # shortcut: a child stuck after SIGKILL is left after 5s; reap it if teardown must not leave one
+                        child.returncode = -signal.SIGKILL
                 raise
             stderr = errors.read_text(errors="replace")
             stdout = output.read_text(errors="replace") if output.exists() else ""

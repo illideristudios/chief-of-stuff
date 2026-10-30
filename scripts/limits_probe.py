@@ -5,18 +5,15 @@
 """
 from __future__ import annotations
 
-import json
 import math
-import mmap
-import os
 import re
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from limits import Reading
 from runtimes import NAMES
 import settings
+import session_logs
 
 
 def _now() -> datetime:
@@ -40,63 +37,6 @@ def _number(value) -> float:
 
 def _unknown(runtime: str, account: str, reason: str, limit: str = "limits") -> Reading:
     return Reading(runtime, account, limit, None, None, "", None, _now(), reason)
-
-
-# One engine process repeats the pass. Unchanged files are not mapped again.
-# shortcut: changed transcripts are rescanned in full; cached events and deleted-file keys live until process exit.
-_scans: dict[tuple[str, int, int], tuple[dict, ...]] = {}
-
-
-def _scan_file(path: Path, needles: tuple[bytes, ...]) -> tuple[dict, ...] | None:
-    """Search bytes before decoding: transcripts mostly contain unrelated conversation text."""
-    found = []
-    try:
-        with path.open("rb") as stream:
-            if not os.fstat(stream.fileno()).st_size:
-                return ()
-            with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
-                offsets = set()
-                for needle in needles:
-                    start = 0
-                    while (hit := data.find(needle, start)) >= 0:
-                        left = data.rfind(b"\n", 0, hit) + 1
-                        right = data.find(b"\n", hit)
-                        if right < 0:
-                            right = len(data)
-                        if left not in offsets:
-                            offsets.add(left)
-                            try:
-                                event = json.loads(data[left:right])
-                            except (ValueError, UnicodeDecodeError):
-                                event = None
-                            if isinstance(event, dict):
-                                found.append(event)
-                        start = right + 1
-    except (OSError, ValueError):
-        # A rotated/deleted transcript does not hide the other sessions' data.
-        return None
-    return tuple(found)
-
-
-def _events(root: Path, markers: tuple[str, ...]):
-    needles = tuple(marker.encode() for marker in markers)
-    for path in root.rglob("*.jsonl"):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        if not stat.st_size:
-            continue
-        key = (str(path), stat.st_mtime_ns, stat.st_size)
-        cached = _scans.get(key)
-        if cached is None:
-            scanned = _scan_file(path, needles)
-            if scanned is None:
-                continue
-            for stale in [item for item in _scans if item[0] == key[0]]:
-                del _scans[stale]
-            _scans[key] = cached = scanned
-        yield from cached
 
 
 def _reading(runtime, account, name, used, reset, stamp) -> Reading:
@@ -165,22 +105,26 @@ def _claude_error(event: dict, account: str) -> Reading | None:
         # Consider both folds so a repeated DST hour does not silently become tomorrow.
         resets = [(local.replace(hour=hour, minute=int(clock[2] or 0), second=0, microsecond=0)
                    + timedelta(days=day)).replace(fold=fold) for day in (0, 1) for fold in (0, 1)]
-        reset = min(r.astimezone(timezone.utc) for r in resets if r.astimezone(timezone.utc) > stamp)
+        valid = []
+        for candidate in resets:
+            try:
+                utc = candidate.astimezone(timezone.utc)
+                # ZoneInfo also represents nonexistent gap times; only accept clocks that round-trip.
+                if utc > stamp and utc.astimezone(zone).replace(tzinfo=None) == candidate.replace(tzinfo=None):
+                    valid.append(utc)
+            except ValueError:
+                continue
+        if not valid:
+            return Reading("claude", account, name, None, None, "", None, stamp,
+                           "Claude cap-hit event has no supported reset clock/timezone")
+        reset = min(valid)
         return Reading("claude", account, name, 100, 100, "%", reset, stamp, "")
     return None
 
 
 def claude(account: str) -> list[Reading]:
-    if account:
-        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", account):
-            return [_unknown("claude", account, "invalid Claude profile name")]
-        root = Path(os.environ.get("CLAUDE_AS_PROFILES_DIR") or Path.home() / ".claude-profiles") / account
-        if root.is_symlink():
-            return [_unknown("claude", account, "Claude profile is a symlink; claude-as refuses it")]
-    else:
-        root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     candidates = []
-    for event in _events(root / "projects", ('"rate_limit_info"', '"rateLimitInfo"', '"isApiErrorMessage"')):
+    for _path, _line, event in session_logs.limit_events(account):
         native = _claude_error(event, account)
         if native is not None:
             candidates.append(native)

@@ -21,7 +21,7 @@ class Reading:
 def burn_rate(readings: list[Reading]) -> float | None:
     """Observed units/hour in the latest reset window, never across accounts or limits.
 
-    Missing data, equal timestamps, changing caps and counter corrections cannot establish a rate.
+    Refuse unusable last points, fewer than two matching points, falling usage, or a zero time span.
     """
     if not readings or len({(r.runtime, r.account, r.limit) for r in readings}) != 1:
         return None
@@ -41,7 +41,11 @@ def burn_rate(readings: list[Reading]) -> float | None:
 
 
 def near_cap(readings: list[Reading], now: datetime, warn_at: float) -> bool:
-    """Any limit can trigger the warning, but runtime and account must stay isolated."""
+    """Warn when any used share or burn-rate projection at reset reaches warn_at.
+
+    Runtime and account must stay isolated. Unknown readings, future observations and
+    absent/expired resets cannot warn. Without a rate, only the observed share can warn.
+    """
     if not readings or len({(r.runtime, r.account) for r in readings}) != 1:
         return False
     groups: dict[str, list[Reading]] = {}
@@ -57,5 +61,6 @@ def _limit_near_cap(readings: list[Reading], now: datetime, warn_at: float) -> b
         return False
     if last.used / last.cap >= warn_at:
         return True
+    # Extend the observed burn to resets_at and compare its projected share with warn_at.
     rate = burn_rate(readings)
     return rate is not None and (last.used + rate * (last.resets_at - last.read_at).total_seconds() / 3600) / last.cap >= warn_at

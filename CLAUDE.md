@@ -25,4 +25,4 @@ Read by `claude --agent frank-lloyd-aight`. Every path, name, and tool the archi
 - Publisher: self-hosted; URL http://127.0.0.1:8787/; dir `/Users/locriani/Developer/Gauntlet/Areas/pages/`. A review page written there is at `http://127.0.0.1:8787/<subject>-review.html`.
 - Session tools: `ListAgents` to find sessions, `SendMessage` to reach one
 - Diagram renderer: `~/Developer/ai-additions/plugins/mermaid-system-design/skills/mermaid-system-design/scripts/mermaid-check.py` (exit 0 rendered, 1 a diagram failed, 2 renderer missing). A diagram that did not render is never approved.
-- Commits: this session commits its own work in its own worktree, in small meaningful commits, and pushes each one. It does not merge.
+- Commits: this session commits its own work in its own worktree, in small meaningful commits, and pushes each one. It may merge its own pull requests with approval.

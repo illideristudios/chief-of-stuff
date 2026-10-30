@@ -202,6 +202,28 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
         execv.assert_called_once_with(str(venv_python),
             [str(venv_python), str(ROOT / "scripts/work.py"), *args])
 
+    def test_engine_and_supervisor_route_through_the_cli(self):
+        venv_python = Path("/pin/venv/bin/python")
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=venv_python) as ensure, \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["engine", "--root", "/workspace", "--once"])
+        ensure.assert_called_once()
+        execv.assert_called_once_with(
+            str(venv_python),
+            [str(venv_python), str(ROOT / "scripts/engine.py"), "--root", "/workspace", "--once"],
+        )
+        with mock.patch.object(supervisor, "ensure_venv") as ensure, \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["supervisor", "--root", "/workspace", "status"])
+        ensure.assert_not_called()
+        execv.assert_called_once_with(
+            sys.executable,
+            [sys.executable, str(ROOT / "scripts/supervisor.py"), "--root", "/workspace", "status"],
+        )
+
     def test_work_cli_files_an_issue_and_writes_the_engine_store(self):
         import forge
         import store
@@ -224,7 +246,8 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                  mock.patch.object(forge, "for_workspace", side_effect=lambda root, **opts: factory(root, gh=gh, **opts)), \
                  mock.patch.object(sys, "stdout", io.StringIO()) as out:
                 with self.assertRaises(SystemExit) as done:
-                    cli.main(["work", "--root", str(root), "Add a flag", "--commit"])
+                    cli.main(["work", "--root", str(root), "Add a flag",
+                              "--body", "## File ownership\n- write: `src/`", "--commit"])
             self.assertEqual(done.exception.code, 0)
             self.assertIn("github:example/app#101", out.getvalue())
             db = store.Store(root / "store.db")

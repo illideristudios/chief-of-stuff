@@ -75,5 +75,6 @@
   ],
   "max_turns": 18,
   "timeout_seconds": 450,
-  "peers": "sessions.json"
+  "peers": "sessions.json",
+  "superseded_by": "autonomy-routine-push"
 }

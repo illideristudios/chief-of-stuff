@@ -88,8 +88,16 @@ class Workflow:
     architecture_reviewer: str | None = None
     reviewer_session: str | None = None
     delivery: str = "pull-request"
-    merge_owner: str = "user"
+    merge_owner: str = "coordinator"
     approver: str | None = None
+
+
+@dataclass(frozen=True)
+class Stall:
+    """Silence threshold and opt-in, bounded local-process recovery."""
+    after_minutes: int = 3
+    action: str = "wait"
+    max_restarts: int = 2
 
 
 @dataclass(frozen=True)
@@ -101,10 +109,13 @@ class Workers:
     max_concurrency: int | None = None
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
+    worker_launcher: str = "cli"  # how an engine worker starts (§13, #1178): a local CLI process, or a T3 thread
     require_green_tests: bool = False  # one-shot and engine done require known counts with passed > 0 and no failures, skips or xfails
     rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
     teardown: str = ""  # engine-only cleanup command; one-shot launchers do not run it
     teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
+    stall: Stall = field(default_factory=Stall)
+    failure_limit: int = 2
 
 
 @dataclass(frozen=True)
@@ -210,11 +221,15 @@ class Settings:
     pages: Pages = field(default_factory=Pages)
     # #111: task class -> rotation; the first entry is the suggested model, the rest the fallback order.
     models: dict[str, tuple[ModelEntry, ...]] = field(default_factory=dict)
+    # Task class -> strategy for a fresh launch; retries follow the previous entry regardless of strategy.
+    model_picks: dict[str, str] = field(default_factory=dict)
     graph: Graph | None = None
     # #54: repository name -> path (relative to the workspace root) that `chief-of-stuff worktree --clone <name>` cuts from.
     repos: dict[str, str] = field(default_factory=dict)
     stages: dict[str, Stage] = field(default_factory=dict)
     limits: Limits = field(default_factory=Limits)
+    # #827: a policy TOML, relative to the workspace root, merged over the shipped policy; "" runs the shipped one.
+    policy_overlay: str = ""
 
 
 def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, Stage]:
@@ -246,6 +261,8 @@ def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, S
 
 
 def _entry(where: str, text) -> ModelEntry:
+    if isinstance(text, str) and ":" not in text and text.strip():
+        text = f"claude:{text}"  # #701: an entry with no runtime prefix still means Claude, as 1.0 configs wrote it
     runtime, sep, rest = text.partition(":") if isinstance(text, str) else ("", "", "")
     if not sep or runtime not in RUNTIMES:
         raise SettingsError(f"{where}: {text!r} is not runtime:model-id with runtime one of {', '.join(RUNTIMES)}")
@@ -259,14 +276,32 @@ def _entry(where: str, text) -> ModelEntry:
     return ModelEntry(runtime, model, effort)
 
 
+PICKS = ("first", "random", "round_robin")
+
+
+def _picks(table) -> dict[str, str]:
+    """The owner's worker strategy defaults to round robin; the trio retains its independent draw."""
+    picks = {}
+    for name, t in table.items():
+        default = "first" if name == "trio" else "round_robin"
+        value = t.get("pick", default) if isinstance(t, dict) else default
+        if name == "trio" and value == "round_robin":
+            raise SettingsError("[models.trio]: pick must be first or random; round_robin is a worker strategy")
+        if value not in PICKS:
+            raise SettingsError(f"[models.{name}]: pick must be one of {', '.join(PICKS)}")
+        picks[name] = value
+    return picks
+
+
 def _models(table) -> dict[str, tuple[ModelEntry, ...]]:
     if not isinstance(table, dict):
         raise SettingsError("[models] must be a table of task classes")
     models = {}
     for name, t in table.items():
         where = f"[models.{name}]"
-        if not isinstance(t, dict) or set(t) != {"rotation"}:
-            raise SettingsError(f"{where}: a table with only rotation, like {{ rotation = [\"claude:opus@high\"] }}")
+        if not isinstance(t, dict) or "rotation" not in t or not set(t) <= {"rotation", "pick"}:
+            raise SettingsError(f"{where}: a table with a rotation and an optional pick, like "
+                                f"{{ rotation = [\"claude:opus@high\"], pick = \"random\" }}")
         rotation = t["rotation"]
         if not isinstance(rotation, list) or not rotation:
             raise SettingsError(f"{where}: rotation is a non-empty list of runtime:model-id@effort entries")
@@ -292,9 +327,30 @@ def pick(rotation: tuple[ModelEntry, ...], after: str | None = None, not_family:
                         (f" outside {not_family}" if not_family else ""))
 
 
+def _stall(table) -> Stall:
+    if not isinstance(table, dict):
+        raise SettingsError("[workers.stall] must be a table")
+    extra = set(table) - {"after_minutes", "action", "max_restarts"}
+    if extra:
+        raise SettingsError(f"[workers.stall] unknown keys: {', '.join(sorted(extra))}")
+    minutes = table.get("after_minutes", Stall.after_minutes)
+    if type(minutes) is not int or not 1 <= minutes <= 999999999:
+        raise SettingsError("[workers.stall] after_minutes must be a positive whole number no greater than 999999999")
+    count = table.get("max_restarts", 2)
+    if type(count) is not int or count < 0:
+        raise SettingsError("[workers.stall] max_restarts must be a non-negative whole number")
+    action = table.get("action", "wait")
+    if action not in ("wait", "restart"):
+        raise SettingsError('[workers.stall] action must be "wait" or "restart"')
+    return Stall(minutes, action, count)
+
+
 def _workers(table) -> Workers:
     if not isinstance(table, dict):
         raise SettingsError("[workers] must be a table")
+    failure_limit = table.get("failure_limit", Workers.failure_limit)
+    if type(failure_limit) is not int or failure_limit < 1:
+        raise SettingsError("[workers] failure_limit must be a positive whole number")
     launcher = table.get("launcher", "ghostty")
     if launcher not in ("ghostty", "tmux", "herdr"):
         raise SettingsError("[workers] launcher must be `ghostty`, `tmux` or `herdr`")
@@ -316,6 +372,9 @@ def _workers(table) -> Workers:
     if "claude_as_profile" in table and not (isinstance(profile, str) and CLAUDE_AS_PROFILE.fullmatch(profile)):
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
+    worker_launcher = table.get("worker_launcher", "cli")
+    if worker_launcher not in ("cli", "t3"):
+        raise SettingsError("[workers] worker_launcher must be `cli` or `t3`")
     rules = table.get("rules", [])
     # Reject controls, invisible formatting (including bidi), and separators that can conceal instructions.
     if not isinstance(rules, list) or not all(
@@ -336,7 +395,8 @@ def _workers(table) -> Workers:
             raise SettingsError(f"[workers] {key} must be a nonempty, single-line command without control characters")
         commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules), **commands)
+                   claude_as_profile=profile, worker_launcher=worker_launcher, require_green_tests=green, rules=tuple(rules),
+                   stall=_stall(table.get("stall", {})), failure_limit=failure_limit, **commands)
 
 
 def _repos(table) -> dict[str, str]:
@@ -390,16 +450,14 @@ def _workflow(table) -> Workflow:
     delivery = table.get("delivery", "pull-request")
     if delivery not in ("pull-request", "branch"):
         raise SettingsError("[workflow] delivery must be `pull-request` or `branch`")
-    merge_owner = table.get("merge_owner", "user")
-    if merge_owner not in ("user", "worker", "approval"):
-        raise SettingsError("[workflow] merge_owner must be `user`, `worker` or `approval`")
-    if delivery == "branch" and merge_owner != "user":
-        raise SettingsError(f"[workflow] merge_owner={merge_owner} requires delivery=pull-request")
-    # #97: the forge username whose approval the coordinator merges on; nobody else's counts.
-    approver = table.get("approver")
-    if merge_owner == "approval" and (not isinstance(approver, str) or not approver.strip()):
-        raise SettingsError("[workflow] merge_owner=approval needs approver, the user's forge username")
-    return Workflow(**names, delivery=delivery, merge_owner=merge_owner, approver=approver)
+    # Accept old settings without retaining their owner wait. The engine owns every merge.
+    merge_owner = table.get("merge_owner", "coordinator")
+    if merge_owner not in ("user", "worker", "approval", "coordinator"):
+        raise SettingsError("[workflow] merge_owner must be `coordinator` (legacy values are accepted)")
+    approver = table.get("approver")  # optional review-thread filter, never merge authority
+    if approver is not None and (not isinstance(approver, str) or not approver.strip()):
+        raise SettingsError("[workflow] approver must be a non-empty forge username")
+    return Workflow(**names, delivery=delivery, merge_owner="coordinator", approver=approver)
 
 
 def _lane(name: str, table) -> Lane:
@@ -412,7 +470,7 @@ def _lane(name: str, table) -> Lane:
         raise SettingsError(f"[lanes] {name}: a stage appears twice")
     if not isinstance(gates, list) or not all(isinstance(g, str) for g in gates) or not set(gates) <= set(stages):
         raise SettingsError(f"[lanes] {name}: gates must be stages of the lane")
-    return Lane(tuple(stages), tuple(gates))
+    return Lane(tuple(stages))
 
 
 def _github_project(table, stages: list[str], terminal: list[str]) -> GitHubProject:
@@ -484,7 +542,7 @@ def _kanban(table) -> Kanban:
         project = _github_project(table["github_project"], stages, terminal)
     elif "project" in table:
         project = _github_project(_project_ref(table["project"]), stages, terminal)
-    return Kanban(tuple(stages), human, mapping, tuple(holds), tuple(terminal), project)
+    return Kanban(tuple(stages), human, mapping, (), tuple(terminal), project)
 
 
 def _notify(table: dict, root: Path) -> Notify:
@@ -508,6 +566,18 @@ def _notify(table: dict, root: Path) -> Notify:
     if not resolved.is_relative_to(Path(root).resolve()):
         raise SettingsError(f"[notify] queue: {queue!r} is outside the workspace root")
     return Notify(adapter=adapter, queue=queue, warnings=tuple((w, _offset(w)) for w in labels), **times)
+
+
+def _policy_overlay(table, root: Path) -> str:
+    if not isinstance(table, dict) or (extra := sorted(set(table) - {"overlay"})):
+        raise SettingsError(f"[policy]: unknown key {', '.join(extra)}" if isinstance(table, dict)
+                            else "[policy] is not a table")
+    path = table.get("overlay", "")
+    if not isinstance(path, str) or not path.strip() or "\0" in path:
+        raise SettingsError('[policy] overlay: a policy TOML path, relative to the workspace root')
+    if not (Path(root) / path).resolve().is_relative_to(Path(root).resolve()):
+        raise SettingsError(f"[policy] overlay: {path!r} is outside the workspace root")
+    return path
 
 
 def load(root: Path, settings_path: str | None) -> Settings:
@@ -542,29 +612,54 @@ def load(root: Path, settings_path: str | None) -> Settings:
     workflow = _workflow(data["workflow"]) if "workflow" in data else Workflow()
     workers = _workers(data["workers"]) if "workers" in data else Workers()
     models = _models(data["models"]) if "models" in data else {}
+    model_picks = _picks(data["models"]) if "models" in data else {}
     graph = _graph(data["graph"]) if "graph" in data else None
     pages = _pages(data["pages"]) if "pages" in data else Pages()
     repos = _repos(data["repos"]) if "repos" in data else {}
     limits = _limits(data["limits"]) if "limits" in data else Limits()
+    policy_overlay = _policy_overlay(data["policy"], Path(root)) if "policy" in data else ""
     budgets = data.get("budgets", {})
     if not isinstance(budgets, dict) or not set(budgets) <= {"S", "M", "L", "XL"}:
         raise SettingsError(f"{settings_path}: [budgets] is a table of S, M, L, XL")
     budgets = {size: _offset(v, f"[budgets] {size}") for size, v in budgets.items()}
     table = data.get("notify")
     if table is None:
-        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages, limits=limits)
+        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, model_picks=model_picks, graph=graph, repos=repos, stages=stages, limits=limits, policy_overlay=policy_overlay)
     if not isinstance(table, dict):
         raise SettingsError(f"{settings_path}: [notify] is not a table")
     return Settings(notify=_notify(table, Path(root)), lanes=lanes, budgets=budgets,
-                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages, limits=limits)
+                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, model_picks=model_picks, graph=graph, repos=repos, stages=stages, limits=limits, policy_overlay=policy_overlay)
+
+
+def _policy_toml(path: Path, name: str) -> dict:
+    try:
+        return tomllib.loads(Path(path).read_text())
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        raise policy.PolicyError(f"{name}: {e}") from None
+    except OSError as e:
+        raise policy.PolicyError(f"{name}: {e.strerror or e}") from None
 
 
 def load_policy(path: Path = POLICY) -> policy.Policies:
     """The policy and workflow file (design decisions 12 and 13), the shipped one by default."""
-    try:
-        return policy.parse(tomllib.loads(Path(path).read_text()))
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
-        raise policy.PolicyError(f"{path}: {e}") from None
+    return policy.parse(_policy_toml(path, str(path)))
+
+
+def workspace_policy_data(root: Path, overlay: str = "") -> dict:
+    """The shipped policy's tables with the workspace's `[policy] overlay` merged over them (#827). A named overlay
+    that is not a file is refused, never a silent fallback to the shipped policy."""
+    data = _policy_toml(POLICY, str(POLICY))
+    if not overlay:
+        return data
+    path = Path(root) / overlay
+    if not path.is_file():
+        raise policy.PolicyError(f"[policy] overlay {overlay}: no such file")
+    return policy.overlay(data, _policy_toml(path, overlay), f"[policy] overlay {overlay}")
+
+
+def workspace_policy(root: Path, overlay: str = "") -> policy.Policies:
+    """The policy one workspace runs under: the engine, init and the board all load it here."""
+    return policy.parse(workspace_policy_data(root, overlay)) if overlay else load_policy()
 
 
 def workflow_stages(policies: policy.Policies) -> list[str]:
