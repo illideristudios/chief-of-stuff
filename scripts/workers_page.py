@@ -230,7 +230,8 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
             ended.append(((ended_dt.hour * 60 + ended_dt.minute, ended_dt.second, len(ended)),
                           [f'{_end_chip(seg.outcome)} <b>{worker_name}</b>', f"{ended_dt:%H:%M}", task_link,
                            escape(summary), action]))
-    return running, ended, workers_need_input(items=db.items(), segments=all_segs, resumes=db.resumes), store_shots
+    return running, ended, workers_need_input(items=db.items(), segments=all_segs,
+                                                  resumes={i.issue_key: db.resume(i.issue_key) for i in db.items()}), store_shots
 
 
 def render(tracker_text: str, sources: board_sources.Sources, now: datetime, trees: Path, cap: int | None,
