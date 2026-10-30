@@ -21,28 +21,26 @@ from clock import HHMM, RAN, dur as _dur, hhmm as _hhmm  # noqa: E402
 from findings import ISSUE, KANBAN, LANE, MERGED, NEXT, OVER, QUEUE, REOPEN, STOPPED  # noqa: E402
 from md import cells as _cells, is_separator as _is_separator, section as _section, unmark as _unmark  # noqa: E402
 from tracker import Session, clip_name, parse_tracker  # noqa: E402
-from workspace import ConfigError, parse_coordinator, read_config, worktrees_dir  # noqa: E402
+from workspace import ConfigError, parse_coordinator, read_config, settings_path, worktrees_dir  # noqa: E402
 from dispatch_prompt import PROMPT_DIR, STOP_FILE, task_keys  # noqa: E402
 from backlog import CLOSED, GITHUB, Backlog, BacklogError, GitHubBacklog, file_with, home_of, issue_ref, issue_states  # noqa: E402
 import backlog  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 import board_sources  # noqa: E402
 import tracker_log  # noqa: E402
+import forge  # noqa: E402
 import kanban as kanban_tool  # noqa: E402
-import ownership  # noqa: E402
 import git_trees  # noqa: E402
 import git_view  # noqa: E402
 from tree_state import UNCOMMITTED_UNKNOWN  # noqa: E402
 from orphans import Claim, Orphan, Unclaimed, judge  # noqa: E402
+from process_status import process_exists, registrations, running_trees  # noqa: E402
 from tree_claims import Claims, one_shot_claims, registry_claims  # noqa: E402
 
-# Preserve branch names from ownership rows when worktrees disappear.
-WORKTREE = re.compile(r"\bworktrees?\s+(?P<tick>`)?(?P<name>[A-Za-z0-9._\-/]+)`?(?:\s*\((?P<branch>[^)]*)\))?")
 BRANCHISH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{1,60}")
 # Exclude prose from branch and worktree matches.
 NOT_A_BRANCH = {"now", "was", "then", "renamed", "from", "to", "branch", "on", "off", "and", "or", "merged", "clean", "dirty", "at"}
 NOT_A_NAME = {"only", "its", "it", "the", "that", "this", "those", "a", "an", "and", "in", "at", "for", "of", "is", "was", "with", "instead", "too", "here", "there"}
-TREE_SHAPED = re.compile(r"[-/_.0-9]")
 REF = re.compile(r"\s*\[[0-9a-f]{4,}\]\s*$")
 # Context refs can appear anywhere in a cell.
 ANY_REF = re.compile(r"\[([0-9a-f]{4,})\]")
@@ -61,6 +59,7 @@ ACKNOWLEDGED = r"(?i:\W+merged\b)"
 
 @dataclass(frozen=True)
 class OwnerRow:
+    """A task's claim on its trees: the Log's started line names the tree a one-shot ran in (#1039)."""
     context: str
     worktrees: list[str]
     branches: dict[str, str] = field(default_factory=dict)
@@ -129,7 +128,7 @@ def _closed_hhmm(closed_at: str, zone) -> str:
 
 
 def _tree_unlanded(root: Path | None, trees: str, owners: list, task, roster=(), refs=()) -> str:
-    """Does this task's File-ownership worktree carry a commit `main` never got? "unlanded" when git says
+    """Does this task's started worktree carry a commit `main` never got? "unlanded" when git says
     so (merge-base exit 1), "unknown" when git could not say (any other exit) and no tree is unlanded,
     else "". Reads `_merged`, the same check `_state` words, never `_state`'s prose (#221). No resolvable
     tree (none owns the task, or it is missing) answers "": nothing is there to unland."""
@@ -357,16 +356,16 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
         status = None
         if ref.host == GITHUB and config.github_project:
             if project_items is None:
-                project_items, project_error = kanban_tool._project_items(
-                    gh or kanban_tool.backlog.run_gh, config.github_project)
+                project_items, project_error = forge.project_items(
+                    gh or backlog.run_gh, config.github_project)
             if project_error:
                 faults.append(KanbanFault(clip_name(furthest.label), project_error))
                 continue
-            if ref.url not in project_items:
+            if ref.url.casefold() not in project_items:
                 faults.append(KanbanFault(clip_name(furthest.label),
                                           "issue is absent from the configured GitHub Project"))
                 continue
-            status = project_items[ref.url]
+            status = project_items[ref.url.casefold()]
         issue_config = config if ref.host == GITHUB else replace(config, github_project=None)
         why = kanban_tool.drift(issue_config, found.labels, furthest.stage.strip(), project_status=status,
                                 allow_extra_hold=furthest.kind == "waiting")
@@ -416,22 +415,8 @@ class Report:
     over: list[OverBudget] = field(default_factory=list)
 
 
-def _worktrees(cell: str) -> tuple[list[str], dict[str, str]]:
-    names: list[str] = []
-    branches: dict[str, str] = {}
-    for m in WORKTREE.finditer(cell):
-        name = m["name"].rstrip("/.,;:")
-        # A tree name is backticked or shaped like one; a bare word after "worktree" is prose (#72).
-        if not name or name in names or not (m["tick"] or TREE_SHAPED.search(name)):
-            continue
-        names.append(name)
-        if m["branch"]:
-            branches[name] = m["branch"]
-    return names, branches
-
-
 def branch_candidates(name: str, detail: str) -> list[str]:
-    """Every ref the ownership row could be naming, best first, then the tree name itself.
+    """Every ref a missing tree could be naming, best first, then the tree name itself.
 
     A live parenthetical reads `(now docs/local-toolchain, was fix/sample-data-stack-detect)`, so this
     guesses widely and cheaply and lets `git rev-parse` be the one that decides.
@@ -440,11 +425,6 @@ def branch_candidates(name: str, detail: str) -> list[str]:
     if name not in out:
         out.append(name)
     return out[:6]
-
-
-def parse_ownership(text: str) -> list[OwnerRow]:
-    """File ownership is prose, written as a table or as bullets; both name a context and its paths."""
-    return [OwnerRow(row.context, *_worktrees(row.paths)) for row in ownership.parse(text)]
 
 
 def _bare(name: str) -> str:
@@ -484,7 +464,7 @@ def owns(row: OwnerRow, owner: str) -> bool:
     """Same context? The ref decides where both sides carry one — finding 112's rule, which reaches
     here too and was left out of it. This tracker runs one ref under three names: `arch [768194]`,
     `architecture-review-setup [768194]` and `openemr-arch [768194]`, four of whose tasks matched no
-    ownership row and so were attributed no tree, and a task with no tree is checked for nothing at
+    row and so were attributed no tree, and a task with no tree is checked for nothing at
     all. The name decides only where one side or the other has no ref to ask."""
     if not owner.strip():
         return False
@@ -495,13 +475,13 @@ def owns(row: OwnerRow, owner: str) -> bool:
 
 
 def key_name(task, roster: set[str], refs: set[str]) -> str:
-    """The Tasks-table name a File ownership row may be keyed on: none when it is a listed session's name, since
+    """The Tasks-table name a row may be keyed on: none when it is a listed session's name, since
     that bare context is the session's own row, not the task's."""
     return "" if listed(task.name, roster, refs)[0] else task.name
 
 
 def keyed_on(row: OwnerRow, item: str, name: str) -> bool:
-    """A File ownership row keyed on a task's item, its colon prefix or board short name — the key set
+    """A row keyed on a task's item, its colon prefix or board short name — the key set
     dispatch writes (`task_keys`, #553) — or whose whole context is its Tasks-table `name`, is keyed on
     that task. The name is compared exactly, as dispatch does: a session's `arch (deletion)` is not a
     task named `arch`; the item's short forms read as audit reads prose, bare."""
@@ -515,7 +495,7 @@ def _tokens(text: str) -> set[str]:
 
 
 def _detail(context: str) -> str:
-    """The parenthetical of a File ownership row: with one context to several tasks, it is the only thing saying which."""
+    """The parenthetical of a row's context: with one context to several tasks, it is the only thing saying which."""
     return " ".join(PAREN.findall(context))
 
 
@@ -539,23 +519,25 @@ def rows_for(item: str, owner: str, owners: list[OwnerRow], name: str = "") -> t
     best = max(score for score, _ in scored)
     top = [r for score, r in scored if score == best]
     if best == 0 or len(top) > 1:
-        return [], f"ambiguous: {clip_name(item)} — {len(mine)} File ownership rows for {_bare(owner)} and none names it; no tree attributed"
+        return [], f"ambiguous: {clip_name(item)} — {len(mine)} rows for {_bare(owner)} and none names it; no tree attributed"
     return top, ""
 
 
 def row_claim(row: OwnerRow, tasks, roster: set[str], refs: set[str], user: str,
               sessions: tuple[Session, ...] = ()) -> Claim:
-    """A File ownership row's claim on its trees. Live when its context is in `## Sessions`, or when the
+    """A row's claim on its trees. Live when its context is in `## Sessions`, or when the
     task it is keyed on — a one-shot's row is keyed on its task, never a session — has a listed owner.
     An empty Sessions table cannot prove that workers are absent, so with no rows to ask every row is
     live; rows that are there but name no one do not re-arm that escape (#553): the join runs on what
     they say, and a row keyed on nothing is dead."""
-    owner = _bare(row.context)
+    keyed = next((t for t in tasks if keyed_on(row, t.item, t.name)), None)
+    # A started row is keyed on its task, so the task's owner is the one whose absence is named (#1039).
+    owner = _bare(keyed.owner if keyed else row.context)
     if not sessions:
         return Claim(owner, True)
     here, missing = listed(row.context, roster, refs, user)
-    keyed = next((t for t in tasks if keyed_on(row, t.item, t.name)), None)
-    here = here or (keyed is not None and listed(keyed.owner, roster, refs, user)[0])
+    if not here and keyed is not None:
+        here, missing = listed(keyed.owner, roster, refs, user)
     how = "names a ref no ## Sessions row carries" if missing else "is not in ## Sessions"
     return Claim(owner, here, how, missing)
 
@@ -650,7 +632,8 @@ def _state(worktree: Path, view=None) -> tuple[str, str]:
         reasons.append("not on main")
     elif merged != 0:
         reasons.append(f"on main: {UNREADABLE_PHRASE}")
-    return branch, "; ".join(reasons)
+    # Worker-controlled branch names can carry line/bidi/C1 controls; escape before any audit line (#534).
+    return git_trees.clean(branch), "; ".join(reasons)
 
 
 def _tree_line(name: str, branch: str, why: str) -> str:
@@ -751,6 +734,18 @@ def _push_gap(worktree: Path, view=None) -> str:
     return at + ", ".join(parts) + " vs origin/main"
 
 
+UNREADABLE_GAP = "main vs origin/main unknown"
+
+
+def _pass_push_gap(order: list[Path], view_of, names: dict[Path, str]) -> str:
+    """Gap line for the pass: first readable tree's fact, else name the first tree that could not be read (#537)."""
+    for path in order:
+        line = _push_gap(path, view_of(path))
+        if not line.endswith(UNREADABLE_GAP.removeprefix("main ")):  # `main abc123 vs origin/main unknown` too
+            return line
+    return f"{names[order[0]]}: {UNREADABLE_GAP}"
+
+
 # Read labeled stop-file fields.
 STOP_FIELD = re.compile(r"(?im)^\s*([A-Za-z][A-Za-z ]*?)\s*:\s*(.*?)\s*$")
 # Open and waiting tasks need no stop finding.
@@ -820,6 +815,8 @@ def queue_faults(tracker_text: str) -> tuple[list[QueueFault], list[str], int]:
 def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetime | None = None, call=None) -> Report:
     claude_md = (root / "CLAUDE.md").read_text()
     cfg = parse_coordinator(claude_md, today=date.today())
+    settings = load_settings(root, cfg.settings_path)
+    commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
     trees = worktrees_dir(claude_md)
     tracker_text = (root / cfg.tracker_path(day)).read_text()
     tracker = parse_tracker(tracker_text)
@@ -827,7 +824,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     # still lands in the report.
     approved = tracker_log.approved_closes(tracker_text)
     tasks = tracker.tasks
-    owners = parse_ownership("\n".join(_section(tracker_text, "## File ownership")))
+    owners = [OwnerRow(task, [tree]) for task, tree in tracker_log.started_trees(tracker_text).items()]
     # An empty Sessions table cannot prove that workers are absent.
     roster = {_bare(s.name) for s in tracker.sessions if s.name.strip()}
     # Match refs when available, then fall back to names.
@@ -846,18 +843,18 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     names: dict[Path, str] = {}
     stopped_at: set[str] = set()
     gone: dict[str, str] = {}
-    views: dict[Path, git_view.View | None] = {}
+    views: dict[Path, git_view.View | git_view.Unviewable] = {}
     with contextlib.ExitStack() as stack:
 
-        def view_of(tree: Path) -> git_view.View | None:
+        def view_of(tree: Path) -> git_view.View | git_view.Unviewable:
             """One opened view per tree for the whole audit (#548): every git read about `tree` runs inside it, and
-            the view is closed when the audit's git reads are done. A tree whose view cannot be built (`None`)
-            keeps the per-call behaviour — each of its reads then answers on its own."""
+            the view is closed when the audit's git reads are done. A refused view keeps every read refused."""
             if tree not in views:
                 try:
-                    views[tree] = stack.enter_context(git_view.opened(tree, git_trees.audit_env()))
+                    options = {"expected_common": commons[tree.resolve()]} if tree.resolve() in commons else {}
+                    views[tree] = stack.enter_context(git_view.opened(tree, git_trees.audit_env(), **options))
                 except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError):
-                    views[tree] = None
+                    views[tree] = git_view.Unviewable("git cannot read this tree")
             return views[tree]
 
         def visit(row: OwnerRow, name: str, task) -> None:
@@ -904,7 +901,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
                 for name in row.worktrees:
                     visit(row, name, task)
 
-        # Visit ownership rows even when no current task names their worktree.
+        # Visit started rows even when no current task names their worktree.
         for row in owners:
             for name in row.worktrees:
                 visit(row, name, None)
@@ -923,11 +920,14 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
                 path = _resolve(root, trees, name)[0]
                 if path is not None:
                     claims.setdefault(path, []).append(row_claim(row, tasks, roster, refs, cfg.user, tracker.sessions))
-        for source in (registry_claims(root), one_shot_claims((root / trees).resolve())):
+        for source in (registry_claims(root, registrations, process_exists),
+                       one_shot_claims((root / trees).resolve(), running_trees)):
             for path, found in source.items():
                 claims.setdefault(path, []).extend(found)
         for path in order:
-            finding = judge(names[path], git_trees.read_state(path, view_of(path)), claims.get(path, []))
+            state = git_trees.read_state(path, view_of(path))
+            state = replace(state, branch=git_trees.clean(state.branch))  # the branch reaches an audit line (#534)
+            finding = judge(names[path], state, claims.get(path, []))
             if isinstance(finding, Orphan):
                 report.orphans.append(finding)
             elif isinstance(finding, Unclaimed):
@@ -937,7 +937,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
             report.lines.append(missing_tree(handle, name, detail, view_of(handle) if handle else None))
         if order:
             # All worktrees share the same main and origin/main refs.
-            report.lines.append(_push_gap(order[0], view_of(order[0])))
+            report.lines.append(_pass_push_gap(order, view_of, names))
     report.lines.extend(group_reopens(report.reopen))
     report.lines.extend(str(o) for o in report.orphans)
     report.lines.extend(str(u) for u in report.unclaimed)
@@ -947,7 +947,6 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     report.lines.extend(queue_lines)
     report.lines.extend(str(q) for q in report.queue)
     issues = merged = ""
-    settings = load_settings(root, cfg.settings_path)
     if cfg.backlog:
         if check_issues:
             report.issues.extend(issue_faults(tasks, cfg.backlog, gh, settings.lanes,
@@ -1014,14 +1013,25 @@ def main(argv: list[str] | None = None, gh=None) -> int:
         if not SHA.fullmatch(args.sha):
             print("audit_tasks: --sha takes 7-64 lowercase hex digits", file=sys.stderr)
             return 2
-        trees = worktrees_dir((root / "CLAUDE.md").read_text())
-        asked = git_trees.sha_trees(root, trees)
+        claude_md = (root / "CLAUDE.md").read_text()
+        trees = worktrees_dir(claude_md)
+        try:
+            settings = load_settings(root, settings_path(claude_md))
+            commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
+        except (SettingsError, ValueError) as e:
+            print(f"audit_tasks: {e}", file=sys.stderr)
+            return 2
+        asked = git_trees.sha_trees(root, trees, commons)
         if not asked:
             print(f"audit_tasks: --sha found no git tree under {trees or 'the workspace root'}, so nothing was checked", file=sys.stderr)
             return 2
         answers = []
         for name, tree in asked:
-            code, line, held = git_trees.check_sha(args.sha, tree)
+            try:
+                code, line, held = git_trees.check_sha(args.sha, tree, expected_common=commons.get(tree))
+            except git_view.CacheError as e:
+                print(f"audit_tasks: {e}", file=sys.stderr)
+                return 2
             print(git_trees.clean(f"{line} [{name}]"))  # escaped: neither a name nor a remote's error can forge or split a line
             answers.append((code, held))
         code = git_trees.sha_exit(answers)
@@ -1035,7 +1045,7 @@ def main(argv: list[str] | None = None, gh=None) -> int:
         return 2
     try:
         report = audit(root, day, gh=gh, check_issues=not args.no_issues)
-    except SettingsError as e:
+    except (SettingsError, git_view.CacheError, ValueError) as e:
         print(f"audit_tasks: {e}", file=sys.stderr)
         return 2
     for line in report.lines:

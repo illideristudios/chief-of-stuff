@@ -7,6 +7,42 @@ python3 chief_of_stuff.py docs > docs/commands.md
 
 ## Engine
 
+### `engine`
+
+```text
+usage: engine.py [-h] [--root ROOT] [--interval INTERVAL] [--once]
+                 [{install,uninstall,status,ensure,ensure-background,ensure-retry,commit-handoff}]
+
+Drive one workspace's reconcile plan, under a singleton lock (1.0 M3).
+
+positional arguments:
+  {install,uninstall,status,ensure,ensure-background,ensure-retry,commit-handoff}
+                        manage the engine's LaunchAgent
+
+options:
+  -h, --help            show this help message and exit
+  --root ROOT           workspace holding store.db and CLAUDE.md
+  --interval INTERVAL   seconds between passes (default 60)
+  --once                run one pass and exit
+```
+
+### `supervisor`
+
+```text
+usage: supervisor.py [-h] [--root ROOT]
+                     {install,uninstall,status,ensure,ensure-background,ensure-retry,commit-handoff}
+
+The engine's launchd LaunchAgent and the venv it runs in, plus the LaunchAgent lifecycle
+notify_service shares.
+
+positional arguments:
+  {install,uninstall,status,ensure,ensure-background,ensure-retry,commit-handoff}
+
+options:
+  -h, --help            show this help message and exit
+  --root ROOT           workspace root the engine serves
+```
+
 ### `worktree`
 
 ```text
@@ -40,7 +76,7 @@ usage: init_workspace.py [-h] --root ROOT --user USER --timezone TIMEZONE [--dai
                          --gitlab-host GITLAB_HOST] [--gitlab-project GITLAB_PROJECT]
                          [--gitlab-token-env GITLAB_TOKEN_ENV] [--dry-run]
 
-Add a minimal chief-of-stuff Coordinator block to a workspace.
+Configure a workspace's forge, Coordinator block and engine settings.
 
 options:
   -h, --help            show this help message and exit
@@ -64,6 +100,30 @@ options:
                         GitLab group/repository
   --gitlab-token-env GITLAB_TOKEN_ENV
   --dry-run             print the new block and settings without writing
+```
+
+### `work`
+
+```text
+usage: work.py [-h] [--root ROOT] [--body BODY] [--issue ISSUE] [--answer-ask ANSWER_ASK]
+               [--answer ANSWER] [--recover] [--commit]
+               title
+
+Start work under a forge issue, filing it first when needed; preview unless --commit.
+
+positional arguments:
+  title                 title of the issue to file
+
+options:
+  -h, --help            show this help message and exit
+  --root ROOT           workspace holding CLAUDE.md and store.db
+  --body BODY           body of a new issue
+  --issue ISSUE         start under an existing issue instead of filing one
+  --answer-ask ANSWER_ASK
+                        answer this stored ask on --issue (operator action)
+  --answer ANSWER       answer to record for --answer-ask
+  --recover             explicitly acknowledge failures on --issue and permit another attempt
+  --commit              file the issue and write its store row
 ```
 
 ### `backlog`
@@ -100,8 +160,8 @@ options:
 ### `kanban`
 
 ```text
-usage: kanban.py [-h] --root ROOT [--date DATE] [--issue ISSUE] [--task TASK]
-                 [--from-stage FROM_STAGE] [--initialize] [--commit]
+usage: kanban_cli.py [-h] --root ROOT [--date DATE] [--issue ISSUE] [--task TASK]
+                     [--from-stage FROM_STAGE] [--initialize] [--commit]
 
 Preview or sync a tracked issue's Kanban stage without replacing unrelated labels.
 
@@ -118,28 +178,32 @@ options:
   --commit              apply one verified move; default is preview
 ```
 
-## Observability
-
-### `board`
+### `pipeline`
 
 ```text
-usage: render_board.py [-h] [--date DATE] [--root ROOT]
+usage: pipeline_cli.py [-h] --root ROOT (--id ID | --ref REF)
 
-Render a tracker-based daily board without opening a server or browser.
+Read a pipeline's status or branch CI from the configured forge. For GitHub branches, status is an
+aggregate of every workflow's latest run at the head; ID and URL identify the newest run, whose
+status may differ from the aggregate. GitLab branches report the latest pipeline at the head.
 
 options:
   -h, --help   show this help message and exit
-  --date DATE  YYYY-MM-DD; default: today in the workspace timezone
-  --root ROOT  workspace root holding CLAUDE.md
+  --root ROOT  workspace holding CLAUDE.md and its Backlog: line
+  --id ID      GitLab pipeline ID or GitHub Actions run ID
+  --ref REF    branch head and CI: GitHub aggregates every workflow; ID and URL identify the
+               newest run; GitLab reads the latest pipeline
 ```
+
+## Observability
 
 ### `health`
 
 ```text
 usage: probe_health.py [-h] [--config CONFIG] [--timeout TIMEOUT]
 
-Check the Settings: file and its runtimes, and probe the Health: targets in a ## Coordinator
-block.
+Check settings, runtimes and Health: targets; advise about a missing settings file (exit code
+unaffected).
 
 options:
   -h, --help         show this help message and exit
@@ -150,19 +214,96 @@ options:
 ### `pages`
 
 ```text
-usage: pages.py [-h] [--ensure] [--root ROOT] [--dir DIR] [--port PORT] [{serve}]
+usage: pages.py [-h] [--ensure] [--root ROOT] [--dir DIR] [--port PORT]
+                [{serve,supervise,install,uninstall,status}]
 
 Serve the workspace's pages locally: the board and any page a session writes beside it.
 
 positional arguments:
-  {serve}
+  {serve,supervise,install,uninstall,status}
+
+options:
+  -h, --help            show this help message and exit
+  --ensure              start the server unless it is serving; print status only
+  --root ROOT           workspace root holding CLAUDE.md (default: the current directory)
+  --dir DIR
+  --port PORT
+```
+
+### `decisions`
+
+```text
+usage: decisions_cli.py [-h] [--root ROOT] [--json]
+                        {leaves,add,reject,read,pending,judge,decide,grants,precedent} ...
+
+Coordinator, architect and owner CLI for the decision graph and history verdicts (§17, #1181).
+
+positional arguments:
+  {leaves,add,reject,read,pending,judge,decide,grants,precedent}
+    leaves              list current unreplaced decision leaves
+    add                 append a new decision leaf to the graph
+    reject              record a rejected alternative on an ancestor decision
+    read                free-reader graph traversal (coordinator, architect or owner)
+    pending             list pending worker history requests (justification text only, no history)
+    judge               judge pending worker history requests without reading history
+    decide              record an explicit coordinator verdict on a pending request
+    grants              list logged decision history grants
+    precedent           query precedent behind the coordinator's PrecedentSource seam
+
+options:
+  -h, --help            show this help message and exit
+  --root ROOT           workspace root holding store.db
+  --json                emit JSON instead of TOON
+```
+
+### `performance`
+
+```text
+usage: performance_report.py [-h] [--root ROOT] --since DATE [--until DATE] [--by {day,week}]
+                             [--raw]
+
+Print the agent performance table from the store's stage segments (architecture §9).
+
+options:
+  -h, --help       show this help message and exit
+  --root ROOT      workspace root holding store.db and CLAUDE.md
+  --since DATE     inclusive YYYY-MM-DD in the workspace zone
+  --until DATE     inclusive YYYY-MM-DD; default today in the workspace zone
+  --by {day,week}
+  --raw            JSON attempt records, preserving outcomes and individual durations
+```
+
+### `limits`
+
+```text
+usage: limits_cli.py [-h] [--root ROOT]
+
+Take and record one unbilled reading of every runtime's account limits.
 
 options:
   -h, --help   show this help message and exit
-  --ensure     start the server unless it is serving; print status only
-  --root ROOT  workspace root holding CLAUDE.md (default: the current directory)
-  --dir DIR
-  --port PORT
+  --root ROOT
+```
+
+### `architect-signals`
+
+```text
+usage: architect_signals_cli.py [-h] [--root ROOT] {pending,mark,key,body,file} ...
+
+Unassigned compliance gaps become forge issues once; the coordinator ledger never edits
+compliance.md.
+
+positional arguments:
+  {pending,mark,key,body,file}
+    pending             list unassigned open gaps not yet in the ledger
+    mark                record a gap id as acted on (does not edit compliance.md)
+    key                 print the signal key for a gap id and commit
+    body                print an issue body for a pending gap
+    file                dedupe, file and record under the coordinator's ledger lock
+
+options:
+  -h, --help            show this help message and exit
+  --root ROOT
 ```
 
 ### `docs`

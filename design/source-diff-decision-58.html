@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Source — !58</title>
+<script src="lib/86a3e9940611.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/ee8b56df405b.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/c271ee5c70f2.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/b80617d9b7e8.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fddc117a5ff1.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/1ca85659ab25.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/d8bf25eb11d0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/624ea7e85a53.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/bab9dc1971b0.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/261638ad9761.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/517fcb8cabb3.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/b34c10a1ffe0.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/43dc1b9a0c96.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/5be63e946cc5.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/dedb7e4dce28.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3df86f009f15.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/4bb93aca54b3.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/967b38372db4.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/9a9defceff14.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/f1c49bfd357d.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5c1cb227aa5a.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/1a2f3006ecc7.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/b3cedae80e66.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/071a53d2119e.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/455dfdb0f51a.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/50e2fc3909a0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/9777be10ff78.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5bf655ce1293.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/ea97db9e8f8b.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/156f0047d272.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3b1c199b3a86.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/aab9ff2ff8f0.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+<style>
+body{margin:0;font-family:"Alegreya Sans","Gill Sans",system-ui,sans-serif;background:#f4efe1;color:#2f2630}
+a{color:#8a6c30}a:hover{color:#6b5325}
+p{margin:0}
+.card{background:#fbf8ef;border:1px solid #ddd3bd;border-radius:5px}
+.cap{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6e6470}
+.chip{font-size:10px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:0 5px;white-space:nowrap}
+.seg{display:flex;border:1px solid #ddd3bd;border-radius:5px;overflow:hidden;background:#fbf8ef}
+.seg button{font:inherit;font-size:13px;color:#2f2630;background:transparent;border:0;border-left:1px solid #ddd3bd;padding:4px 12px;min-height:32px;cursor:pointer}
+.seg button:first-child{border-left:0}
+.seg button:hover{background:#efe7d3}
+.tree button{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;width:100%;text-align:left;font:inherit;color:inherit;background:transparent;border:0;border-top:1px dotted #ddd3bd;padding:7px 12px;cursor:pointer}
+.tree button:hover{background:#f4efe1}
+.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:20px}
+.ln{color:#8f8578;text-align:right;padding-right:8px;font-size:11.5px;user-select:none}
+.tx{white-space:pre;overflow:hidden;text-overflow:ellipsis}
+.tag{font-family:"Alegreya Sans",system-ui,sans-serif;font-size:10.5px;font-weight:500;border-radius:3px;padding:0 5px;margin:0 8px;line-height:16px;align-self:center;white-space:nowrap}
+.note{font-family:"Alegreya Sans",system-ui,sans-serif;font-size:13px;line-height:1.45;background:#fbf8ef;border:1px solid #ddd3bd;border-radius:5px;padding:7px 12px;margin:4px 14px 8px 100px;display:flex;flex-direction:column;gap:3px}
+</style>
+</helmet>
+
+<div style="width: 1280px; height: 1244px; box-sizing: border-box; padding: 24px 32px 22px; background: #f4efe1; color: #2f2630; display: flex; flex-direction: column; gap: 12px; overflow: hidden; font-size: 14px; line-height: 1.45;">
+
+  <div style="margin: -12px 0 -4px;"><dc-import name="Tabs" current="Decisions" parent="true" hint-size="100%,34px"></dc-import></div>
+
+  <div style="display: flex; align-items: flex-end; gap: 20px; border-bottom: 1px solid #a7843e; padding-bottom: 10px;">
+    <div style="flex-grow: 1;">
+      <div style="font-size: 12.5px; color: #6e6470;">{{crumb}} · <a href="{{backHref}}">{{backText}}</a></div>
+      <h1 style="margin: 2px 0 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 27px; font-weight: 600; letter-spacing: .04em;">{{title}}</h1>
+    </div>
+    <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 6px 12px; text-align: right;">
+      <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">compare</div>
+      <div style="font-family: ui-monospace, monospace; font-size: 15px;">{{mode.compare}}</div>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 12px;">
+    <div class="seg" role="group" aria-label="What to compare">
+      <sc-for list="{{modes}}" as="m" hint-placeholder-count="2">
+        <button type="button" aria-pressed="{{m.on}}" sc-camel-on-click="{{m.pick}}" style="{{m.style}}">{{m.label}}</button>
+      </sc-for>
+    </div>
+    <div class="seg" role="group" aria-label="Diff layout">
+      <sc-for list="{{views}}" as="v" hint-placeholder-count="2">
+        <button type="button" aria-pressed="{{v.on}}" sc-camel-on-click="{{v.pick}}" style="{{v.style}}">{{v.label}}</button>
+      </sc-for>
+    </div>
+    <span style="margin-left: auto; font-size: 12.5px; color: #6e6470;">{{mode.summary}}</span>
+  </div>
+
+  <div style="display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 12px; flex-grow: 1; min-height: 0;">
+
+    <div class="card tree" style="display: flex; flex-direction: column; overflow: hidden;">
+      <div style="display: flex; align-items: baseline; gap: 8px; padding: 8px 12px 6px;">
+        <span class="cap">files</span>
+        <span style="font-family: ui-monospace, monospace; font-size: 11.5px; color: #6e6470; margin-left: auto;">{{mode.count}}</span>
+      </div>
+      <sc-for list="{{tree}}" as="t" hint-placeholder-count="6">
+        <button type="button" sc-camel-on-click="{{t.pick}}" aria-current="{{t.current}}" style="{{t.style}}">
+          <span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; font-size: 12px;"><span style="color: #8f8578;">{{t.dir}}</span><b style="font-weight: 600;">{{t.base}}</b></span>
+          <span style="font-family: ui-monospace, monospace; font-size: 11px; white-space: nowrap;"><span style="color: #00785a;">{{t.add}}</span> <span style="color: #a3402b;">{{t.del}}</span></span>
+          <span style="display: flex; gap: 4px; flex-wrap: wrap; grid-column: 1 / -1;">
+            <sc-for list="{{t.badges}}" as="b" hint-placeholder-count="1"><span class="chip" style="{{b.style}}">{{b.t}}</span></sc-for>
+            <span style="font-size: 11px; color: #6e6470;">{{t.facts}}</span>
+          </span>
+        </button>
+      </sc-for>
+      <sc-if value="{{empty}}" hint-placeholder-val="{{ false }}">
+        <div style="border-top: 1px dotted #ddd3bd; padding: 10px 12px; font-size: 12.5px; color: #6e6470;">No files.</div>
+      </sc-if>
+      <div style="margin-top: auto; border-top: 1px solid #ddd3bd; padding: 8px 12px; display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #6e6470;">
+        <span class="cap">gutter</span>
+        <span style="display: flex; gap: 12px;"><span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 4px; height: 12px; background: #009E73;"></span>covered</span><span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 4px; height: 12px; background: #c9533a;"></span>not covered</span></span>
+        <span class="cap" style="margin-top: 4px;">tags</span>
+        <span style="display: flex; gap: 4px; flex-wrap: wrap;">
+          <sc-for list="{{tagLegend}}" as="g" hint-placeholder-count="5"><span class="tag" style="{{g.style}}">{{g.t}}</span></sc-for>
+        </span>
+      </div>
+    </div>
+
+    <div class="card" style="display: flex; flex-direction: column; min-width: 0; overflow: hidden;">
+      <sc-if value="{{hasFile}}" hint-placeholder-val="{{ true }}">
+        <div style="display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 8px 14px; border-bottom: 1px solid #ddd3bd;">
+          <b style="font-family: ui-monospace, monospace; font-size: 13px; font-weight: 600;">{{file.path}}</b>
+          <sc-for list="{{file.badges}}" as="b" hint-placeholder-count="1"><span class="chip" style="{{b.style}}">{{b.t}}</span></sc-for>
+          <span style="font-size: 12px; color: #6e6470; margin-left: auto;">{{file.metrics}}</span>
+        </div>
+        <div class="code" style="flex-grow: 1; min-height: 0; overflow: auto;">
+          <sc-for list="{{rows}}" as="r" hint-placeholder-count="30">
+            <sc-if value="{{r.isHunk}}" hint-placeholder-val="{{ false }}">
+              <div style="background: #efe7d3; color: #6e6470; padding: 2px 14px; font-size: 11.5px; border-top: 1px solid #ddd3bd; border-bottom: 1px solid #ddd3bd;">{{r.text}}</div>
+            </sc-if>
+            <sc-if value="{{r.isFold}}" hint-placeholder-val="{{ false }}">
+              <div style="color: #8f8578; padding: 2px 14px 2px 100px; font-size: 11.5px; background: repeating-linear-gradient(135deg, #f1ebdc 0 4px, #fbf8ef 4px 8px);">{{r.text}}</div>
+            </sc-if>
+            <sc-if value="{{r.isUni}}" hint-placeholder-val="{{ true }}">
+              <div style="{{r.style}}">
+                <span class="ln">{{r.o}}</span><span class="ln">{{r.n}}</span><span style="{{r.cov}}"></span><span style="{{r.signStyle}}">{{r.sign}}</span><span class="tx">{{r.text}}</span><span class="tag" style="{{r.tagStyle}}">{{r.tag}}</span>
+              </div>
+            </sc-if>
+            <sc-if value="{{r.isSplit}}" hint-placeholder-val="{{ false }}">
+              <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);">
+                <div style="{{r.l.style}}"><span class="ln">{{r.l.no}}</span><span style="{{r.l.signStyle}}">{{r.l.sign}}</span><span class="tx">{{r.l.text}}</span><span class="tag" style="{{r.l.tagStyle}}">{{r.l.tag}}</span></div>
+                <div style="{{r.r.style}}"><span class="ln">{{r.r.no}}</span><span style="{{r.r.signStyle}}">{{r.r.sign}}</span><span class="tx">{{r.r.text}}</span><span class="tag" style="{{r.r.tagStyle}}">{{r.r.tag}}</span></div>
+              </div>
+            </sc-if>
+            <sc-if value="{{r.hasNote}}" hint-placeholder-val="{{ false }}">
+              <div class="note" style="{{r.note.style}}">
+                <div style="display: flex; align-items: baseline; gap: 8px;">
+                  <span style="{{r.note.dot}}"></span>
+                  <b style="font-weight: 600;">{{r.note.head}}</b>
+                  <span style="font-size: 12px; color: #6e6470;">{{r.note.meta}}</span>
+                  <a href="{{r.note.href}}" style="margin-left: auto; font-size: 12px;">{{r.note.link}}</a>
+                </div>
+                <sc-for list="{{r.note.lines}}" as="p" hint-placeholder-count="1"><p style="{{p.style}}">{{p.t}}</p></sc-for>
+              </div>
+            </sc-if>
+          </sc-for>
+        </div>
+      </sc-if>
+      <sc-if value="{{empty}}" hint-placeholder-val="{{ false }}">
+        <div style="margin: auto; max-width: 460px; text-align: center; color: #6e6470; display: flex; flex-direction: column; gap: 6px; padding: 40px;">
+          <span style="font-family: 'Cormorant SC', Georgia, serif; font-size: 18px; letter-spacing: .08em; color: #2f2630;">NOTHING TO DIFF</span>
+          <p>{{mode.empty}}</p>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script="" data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:1244}}">
+class Component extends DCLogic {
+  renderVals() {
+    // ── data: one merge request ─────────────────────────────────────────
+    // line: [kind ' ' '+' '-', old no, new no, text, coverage 1|0|null, tag [kind, text] | null, note key | null]
+    // a plain string in a hunk is a fold ("⋯ 30 more lines")
+    var D = {
+      crumb: 'Source · !58 · decision: cache warmup · #111',
+      backHref: 'Decision.dc.html', backText: 'decision',
+      title: '!58 · Warm the cache pool',
+      notes: {
+        drift: { kind: 'drift', head: 'Import outside the rules', meta: 'cache → db.driver', link: 'architecture.md §4.2', href: '#',
+          lines: ['No rule lets cache import db.driver; connections are meant to be budgeted per service.', 'This is the edge the module graph on the decision page marks as drift.'] },
+        decision: { kind: 'decision', head: 'This line is the decision', meta: 'cache warmup · asked 01:41', link: 'open the decision', href: 'Decision.dc.html',
+          lines: ['A keeps 20 · B closes !58 · C sets 5 (warm start 400 ms).', 'Use the buttons above to see A, B and C as diffs.'] },
+        budget: { kind: 'drift', head: 'The limit the pool counts against', meta: 'not changed by !58', link: 'architecture.md §4.2', href: '#',
+          lines: ['20 idle connections is 6% of 320. No per-service cap is set yet (#111).'] }
+      },
+      modes: [
+        { key: 'all', label: 'Whole MR = A', compare: 'main@9c2e410 → a41c9e2', summary: '3 files + 1 context · +103 −16 · 1 drift import · approved, pipeline passed',
+          files: [
+            { path: 'src/cache/pool.py', add: 61, del: 0, badges: ['NEW'], facts: 'flog 22.4 · 1 drift',
+              metrics: 'new · flog 22.4 · 94% covered · 1 import outside the rules',
+              hunks: [
+                { head: '@@ -0,0 +1,61 @@', lines: [
+                  ['+', null, 1, 'import asyncio', 1],
+                  ['+', null, 2, '', null],
+                  ['+', null, 3, 'from db.driver import connect', 1, ['drift', 'drift · cache → db.driver'], 'drift'],
+                  ['+', null, 4, 'from .client import CacheClient', 1],
+                  ['+', null, 5, '', null],
+                  '⋯ 22 lines · helpers',
+                  ['+', null, 28, 'class WarmPool:', 1, ['flog', 'flog 14.1']],
+                  ['+', null, 29, '    """Holds idle connections so the first request after a deploy is warm."""', null],
+                  ['+', null, 30, '', null],
+                  ['+', null, 31, '    SIZE = 20', 1, ['decision', 'the decision'], 'decision'],
+                  ['+', null, 32, '', null],
+                  ['+', null, 33, '    def __init__(self, dsn, size=SIZE):', 1],
+                  ['+', null, 34, '        self.dsn = dsn', 1],
+                  ['+', null, 35, '        self.size = size', 1],
+                  ['+', null, 36, '        self.idle = asyncio.Queue(maxsize=size)', 1],
+                  ['+', null, 37, '', null],
+                  ['+', null, 38, '    async def warm(self):', 1],
+                  ['+', null, 39, '        for _ in range(self.size):', 1],
+                  ['+', null, 40, '            self.idle.put_nowait(await connect(self.dsn))', 1],
+                  ['+', null, 41, '', null],
+                  ['+', null, 42, '    async def acquire(self):', 1],
+                  ['+', null, 43, '        if self.idle.empty():', 0],
+                  ['+', null, 44, '            return await connect(self.dsn)', 0],
+                  ['+', null, 45, '        return self.idle.get_nowait()', 1],
+                  '⋯ 16 more lines'
+                ] }
+              ] },
+            { path: 'src/cache/client.py', add: 42, del: 8, badges: ['CHANGED'], facts: 'flog −3.5',
+              metrics: 'flog 31.0 → 27.5 · churn 9× in 30 days · 91% of changed lines covered',
+              hunks: [ { head: '@@ -1,7 +1,7 @@', lines: [
+                [' ', 1, 1, 'import time'],
+                [' ', 2, 2, ''],
+                ['-', 3, null, 'from .legacy import LegacyPool'],
+                ['+', null, 3, 'from .pool import WarmPool', 1],
+                [' ', 4, 4, ''],
+                [' ', 5, 5, 'class CacheClient:'],
+                [' ', 6, 6, '    def __init__(self, dsn):'],
+                ['-', 7, null, '        self.pool = LegacyPool(dsn)'],
+                ['+', null, 7, '        self.pool = WarmPool(dsn)', 1],
+                '⋯ 3 more hunks · +40 −6'
+              ] } ] },
+            { path: 'src/cache/legacy.py', add: 0, del: 8, badges: ['REMOVED'], facts: 'module removed',
+              metrics: 'removed · nothing else imports it',
+              hunks: [ { head: '@@ -1,8 +0,0 @@', lines: [
+                ['-', 1, null, 'from db.driver import connect'],
+                ['-', 2, null, ''],
+                ['-', 3, null, 'class LegacyPool:'],
+                ['-', 4, null, '    def __init__(self, dsn):'],
+                ['-', 5, null, '        self.dsn = dsn'],
+                ['-', 6, null, ''],
+                ['-', 7, null, '    async def acquire(self):'],
+                ['-', 8, null, '        return await connect(self.dsn)']
+              ] } ] },
+            { path: 'config/db.toml', add: 0, del: 0, badges: ['CONTEXT'], facts: 'cited by the decision',
+              metrics: 'not in !58 · pinned because the decision cites line 14',
+              hunks: [ { head: 'context · main@9c2e410', lines: [
+                [' ', 12, 12, '[database]'],
+                [' ', 13, 13, 'host = "db.internal"'],
+                [' ', 14, 14, 'max_connections = 320', null, ['budget', '20 of these held by the pool'], 'budget'],
+                [' ', 15, 15, 'timeout_s = 5']
+              ] } ] }
+          ] },
+        { key: 'c', label: 'If C', compare: 'a41c9e2 → proposed', summary: '1 line on top of !58 · warm start 400 ms · 5 connections held',
+          files: [
+            { path: 'src/cache/pool.py', add: 1, del: 1, badges: ['PROPOSED'], facts: 'option C',
+              metrics: 'what option C pushes to !58 before it merges',
+              hunks: [ { head: '@@ -31,1 +31,1 @@ class WarmPool', lines: [
+                [' ', 30, 30, ''],
+                ['-', 31, null, '    SIZE = 20'],
+                ['+', null, 31, '    SIZE = 5', null, ['option', 'option C']],
+                [' ', 32, 32, '']
+              ] } ] }
+          ] },
+        { key: 'b', label: 'If B', compare: 'close !58', summary: 'nothing merges',
+          empty: 'Option B closes !58. Nothing merges, main stays at 9c2e410, and the first request after a deploy stays at 9–14 s.',
+          files: [] },
+        { key: 'since', label: 'Since approval', compare: 'a41c9e2 → a41c9e2', summary: 'no pushes since Fri 21:40',
+          empty: 'No pushes since the approval on Fri 21:40. What was approved is what would merge.',
+          files: [] }
+      ]
+    };
+    // ── rendering ───────────────────────────────────────────────────────
+    var self = this, st = this.state || {};
+    var mode = D.modes.filter(function (m) { return m.key === (st.mode || D.modes[0].key); })[0] || D.modes[0];
+    var view = st.view || 'unified';
+    var files = mode.files;
+    var fi = Math.min(st.file || 0, Math.max(files.length - 1, 0));
+    var file = files[fi];
+    var badgeStyle = {
+      'NEW': 'border: 1.5px solid #009E73; color: #00785a; background: #e2f3ec;',
+      'CHANGED': 'border: 1.5px solid #0072B2; color: #0072B2; background: #e3eef7;',
+      'REMOVED': 'border: 1.5px dashed #D55E00; color: #D55E00; background: #fbeee6;',
+      'CONTEXT': 'border: 1.5px solid #8a8f98; color: #5f6b7b;',
+      'PROPOSED': 'border: 1.5px dotted #2c58a0; color: #2c58a0; background: #dfe8f6;'
+    };
+    var badge = function (t) { return { t: t, style: badgeStyle[t] || 'border: 1.5px dashed #c9533a; color: #a3402b;' }; };
+    var tagStyle = {
+      flog: 'color: #8a6c30; border: 1px solid #a7843e; background: #fbf8ef;',
+      flay: 'color: #574b9a; border: 1px solid #6f63b4; background: #fbf8ef;',
+      drift: 'color: #a8660f; border: 1.5px solid #E69F00; background: #fbf8ef; font-weight: 700;',
+      overlap: 'color: #a3402b; border: 1px dashed #c9533a; background: #fbf8ef;',
+      decision: 'color: #fbf8ef; background: #8a6c30;',
+      resolved: 'color: #1e6b52; border: 1px solid #009E73; background: #fbf8ef;',
+      option: 'color: #2c58a0; border: 1px dotted #2c58a0; background: #fbf8ef;',
+      budget: 'color: #a3402b; border: 1px solid #c9533a; background: #fbf8ef;'
+    };
+    var noteStyle = {
+      thread: ['border-top: 3px solid #56B4E9;', '#56B4E9'],
+      overlap: ['border: 1px dashed #c9533a; border-top: 3px solid #c9533a;', '#c9533a'],
+      decision: ['border-top: 3px solid #a7843e;', '#a7843e'],
+      drift: ['border-top: 3px solid #E69F00;', '#E69F00']
+    };
+    var bg = { '+': '#e6f2ea', '-': '#f8e7df', ' ': 'transparent' };
+    var ink = { '+': '#00785a', '-': '#a3402b', ' ': '#8f8578' };
+    var note = function (key) {
+      if (!key) return { has: false, n: { lines: [] } };
+      var n = D.notes[key], s = noteStyle[n.kind];
+      return { has: true, n: { head: n.head, meta: n.meta, link: n.link, href: n.href, style: s[0],
+        dot: 'width: 9px; height: 9px; border-radius: 50%; flex: none; align-self: center; background: ' + s[1] + ';',
+        lines: n.lines.map(function (t, i) { return { t: t, style: i ? 'color: #6e6470;' : '' }; }) } };
+    };
+    var tag = function (x) { return x && x[5] ? { t: x[5][1], s: tagStyle[x[5][0]] } : { t: '', s: 'display: none;' }; };
+    var covOf = function (x) { return x[4] === 1 ? '#009E73' : x[4] === 0 ? '#c9533a' : 'transparent'; };
+    var rows = [];
+    if (file) file.hunks.forEach(function (h) {
+      rows.push({ isHunk: true, text: h.head, note: { lines: [] } });
+      if (view === 'unified') {
+        h.lines.forEach(function (x) {
+          if (typeof x === 'string') { rows.push({ isFold: true, text: x, note: { lines: [] } }); return; }
+          var g = tag(x), nt = note(x[6]);
+          rows.push({ isUni: true, o: x[1] === null ? '' : x[1], n: x[2] === null ? '' : x[2], sign: x[0] === ' ' ? '' : x[0], text: x[3],
+            style: 'display: grid; grid-template-columns: 44px 44px 4px 18px minmax(0, 1fr) auto; background: ' + bg[x[0]] + ';',
+            cov: 'background: ' + (x[0] === '+' ? covOf(x) : 'transparent') + ';',
+            signStyle: 'text-align: center; color: ' + ink[x[0]] + ';',
+            tag: g.t, tagStyle: g.s, hasNote: nt.has, note: nt.n });
+        });
+      } else {
+        var side = function (x, which) {
+          if (!x) return { no: '', sign: '', text: '', tag: '', tagStyle: 'display: none;', signStyle: '',
+            style: 'display: grid; grid-template-columns: 40px 16px minmax(0, 1fr) auto; background: repeating-linear-gradient(135deg, #f1ebdc 0 4px, #fbf8ef 4px 8px); min-height: 20px;' };
+          var g = tag(x), no = which === 'o' ? x[1] : x[2];
+          return { no: no === null ? '' : no, sign: x[0] === ' ' ? '' : x[0], text: x[3], tag: g.t, tagStyle: g.s,
+            signStyle: 'text-align: center; color: ' + ink[x[0]] + ';',
+            style: 'display: grid; grid-template-columns: 40px 16px minmax(0, 1fr) auto; min-height: 20px; background: ' + bg[x[0]] + '; box-shadow: inset 3px 0 0 ' + (which === 'n' && x[0] === '+' ? covOf(x) : 'transparent') + (which === 'n' ? ', inset 1px 0 0 #ddd3bd' : '') + ';' };
+        };
+        var L = h.lines, i = 0;
+        while (i < L.length) {
+          var x = L[i];
+          if (typeof x === 'string') { rows.push({ isFold: true, text: x, note: { lines: [] } }); i++; continue; }
+          if (x[0] === ' ') { rows.push({ isSplit: true, l: side(x, 'o'), r: side(x, 'n'), hasNote: false, note: { lines: [] } }); i++; continue; }
+          var dels = [], adds = [];
+          while (i < L.length && typeof L[i] !== 'string' && L[i][0] === '-') dels.push(L[i++]);
+          while (i < L.length && typeof L[i] !== 'string' && L[i][0] === '+') adds.push(L[i++]);
+          for (var k = 0; k < Math.max(dels.length, adds.length); k++) {
+            var nt = note((adds[k] && adds[k][6]) || (dels[k] && dels[k][6]));
+            rows.push({ isSplit: true, l: side(dels[k], 'o'), r: side(adds[k], 'n'), hasNote: nt.has, note: nt.n });
+          }
+        }
+      }
+    });
+    var on = 'background: #2f2630; color: #fbf8ef;';
+    var addSum = 0, delSum = 0; files.forEach(function (f) { addSum += f.add; delSum += f.del; });
+    return {
+      crumb: D.crumb, backHref: D.backHref, backText: D.backText, title: D.title,
+      mode: { compare: mode.compare, summary: mode.summary, empty: mode.empty || '', count: files.length ? files.length + ' · +' + addSum + ' −' + delSum : '0' },
+      modes: D.modes.map(function (m) {
+        return { label: m.label, on: m === mode ? 'true' : 'false', style: m === mode ? on : '', pick: function () { self.setState({ mode: m.key, file: 0 }); } };
+      }),
+      views: [['unified', 'Unified'], ['split', 'Split']].map(function (v) {
+        return { label: v[1], on: view === v[0] ? 'true' : 'false', style: view === v[0] ? on : '', pick: function () { self.setState({ view: v[0] }); } };
+      }),
+      tree: files.map(function (f, i) {
+        var cut = f.path.lastIndexOf('/') + 1;
+        return { dir: f.path.slice(0, cut), base: f.path.slice(cut),
+          add: f.add ? '+' + f.add : '', del: f.del ? '−' + f.del : (f.add ? '' : 'context'),
+          badges: f.badges.map(badge), facts: f.facts, current: i === fi ? 'true' : 'false',
+          style: i === fi ? 'background: #efe7d3; box-shadow: inset 3px 0 0 #a7843e;' : '',
+          pick: function () { self.setState({ file: i }); } };
+      }),
+      hasFile: !!file, empty: !file,
+      file: file ? { path: file.path, metrics: file.metrics, badges: file.badges.map(badge) } : { path: '', metrics: '', badges: [] },
+      rows: rows,
+      tagLegend: [['flog', 'flog'], ['flay', 'flay'], ['drift', 'drift'], ['overlap', 'other MR'], ['decision', 'decision']].map(function (t) { return { t: t[1], style: tagStyle[t[0]] }; })
+    };
+  }
+}
+</script>
+
+
+</body></html>

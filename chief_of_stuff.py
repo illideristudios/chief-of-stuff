@@ -34,6 +34,9 @@ COMMAND_REGISTRY = {
     "install": (None, None),
     "start": ("start_coordinator.py", None),
     "init": ("scripts/init_workspace.py", "intake"),
+    "work": ("scripts/work.py", "intake"),
+    "engine": ("scripts/engine.py", "engine"),
+    "supervisor": ("scripts/supervisor.py", "engine"),
     "models": ("scripts/install_model_guidance.py", None),
     "worktree": ("scripts/make_worktree.py", "engine"),
     "worker": ("scripts/spawn_session.py", None),
@@ -41,25 +44,32 @@ COMMAND_REGISTRY = {
     "processes": ("scripts/process_status.py", None),
     "result": ("scripts/one_shot_result.py", None),
     "adopt": ("scripts/adopt_one_shots.py", None),
-    "board": ("scripts/render_board.py", "observability"),
+    "board": ("scripts/pages.py", None),
     "inbox": ("scripts/inbox.py", None),
     "backlog": ("scripts/backlog.py", "intake"),
-    "kanban": ("scripts/kanban.py", "forge"),
+    "kanban": ("scripts/kanban_cli.py", "forge"),
+    "pipeline": ("scripts/pipeline_cli.py", "forge"),
     "notify": ("scripts/notify_service.py", None),
     "health": ("scripts/probe_health.py", "observability"),
     "pages": ("scripts/pages.py", "observability"),
     "decision": ("scripts/decision_page.py", None),
+    "decisions": ("scripts/decisions_cli.py", "observability"),
     "log": ("scripts/tracker_write.py", None),
     "tracker": ("scripts/tracker_read.py", None),
     "merge-approved": ("scripts/merge_approved.py", None),
     "merge-ready": ("scripts/merge_ready.py", None),
+    "performance": ("scripts/performance_report.py", "observability"),
+    "limits": ("scripts/limits_cli.py", "observability"),
     "review-threads": ("scripts/review_threads.py", None),
     "sources": ("scripts/board_sources.py", None),
     "tick": ("scripts/flow.py", None),
+    "architect-signals": ("scripts/architect_signals_cli.py", "observability"),
     "docs": (None, "observability"),
 }
 # Preserve the public name-to-path lookup used by existing routing callers.
 COMMANDS = {name: script for name, (script, _) in COMMAND_REGISTRY.items() if script is not None}
+# Commands whose scripts import store (SQLAlchemy/Alembic).
+STORE_BACKED = frozenset({"adopt", "board", "decision", "decisions", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
 
 
 def command_purpose(name: str) -> str:
@@ -88,10 +98,13 @@ def top_level_help() -> str:
 
 
 def command_help(name: str) -> str:
-    """Capture the installed command's own argparse help with stable formatting."""
+    """Capture the command's own argparse help with stable formatting."""
     env = dict(os.environ, COLUMNS="100", NO_COLOR="1", PYTHON_COLORS="0", PYTHONHASHSEED="0")
+    script = COMMAND_REGISTRY[name][0]
+    # Store-backed scripts run under the current interpreter: generating docs must not build the engine venv.
+    argv = [str(SOURCE / script)] if script else [str(SOURCE / "chief_of_stuff.py"), name]
     try:
-        done = subprocess.run([sys.executable, str(SOURCE / "chief_of_stuff.py"), name, "--help"],
+        done = subprocess.run([sys.executable, *argv, "--help"],
                               env=env, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError(f"help failed for {name}: {exc}") from exc
@@ -262,7 +275,23 @@ def main(argv: list[str] | None = None) -> int:
     if not target.is_file():
         print(f"installed command is missing: {target}", file=sys.stderr)
         return 1
-    os.execv(sys.executable, [sys.executable, str(target), *args[1:]])
+    if args[0] in STORE_BACKED:
+        scripts_dir = str(SOURCE / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import subprocess
+        import shell_setup
+        import supervisor
+        try:
+            data = supervisor.data_dir()
+            with supervisor.lock(data / "supervisor.lock", wait=True):  # install holds it briefly; wait, do not refuse
+                python = str(supervisor.ensure_venv(data))
+        except (supervisor.ServiceError, shell_setup.ShellError, OSError, subprocess.SubprocessError) as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
+    else:
+        python = sys.executable
+    os.execv(python, [python, str(target), *(["--board"] if args[0] == "board" else []), *args[1:]])
     return 0
 
 

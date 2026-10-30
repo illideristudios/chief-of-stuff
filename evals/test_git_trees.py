@@ -24,6 +24,7 @@ from evals import git_taint as taint  # noqa: E402
 import tree_state  # noqa: E402
 from tree_state import TreeState, at_risk  # noqa: E402
 
+ORIGINAL_AUDIT_ENV = git_trees.audit_env
 ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null",
        "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@example.test",
        "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@example.test"}
@@ -114,6 +115,29 @@ class Repo(unittest.TestCase):
 
 
 class ReadStateTest(Repo):
+    def test_a_tree_redirected_to_another_repository_is_unreadable(self) -> None:
+        tree = self.tree("wt-a", "feat/a")
+        common = (self.clone / ".git").resolve()
+        other = self.root / "other"
+        git("clone", str(self.clone), str(other), cwd=self.root)
+        decoy = self.root / "decoy"
+        git("worktree", "add", "-b", "decoy", str(decoy), cwd=other)
+        admin = git_view.locate(decoy).gitdir
+        (admin / "gitdir").write_text(str(tree / ".git") + "\n")
+        (tree / ".git").write_text(f"gitdir: {admin}\n")
+        state = git_trees.read_state(tree, expected_common=common)
+        self.assertEqual((state.branch, state.dirty, state.off_origin, state.unpushed),
+                         (tree_state.UNREADABLE_BRANCH, None, None, None))
+        commons = git_trees.trusted_commons([self.clone])
+        self.assertEqual(commons[tree.resolve()], common)
+        self.assertEqual(git_trees.sha_trees(self.root, "trees", commons), [("wt-a", tree.resolve())])
+        sha = git("rev-parse", "HEAD", cwd=self.clone)
+        with patch.object(git_trees, "fetch_base") as fetch:
+            code, line, held = git_trees.check_sha(sha, tree, expected_common=commons[tree.resolve()])
+        self.assertEqual((code, held), (2, True))
+        self.assertIn("git could not read this repository", line)
+        fetch.assert_not_called()
+
     def test_a_fresh_branch_at_main_holds_nothing(self) -> None:
         s = git_trees.read_state(self.tree("wt-a", "feat/a"))
         self.assertEqual((s.branch, s.dirty, s.off_origin, s.unpushed), ("feat/a", 0, 0, None))
@@ -149,6 +173,31 @@ class ReadStateTest(Repo):
         t = self.tree("wt-a", "feat/a")
         git("update-ref", "-d", "refs/remotes/origin/main", cwd=self.clone)
         self.assertIsNone(git_trees.read_state(t).off_origin)
+
+    def test_cursor_channel_file_at_root_is_excluded_while_siblings_nested_and_repo_excludes_count(self) -> None:
+        t = self.tree("wt-a", "feat/a")
+        exclude = self.clone / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("/.cursor/mcp.json\n")
+        (t / ".cursor").mkdir()
+        (t / ".cursor" / "mcp.json").write_text("{}\n")
+        self.assertEqual(git_trees.read_state(t).dirty, 0)
+        exclude.write_text("/.cursor/mcp.json\nsecret.txt\n")
+        (t / "secret.txt").write_text("hidden\n")
+        (t / ".cursor" / "other.txt").write_text("sibling\n")
+        self.assertEqual(git_trees.read_state(t).dirty, 2)
+        (t / "pkg" / ".cursor").mkdir(parents=True)
+        (t / "pkg" / ".cursor" / "mcp.json").write_text("{}\n")
+        self.assertEqual(git_trees.read_state(t).dirty, 3)
+
+    def test_nested_cursor_channel_file_alone_is_counted_as_dirty(self) -> None:
+        t = self.tree("wt-a", "feat/a")
+        exclude = self.clone / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("/.cursor/mcp.json\n")
+        (t / "pkg" / ".cursor").mkdir(parents=True)
+        (t / "pkg" / ".cursor" / "mcp.json").write_text("{}\n")
+        self.assertEqual(git_trees.read_state(t).dirty, 1)
 
 
 class DiscoverTest(Repo):
@@ -280,6 +329,35 @@ class FetchBaseTest(Repo):
                 err = git_trees.fetch_base(self.clone)
                 self.assertIsInstance(err, str)
                 self.assertTrue(err.strip())
+
+    def test_a_fetch_timeout_names_the_first_attempt_and_its_bound(self) -> None:
+        for timeout in (7, 30):
+            with self.subTest(timeout=timeout), patch.object(
+                git_trees.subprocess, "run", side_effect=subprocess.TimeoutExpired(
+                    ["git", "-C", str(self.clone), "fetch"], timeout,
+                ),
+            ) as run:
+                err = git_trees.fetch_base(self.clone, timeout=timeout)
+            run.assert_called_once()
+            self.assertEqual(run.call_args.kwargs["timeout"], timeout)
+            self.assertEqual(err, f"git fetch timed out after {timeout}s (attempt 1 of 2)")
+
+    def test_a_timeout_after_a_ref_lock_names_the_second_attempt_and_its_bound(self) -> None:
+        """#804: a fast ref-lock failure then a timeout names the second call's budget and attempt, not elapsed time."""
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(kw["timeout"])
+            if len(seen) == 1:
+                return subprocess.CompletedProcess(argv, 1, "", "fatal: cannot lock ref 'refs/remotes/origin/main'")
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+
+        for timeout in (7, 30):
+            seen.clear()
+            with self.subTest(timeout=timeout), patch.object(git_trees.subprocess, "run", run):
+                err = git_trees.fetch_base(self.clone, timeout=timeout)
+            self.assertEqual(seen, [timeout, timeout])
+            self.assertEqual(err, f"git fetch timed out after {timeout}s (attempt 2 of 2)")
 
     def test_the_error_never_carries_the_exceptions_text(self) -> None:
         """#49 round 9, 5: a timeout's text repeats its command, which holds the tree's path; the error is printed."""
@@ -498,7 +576,7 @@ class CheckShaTest(Repo):
         commits sharing a 7-hex prefix cannot be made cheaply."""
         calls = []
 
-        def fake(args, cwd):
+        def fake(args, cwd, **kw):
             calls.append(args)
             if args[0] == "rev-parse" and args[1].startswith("--disambiguate="):
                 return 0, "9f3c1e7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n9f3c1e7bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -551,7 +629,7 @@ class CheckShaTest(Repo):
         off = git("rev-parse", "HEAD", cwd=tree)
         real = git_trees.git
 
-        def fake(args, cwd):
+        def fake(args, cwd, **kw):
             return (128, "fatal: boom") if args[:2] == ["merge-base", "--is-ancestor"] else real(args, cwd)
 
         for what, sha in (("on origin/main", on), ("not on it", off)):
@@ -580,8 +658,8 @@ class CheckShaTest(Repo):
         real = git_trees.git
         for what, broken in (("disambiguate", lambda a: a[0] == "rev-parse" and a[1].startswith("--disambiguate=")),
                              ("cat-file -t", lambda a: a[:2] == ["cat-file", "-t"])):
-            def fake(args, cwd, broken=broken):
-                return (128, "fatal: boom") if broken(args) else real(args, cwd)
+            def fake(args, cwd, broken=broken, **kw):
+                return (128, "fatal: boom") if broken(args) else real(args, cwd, **kw)
 
             with self.subTest(what), patch.object(git_trees, "git", fake):
                 self.assertEqual(git_trees.check_sha(sha, self.clone),
@@ -1553,7 +1631,10 @@ class AuditEnvTest(Repo):
         self.assertEqual(env, git_trees.audit_env())
 
     def test_the_audit_call_keeps_the_rest_of_its_environment(self) -> None:
-        env = self._spied_env()
+        # The module fixture substitutes a macOS Git executable for integration tests;
+        # this assertion checks the production environment, not that fixture's PATH.
+        with patch.object(git_trees, "audit_env", ORIGINAL_AUDIT_ENV):
+            env = self._spied_env()
         self.assertEqual(env["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual((env["GIT_TERMINAL_PROMPT"], env["GIT_OPTIONAL_LOCKS"]), ("0", "0"))
         self.assertEqual(env["PATH"], "/usr/bin:/bin:/usr/local/bin")
@@ -1573,7 +1654,7 @@ class AuditEnvTest(Repo):
                              (git_trees.SAFE_HOME, "/dev/null", "/dev/null", "1"))
 
     def test_audit_env_is_the_one_definition(self) -> None:
-        self.assertEqual(git_trees.audit_env(), {
+        self.assertEqual(ORIGINAL_AUDIT_ENV(), {
             "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
             "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": git_trees.SAFE_HOME,
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"})
@@ -1669,9 +1750,11 @@ class GitViewFunnelTest(unittest.TestCase):
                              (128, "unreadable: metadata is not a bounded regular file"))
 
     def test_os_and_timeout_failures_keep_their_128_and_their_text(self) -> None:
-        for exc in (OSError("no git"), subprocess.TimeoutExpired(["git"], 15)):
+        for exc in (OSError("no git"), PermissionError("cache is read-only"), subprocess.TimeoutExpired(["git"], 15)):
             with self.subTest(type(exc).__name__), patch.object(git_view, "run", side_effect=exc):
-                code, text = git_trees.git(["rev-parse", "HEAD"], self.root)
+                result = git_trees.git(["rev-parse", "HEAD"], self.root)
+                self.assertIsInstance(result, git_trees.ReadFailure)
+                code, text = result
                 self.assertEqual((code, text), (128, f"{type(exc).__name__}: {exc}"))
 
     def test_a_hung_git_inside_the_view_is_bounded_by_git_timeout(self) -> None:
@@ -1779,9 +1862,8 @@ class GitViewFunnelTest(unittest.TestCase):
         self.assertEqual([c.args[0] for c in viewed.call_args_list], list(argvs))
         self.assertEqual([c for c in calls if unsanitised(c)], [])
 
-    def test_a_home_python_cannot_find_is_an_unreadable_read_not_a_crash(self) -> None:
-        """R6: the view's default base asks for the home directory, and `Path.home()` raises `RuntimeError` when HOME is unset
-        and the uid has no passwd entry (a container run `--user`). That is one more tree git cannot be asked in."""
+    def test_a_home_python_cannot_find_is_a_cache_configuration_error(self) -> None:
+        """An unavailable launcher home must escape the per-tree unreadable handler."""
         fx = self.fixture()
         real = git_view._base
 
@@ -1791,9 +1873,8 @@ class GitViewFunnelTest(unittest.TestCase):
         with patch.dict(os.environ), patch.object(git_view, "_base", homeless), \
                 patch.object(Path, "home", side_effect=RuntimeError("Could not determine home directory.")):
             os.environ.pop("XDG_CACHE_HOME", None)
-            code, text = git_trees.git(["rev-parse", "HEAD"], fx.tree)
-        self.assertEqual(code, 128)
-        self.assertTrue(text.startswith("unreadable:"), text)
+            with self.assertRaisesRegex(git_view.CacheError, "cache"):
+                git_trees.git(["rev-parse", "HEAD"], fx.tree)
 
     def test_a_value_or_runtime_error_out_of_the_view_is_an_unreadable_read(self) -> None:
         """R6, `ValueError` (a non-UTF-8 object path written into the view on Linux; macOS refuses to create one, so this
@@ -1989,7 +2070,7 @@ class ShaViewTest(Repo):
     def test_more_than_one_commit_is_said_before_shallow(self) -> None:
         (self.clone / ".git" / "shallow").write_text(f"{self.head()}\n")
 
-        def fake(args, cwd):
+        def fake(args, cwd, **kw):
             if args[0] == "rev-parse" and args[1].startswith("--disambiguate="):
                 return 0, "9f3c1e7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n9f3c1e7bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             return (0, "commit") if args[:2] == ["cat-file", "-t"] else (0, "abc1234") if args[:2] == ["rev-parse", "--short"] else (1, "")
