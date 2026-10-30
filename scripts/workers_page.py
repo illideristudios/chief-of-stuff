@@ -260,6 +260,9 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
         need = store_need
     ended = [r for _, r in sorted(ended, key=lambda e: e[0], reverse=True)]  # by the time shown, newest first
     shots = sum(w.kind == "one-shot" for w in source_workers(sources)) + store_shots
+    if db is None and navigation is not None and "workers" in navigation:
+        # The page server resolves the tracker behind the board at /, including historical boards.
+        need = navigation["workers"]
     navigation = {**(navigation or {}), "workers": need}
     boxes = [("NEEDS INPUT", str(need), " hot" if need else ""), ("RUNNING", str(len(running)), "")]
     if cap:

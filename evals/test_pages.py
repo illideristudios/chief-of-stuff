@@ -1228,6 +1228,8 @@ class LastLookedTest(unittest.TestCase):
                 response = get(self.port, route)
                 self.assertEqual(response.status, 200)
                 self.assertIn('title="1 need input">1', nav.search(response.body.decode()).group())
+                if route == "/workers":
+                    self.assertIn('<b>1</b><span class="cap">NEEDS INPUT</span>', response.body.decode())
         render_board.write(self.root, newer, target="board")
         self.assertNotIn('title="1 need input">1', nav.search(get(self.port, "/").body.decode()).group())
         for route in ("/decisions", "/decisions/cache-ttl", "/workers", "/issues/7", "/issues/7/source"):
