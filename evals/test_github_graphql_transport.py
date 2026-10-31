@@ -24,6 +24,16 @@ TOKEN = 'test-secret-do-not-expose'
 GOOD = {'data': {'viewer': {'login': 'public-user'}, 'rateLimit': {'cost': 2}}}
 
 
+def process_gone(pid):
+    """Whether `pid` has exited or is only a zombie. Polled: a process reaped between the two probes (or no /proc)
+    reads as not gone yet, and the next kill(0) settles it."""
+    try:
+        os.kill(pid, 0)
+        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z'
+    except ProcessLookupError: return True
+    except FileNotFoundError: return False
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     def do_POST(self):
@@ -105,6 +115,21 @@ def worker(state, port, cert, work, queue):
         client = transport.GitHubGraphQL(gate, 'localhost', env=env, endpoint=f'https://localhost:{port}/api/graphql')
         queue.put(('ok', client.request(QUERY).cost))
     except Exception as exc: queue.put((type(exc).__name__, str(exc)))
+
+
+class ProcessGoneTest(unittest.TestCase):
+    def test_a_process_that_vanishes_between_the_probes_is_not_an_error(self):
+        # CI: kill(0) saw the descendant, then it was reaped before /proc/<pid>/stat was read.
+        def reaped(self, *args, **kwargs): raise FileNotFoundError(self)
+        with mock.patch.object(os, 'kill'), mock.patch.object(Path, 'read_text', reaped):
+            self.assertFalse(process_gone(1))  # not decided by this probe; the next kill(0) is
+    def test_a_live_process_is_not_gone_and_a_zombie_is(self):
+        with mock.patch.object(os, 'kill'):
+            for state, gone in (('S', False), ('Z', True)):
+                with mock.patch.object(Path, 'read_text', return_value=f'1 (x) {state} 0'):
+                    self.assertIs(process_gone(1), gone)
+        with mock.patch.object(os, 'kill', side_effect=ProcessLookupError):
+            self.assertTrue(process_gone(1))
 
 
 class TransportTest(unittest.TestCase):
@@ -300,14 +325,10 @@ class TransportTest(unittest.TestCase):
             self.assertEqual(len(outcome), 1)
             self.assertIsInstance(outcome[0], transport.TransportError)
             self.assertEqual(outcome[0].kind, 'timeout')
-            for _ in range(100):
-                try:
-                    os.kill(child, 0)
-                    stat = Path(f'/proc/{child}/stat')
-                    if stat.exists() and stat.read_text().rsplit(')', 1)[1].split()[0] == 'Z': break
-                except ProcessLookupError: break
+            deadline = time.monotonic() + 10  # a failure bound only: the exit itself is the evidence
+            while not process_gone(child):
+                self.assertLess(time.monotonic(), deadline, 'auth descendant survived')
                 time.sleep(.01)
-            else: self.fail('auth descendant survived')
             self.assertFalse(self.gate.path.exists())
         finally:
             os.close(fifo_fd)
