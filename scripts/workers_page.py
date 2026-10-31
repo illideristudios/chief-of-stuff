@@ -20,7 +20,7 @@ import board_sources
 import panels
 import session_logs
 from clock import parse_stamp
-from task_forge import EXHAUSTED_CHIP, PageData, retry_exhaustion, segment_worker_key, source_workers
+from task_forge import EXHAUSTED_CHIP, PageData, retry_exhaustion, segment_worker_key, source_workers, workers_need_input
 from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar, issue_href, href, latest_thread_link
 from md import section as _section
@@ -114,7 +114,7 @@ def _table(heads: tuple[str, ...], rows: list[list[str]]) -> str:
 
 def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[tuple[tuple, list[str]]], int]:
     """From the tracker's Log: fix-loop counts by task, ENDED TODAY rows keyed by end time, and the human-review count."""
-    task_of, fix_counts, last_stage, ended, need = {}, {}, {}, [], 0
+    task_of, fix_counts, last_stage, ended = {}, {}, {}, []
     for line in map(str.strip, _section(tracker_text, "## Log")):
         if m := STAGE.match(line):
             t, name = row_of(m[3].strip())
@@ -128,7 +128,6 @@ def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[tuple
         elif m := ENDED.match(line) or RELAUNCH.match(line):
             t, name = row_of(task_of.get(m[3], ""))
             outcome = {COMPLETED: "done", HUMAN_REVIEW: "human_review"}.get(m[4], "failed")
-            need += m[4] == HUMAN_REVIEW
             summary = (line[m.end():].removeprefix(" — ").strip() if m.re is ENDED
                        else line[m.end():].partition(" — ")[2].strip())
             ref = TRAILING_NUMBER.search(t.issue) if t else None
@@ -138,7 +137,7 @@ def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[tuple
             ended.append(((int(m[1]) * 60 + int(m[2]), 0, len(ended)),
                           [f'{_end_chip(outcome, cause)} <b>{escape(m[3])}</b>', f"{int(m[1]):02d}:{m[2]}", _task(t, name),
                            escape(summary), action]))
-    return fix_counts, ended, need
+    return fix_counts, ended, workers_need_input(tracker_text)
 
 
 def _running_row(lead: str, task: str, started: datetime, now: datetime, tree: Path | None, account: str) -> list[str]:
@@ -172,7 +171,7 @@ def _session_rows(sources: board_sources.Sources, row_of, fix_counts: dict[str, 
 
 def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now: datetime, trees: Path,
                 account: str) -> tuple[list[list[str]], list[tuple[tuple, list[str]]], int, int]:
-    """RUNNING and ENDED TODAY rows from the store's segments, the human-review count and the running one-shot count."""
+    """RUNNING and ENDED TODAY rows from the store's segments, and the running one-shot count."""
     running: list[list[str]] = []
     ended: list[tuple[tuple, list[str]]] = []
     store_shots = 0
@@ -187,13 +186,6 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
     exhausted_keys = {key for key, segs in segs_by_key.items()
                       if (item := db.item(key)) is not None and item.forge_state != "closed"
                       and retry_exhaustion(db.resume(key), segs, db.log(key))}
-    waiting_keys = set(exhausted_keys)
-    for item in db.items():
-        if item.forge_state == "closed":
-            continue
-        segs = segs_by_key.get(item.issue_key, ())
-        if getattr(item, "human_review", False) or (segs and segs[-1].outcome == "human_review"):
-            waiting_keys.add(item.issue_key)
     for seg in all_segs:
         item = db.item(seg.issue_key)
         runner = getattr(seg, "runner", "") or f"{seg.stage}-{seg.attempt}"
@@ -242,7 +234,8 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
             ended.append(((ended_dt.hour * 60 + ended_dt.minute, ended_dt.second, len(ended)),
                           [f'{_end_chip(seg.outcome)} <b>{worker_name}</b>', f"{ended_dt:%H:%M}", task_link,
                            escape(summary), action]))
-    return running, ended, len(waiting_keys), store_shots
+    return running, ended, workers_need_input(items=db.items(), segments=all_segs,
+                                                  resumes={i.issue_key: db.resume(i.issue_key) for i in db.items()}), store_shots
 
 
 def render(tracker_text: str, sources: board_sources.Sources, now: datetime, trees: Path, cap: int | None,
@@ -271,6 +264,10 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
         need = store_need
     ended = [r for _, r in sorted(ended, key=lambda e: e[0], reverse=True)]  # by the time shown, newest first
     shots = sum(w.kind == "one-shot" for w in source_workers(sources)) + store_shots
+    if db is None and navigation is not None and "workers" in navigation:
+        # The page server resolves the tracker behind the board at /, including historical boards.
+        need = navigation["workers"]
+    navigation = {**(navigation or {}), "workers": need}
     boxes = [("NEEDS INPUT", str(need), " hot" if need else ""), ("RUNNING", str(len(running)), "")]
     if cap:
         boxes.append(("SLOTS FREE", f"{max(cap - shots, 0)} of {cap}", ""))

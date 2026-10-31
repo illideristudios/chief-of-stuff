@@ -299,26 +299,32 @@ def human_answer(decisions: Sequence[Any], update: DecisionUpdate) -> Any | None
     return row if row is not None and row.decided_by == "user" and (row.answer or "").strip() else None
 
 
-def tab_counts(items, decisions, segments, resumes: dict | None = None) -> dict:
-    """Lead counts from engine rows. Tabs without a store source omit their count.
-
-    An exhausted retry with no live segment is held (#963): it is not ready to dispatch.
-    """
+def waiting_workers(items, segments, resumes: dict | None = None) -> set[str]:
+    """Current open store items needing human input, including exhausted retries."""
     from readiness import retry_exhaustion
 
     opened = {i.issue_key: i for i in items if i.forge_state != "closed"}
-    pending = [d for d in current_rows([d for d in decisions if d.issue_key in opened]) if waits_on_owner(d)]
-    held = {d.issue_key for d in pending}
     last = {s.issue_key: s for s in segments}
-    waiting = {i.issue_key for i in opened.values() if i.human_review}
+    waiting = {i.issue_key for i in opened.values() if getattr(i, "human_review", False)}
     waiting.update(key for key, seg in last.items() if key in opened and seg.outcome == "human_review")
-    held.update(waiting)
     segs_by_key: dict[str, list] = {}
     for seg in segments:
         segs_by_key.setdefault(seg.issue_key, []).append(seg)
     for key in opened:
         if retry_exhaustion((resumes or {}).get(key), segs_by_key.get(key, ())):
-            held.add(key)
             waiting.add(key)
+    return waiting
+
+
+def tab_counts(items, decisions, segments, resumes: dict | None = None) -> dict:
+    """Lead counts from engine rows. Tabs without a store source omit their count.
+
+    An exhausted retry with no live segment is held (#963): it is not ready to dispatch.
+    """
+    opened = {i.issue_key: i for i in items if i.forge_state != "closed"}
+    pending = [d for d in current_rows([d for d in decisions if d.issue_key in opened]) if waits_on_owner(d)]
+    held = {d.issue_key for d in pending}
+    waiting = waiting_workers(items, segments, resumes)
+    held.update(waiting)
     running = {s.issue_key for s in segments if s.issue_key in opened and not s.ended_at}
     return {"workers": len(waiting), "dispatch": len(opened.keys() - held - running), "decisions": len(pending)}

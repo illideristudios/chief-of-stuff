@@ -368,9 +368,18 @@ def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
 
 
 def needs_input(tracker_text: str) -> int:
-    """Today's human-review ends: the Workers page's lead count, also shown in every tab bar."""
+    """Today's human-review ends in the tracker log."""
     return sum(1 for line in section(tracker_text, "## Log")
                if (m := tracker_log.ENDED.match(line.strip())) and m[4] == tracker_log.HUMAN_REVIEW)
+
+
+def workers_need_input(tracker_text: str = "", items=None, segments=(), resumes: dict | None = None) -> int:
+    """Workers badge and tile: current store waits, or tracker review ends without a store.
+
+    Store snapshots are authoritative; tracker ends are history and must not add another wait.
+    """
+    return (needs_input(tracker_text) if items is None else
+            len(decision_actions.waiting_workers(items, segments, resumes)))
 
 
 def tab_counts(tracker_text: str, cfg, now: datetime, lanes: dict, kanban: Kanban | None,
@@ -393,7 +402,7 @@ def tab_counts(tracker_text: str, cfg, now: datetime, lanes: dict, kanban: Kanba
         est = estimates(active, cfg, now, history(tasks, cfg, now))
         ends = {t.item: end[0] for t in active
                 if (end := task_end(t, cfg, now, now, est))[1] in ("due", "derived")}
-    return {"workers": needs_input(tracker_text),
+    return {"workers": workers_need_input(tracker_text),
             "dispatch": len(ready_tasks(tracker_text, slots)),
             "since": (went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == now.date() else f"{shown:%a %H:%M}"),
             "epics": epic_risk(tasks, sources, ends, cfg.zone, now)}

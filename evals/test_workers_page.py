@@ -41,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -48,6 +49,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parent.parent / "scripts"), str(Pat
 import board_sources as bs  # noqa: E402
 import one_shot  # noqa: E402
 import pages as pg  # noqa: E402
+import task_forge  # noqa: E402
 import workers_page  # noqa: E402
 from test_pages import get  # noqa: E402
 from test_tab_bar import TABS, VOID, Node, name, parse  # noqa: E402
@@ -559,6 +561,68 @@ class OnRequestTest(unittest.TestCase):
         self.assertEqual(chips(row(ended, "impl-f6")), ["HUMAN REVIEW · timeout"])
         self.assertEqual(chips(row(ended, "impl-d4")), ["HUMAN REVIEW"])
         self.assertEqual(box(html, "NEEDS INPUT"), "2")
+
+
+def _item(key: str, *, state: str = "open", human_review: bool = False):
+    return SimpleNamespace(issue_key=key, title=key, forge_state=state, human_review=human_review)
+
+
+def _seg(key: str, outcome: str | None):
+    return SimpleNamespace(issue_key=key, outcome=outcome)
+
+
+class NeedsInputParityTest(unittest.TestCase):
+    """#898: the Workers tab badge and the NEEDS INPUT tile count the same workers."""
+
+    def test_a_crashed_open_item_flagged_for_review_counts_and_matches_the_tab(self):
+        # The latest segment ended failed (CRASHED) while the item is still human_review. The tile
+        # used to stay 0; the tab already counted the flag. A passed-in navigation must not keep them apart.
+        now = datetime(2026, 10, 25, 14, 0, tzinfo=ZONE)
+        item = _item("github:example/repo#7", human_review=True)
+        seg = SimpleNamespace(issue_key=item.issue_key, stage="implement", attempt=1,
+                              started_at="2026-10-25T18:00:00+00:00", ended_at="2026-10-25T18:30:00+00:00",
+                              outcome="failed", runtime="claude", model="opus", runner="impl-d4")
+        db = task_forge.PageData((item,), (seg,), (), (), {})
+        html = workers_page.render("", bs.EMPTY, now, Path("/tmp/no-such-trees"), None, db=db,
+                                   navigation={"workers": 0, "dispatch": 0, "decisions": 0})
+        self.assertEqual(box(html, "NEEDS INPUT"), "1")
+        self.assertIn("CRASHED", html)
+        self.assertRegex(html, r'href="/workers"[^>]*>Workers<span class="badge" title="1 need input">1</span>')
+
+    def test_main_owner_decision_counts_remain_separate_from_worker_waits(self):
+        import decision_actions
+        items = [_item("owner"), _item("automatic"), _item("blocked"), _item("worker", human_review=True)]
+        decisions = [SimpleNamespace(id=i, issue_key=key, topic="scope", question=key,
+                                     answer=answer, decided_by=by, record=record)
+                     for i, (key, by, answer, record) in enumerate((
+                         ("owner", "owner", None, {}),
+                         ("automatic", "trio", None, {}),
+                         ("blocked", "trio", "approve", {"status": "blocked"}),
+                     ), 1)]
+        counts = decision_actions.tab_counts(items, decisions, [])
+        self.assertEqual(counts, {"workers": 1, "dispatch": 1, "decisions": 2})
+        self.assertEqual(counts["workers"], task_forge.workers_need_input(items=items))
+
+    def test_missing_review_flag_defaults_to_no_wait_but_segment_review_still_counts(self):
+        summary = SimpleNamespace(issue_key="github:example/repo#7", forge_state="open")
+        self.assertEqual(task_forge.workers_need_input(items=[summary]), 0)
+        self.assertEqual(task_forge.workers_need_input(items=[summary],
+                         segments=[_seg(summary.issue_key, "human_review")]), 1)
+
+    def test_workers_need_input_is_one_count_for_the_store_and_the_log(self):
+        # Open + flag, open + latest human_review, closed excluded. The end date is not consulted, so a
+        # review that ended yesterday still counts. A store snapshot is authoritative when a tracker log also exists.
+        flag = _item("a", human_review=True)
+        latest = _item("b")
+        closed = _item("c", state="closed", human_review=True)
+        self.assertEqual(task_forge.workers_need_input("", [flag], [_seg("a", "failed")]), 1)
+        self.assertEqual(task_forge.workers_need_input("", [latest], [_seg("b", "done"), _seg("b", "human_review")]), 1)
+        self.assertEqual(task_forge.workers_need_input("", [latest], [_seg("b", "human_review"), _seg("b", "done")]), 0)
+        self.assertEqual(task_forge.workers_need_input("", [closed], [_seg("c", "human_review")]), 0)
+        log = "# T\n\n## Log\n\n- 01:00 one-shot impl-d4: HUMAN REVIEW NEEDED — stuck.\n"
+        self.assertEqual(task_forge.workers_need_input(log), 1)
+        self.assertEqual(task_forge.workers_need_input(log, [flag], [_seg("a", "failed")]), 1)
+        self.assertEqual(task_forge.workers_need_input(log, [closed], [_seg("c", "human_review")]), 0)
 
 
 if __name__ == "__main__":

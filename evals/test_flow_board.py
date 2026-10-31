@@ -796,6 +796,10 @@ class Page(unittest.TestCase):
         self.assertEqual(tiles["NEEDS INPUT"], "2")
         flags = re.findall(r'<div class="columns-tag columns-flag" data-cat="hold">([^<]*)<', html)
         self.assertEqual(flags, ["NEEDS INPUT", "NEEDS INPUT"])
+        # #898: held task counts and current worker waits can differ; the tile keeps its decisions route.
+        workers = re.search(r'href="/workers"[^>]*>Workers(?:<span class="badge"[^>]*>(\d+)</span>)?', html)
+        self.assertIsNotNone(workers)
+        self.assertNotEqual(workers.group(1) or "0", tiles["NEEDS INPUT"])
 
     def test_tasks_with_no_name_are_held_each_by_its_own_stage(self) -> None:
         # Keyed by name, every blank-named task shared one stage: one hold held them all, or none of them.
