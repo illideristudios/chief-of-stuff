@@ -66,12 +66,15 @@ def activity(tree: Path, *, account: str = "") -> tuple[datetime | None, int]:
     return last, sum(v for u in usage.values() if isinstance(u, dict) for k in USAGE if isinstance(v := u.get(k), int))
 
 
-def _end_chip(outcome: str | None) -> str:
-    """The chip for an ended segment: its stored outcome, with `failed` drawn as the crash it is."""
+def _end_chip(outcome: str | None, cause: str = "") -> str:
+    """The chip for an ended segment: its stored outcome (plus stop cause when recorded), with `failed` drawn as the crash it is."""
     if outcome == "failed":
         return '<span class="chip crashed">CRASHED</span>'
     name = outcome or "ended"
-    return f'<span class="chip {escape(name.replace("_", "-"), quote=True)}">{escape(name.replace("_", " ").upper())}</span>'
+    label = name.replace("_", " ").upper()
+    if cause:
+        label = f"{label} · {cause}"
+    return f'<span class="chip {escape(name.replace("_", "-"), quote=True)}">{escape(label)}</span>'
 
 
 def _task(t, fallback: str) -> str:
@@ -131,8 +134,9 @@ def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[tuple
             ref = TRAILING_NUMBER.search(t.issue) if t else None
             action = ("relaunch requested" if m.re is RELAUNCH else
                       f'<a class="ref" data-k="issue" href="/issues/{ref[1]}">#{ref[1]}</a>' if ref else escape(name))
+            cause = m[5] if m.re is ENDED and m[5] else ""
             ended.append(((int(m[1]) * 60 + int(m[2]), 0, len(ended)),
-                          [f'{_end_chip(outcome)} <b>{escape(m[3])}</b>', f"{int(m[1]):02d}:{m[2]}", _task(t, name),
+                          [f'{_end_chip(outcome, cause)} <b>{escape(m[3])}</b>', f"{int(m[1]):02d}:{m[2]}", _task(t, name),
                            escape(summary), action]))
     return fix_counts, ended, need
 

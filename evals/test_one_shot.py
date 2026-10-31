@@ -400,8 +400,8 @@ class CommandTest(unittest.TestCase):
 
     def test_exit_zero_without_structured_result_requires_review(self):
         with tempfile.TemporaryDirectory() as tmp:
-            status, reason, changes, counts = one_shot.worker_result(Path(tmp) / "missing.toon", 0)
-        self.assertEqual(status, "human_review")
+            status, cause, reason, changes, counts = one_shot.worker_result(Path(tmp) / "missing.toon", 0)
+        self.assertEqual((status, cause), ("human_review", "no result file"))
         self.assertIn("did not write", reason)
         self.assertEqual(changes, "")
         self.assertEqual(counts, dict.fromkeys(("passed", "failed", "skipped", "xfailed")))
@@ -410,9 +410,18 @@ class CommandTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "worker-result.toon"
             path.write_text('status: done\nreason: "costs \\$5"\nchanges: "a.py"\n')
-            status, reason, _, _ = one_shot.worker_result(path, 0)
-        self.assertEqual(status, "human_review")
-        self.assertIn("costs", reason)
+            status, cause, reason, _, _ = one_shot.worker_result(path, 0)
+            self.assertEqual((status, cause), ("human_review", "no result file"))
+            self.assertIn("costs", reason)
+            # #203 review R4: a truncated non-UTF-8 result file classifies cleanly instead of raising UnicodeDecodeError.
+            path.write_bytes(b"status: done\nreason: partial \xc3")
+            status0, cause0, reason0, changes0, counts0 = one_shot.worker_result(path, 0)
+            self.assertEqual((status0, cause0, changes0), ("human_review", "no result file", ""))
+            self.assertIn("did not write", reason0)
+            self.assertEqual(counts0, dict.fromkeys(("passed", "failed", "skipped", "xfailed")))
+            status124, cause124, reason124, _, _ = one_shot.worker_result(path, 124)
+            self.assertEqual((status124, cause124), ("human_review", "timeout"))
+            self.assertIn("exit 124", reason124)
 
     def test_a_json_result_reads_like_toon(self):
         # Some workers write the result file as JSON; the fields are the same (#154).
@@ -420,14 +429,47 @@ class CommandTest(unittest.TestCase):
             path = Path(tmp) / "worker-result.toon"
             path.write_text('{"status": "done", "reason": "fixed: the \\"cap\\"", "changes": "a.py, b.py"}\n')
             self.assertEqual(one_shot.worker_result(path, 0), (
-                "done", 'fixed: the "cap"', "a.py, b.py", dict.fromkeys(("passed", "failed", "skipped", "xfailed"))))
+                "done", "", 'fixed: the "cap"', "a.py, b.py", dict.fromkeys(("passed", "failed", "skipped", "xfailed"))))
 
     def test_toon_result_carries_observed_suite_counts(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "worker-result.toon"
             counts = {"passed": 23, "failed": 0, "skipped": 2, "xfailed": 11}
             path.write_text(toon_encode({"status": "done", "reason": "finished", "changes": "tested", **counts}))
-            self.assertEqual(one_shot.worker_result(path, 0), ("done", "finished", "tested", counts))
+            self.assertEqual(one_shot.worker_result(path, 0), ("done", "", "finished", "tested", counts))
+
+    def test_worker_result_classifies_each_stop_cause(self):
+        # #203: worker_result classifies human-review stops into worker's call, no result file, timeout, runtime exit,
+        # and returns an empty cause for done and relaunch while preserving suite counts.
+        empty_counts = dict.fromkeys(("passed", "failed", "skipped", "xfailed"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "worker-result.toon"
+            missing = Path(tmp) / "missing.toon"
+            # Timeout (exit 124) without a result file.
+            status, cause, reason, changes, counts = one_shot.worker_result(missing, 124)
+            self.assertEqual((status, cause, changes, counts), ("human_review", "timeout", "", empty_counts))
+            self.assertIn("exit 124", reason)
+            # Non-zero runtime exit without a result file.
+            status, cause, reason, changes, counts = one_shot.worker_result(missing, 3)
+            self.assertEqual((status, cause, changes, counts), ("human_review", "runtime exit", "", empty_counts))
+            self.assertIn("exit 3", reason)
+            # Valid human_review at exit 0 is the worker's call and keeps the worker's stated reason.
+            path.write_text("status: human_review\nreason: requirement conflicts with test\nchanges: none\n")
+            self.assertEqual(one_shot.worker_result(path, 0),
+                             ("human_review", "worker's call", "requirement conflicts with test", "none", empty_counts))
+            # Valid result with non-zero exit is a runtime exit and keeps the worker's reason.
+            path.write_text("status: done\nreason: finished work\nchanges: a.py\n")
+            self.assertEqual(one_shot.worker_result(path, 1),
+                             ("human_review", "runtime exit", "worker exited 1: finished work", "a.py", empty_counts))
+            # Valid relaunch at exit 0 has an empty cause.
+            path.write_text("status: relaunch\nreason: base moved\nchanges: none\n")
+            self.assertEqual(one_shot.worker_result(path, 0),
+                             ("relaunch", "", "base moved", "none", empty_counts))
+            # Incomplete result at exit 0 is no result file.
+            path.write_text("status: done\nreason: missing changes\n")
+            status, cause, reason, _, counts = one_shot.worker_result(path, 0)
+            self.assertEqual((status, cause, counts), ("human_review", "no result file", empty_counts))
+            self.assertIn("exit 0", reason)
 
 
 class CodexAddDirArgsTest(unittest.TestCase):
@@ -831,7 +873,8 @@ class RunTest(unittest.TestCase):
                                           runtime="codex", agent_type=None, model="", effort="", dry_run=False), 1)
         copy = self.root / dispatch_prompt.REPORTS_DIR / "worker.toon"
         report = toon_decode(copy.read_text())
-        self.assertEqual((report["status"], report["task"], report["runtime_exit"]), ("human_review", "Security audit", exit_code))
+        self.assertEqual((report["status"], report["cause"], report["task"], report["runtime_exit"]),
+                         ("human_review", "timeout" if timeout else "runtime exit", "Security audit", exit_code))
         self.assertEqual(sorted(p.name for p in copy.parent.iterdir()), ["worker.toon"], "a temporary file was left beside the copy")
 
     def test_a_worker_that_cannot_start_still_leaves_a_report_copy(self):
@@ -867,14 +910,16 @@ class RunTest(unittest.TestCase):
         self.assertEqual(trees, [self.tree, self.tree], "the run did not relaunch into its own tree")
         self.assertEqual(waits, [2 * 60], "the second run did not get a doubled timeout")
         self.assertIn("timed out after 1 minute", self.tracker.read_text())
+        self.assertNotIn("HUMAN REVIEW NEEDED", self.tracker.read_text())
         report = toon_decode((self.root / dispatch_prompt.REPORTS_DIR / "worker.toon").read_text())
-        self.assertEqual(report["status"], "done")
+        self.assertEqual((report["status"], report["cause"]), ("done", ""))
         self.assertIn("finished on the second run", report["reason"])
 
     def test_a_second_timed_out_run_is_held_for_review(self):
         # #110: a run that times out twice holds for review, its Log marker written exactly once.
         self.copy_of_a_run_that_never_got_a_result(124, str(self._fake(None)), timeout=True)
         self.assertEqual(sum("timed out after" in line for line in self.tracker.read_text().splitlines()), 1)
+        self.assertIn("HUMAN REVIEW NEEDED (timeout)", self.tracker.read_text())
 
     def test_a_launch_with_no_reports_folder_leaves_this_runs_copy_there(self):
         reports = self.root / dispatch_prompt.REPORTS_DIR
@@ -1155,9 +1200,10 @@ class RunTest(unittest.TestCase):
         again = self._another_tree("worker-2")
         self._stopped(stderr=self.AGY, runtime="agy", tree=again)
         report = self._report(again)
-        self.assertEqual((report["status"], report["reason"]),
-                         ("human_review", "quota stop repeated: agy m-test; Resets in 3h46m46s."))
+        self.assertEqual((report["status"], report["cause"], report["reason"]),
+                         ("human_review", "runtime exit", "quota stop repeated: agy m-test; Resets in 3h46m46s."))
         tracker = self.tracker.read_text()
+        self.assertIn("HUMAN REVIEW NEEDED (runtime exit)", tracker)
         self.assertIn("3h46m46s. Changes:", tracker)  # the HUMAN REVIEW line: one period before `Changes:`
         self.assertNotIn("3h46m46s..", tracker)
 
@@ -1175,9 +1221,9 @@ class RunTest(unittest.TestCase):
         again = self._another_tree("worker-2")
         self.assertEqual(self._stopped(tree=again)[0], 1)
         report = self._report(again)
-        self.assertEqual((report["status"], report["reason"]),
-                         ("human_review", "quota stop repeated: codex m-test; resets in about four hours"))
-        self.assertIn("HUMAN REVIEW NEEDED", self.tracker.read_text())
+        self.assertEqual((report["status"], report["cause"], report["reason"]),
+                         ("human_review", "runtime exit", "quota stop repeated: codex m-test; resets in about four hours"))
+        self.assertIn("HUMAN REVIEW NEEDED (runtime exit)", self.tracker.read_text())
 
     def test_a_repeated_quota_stop_without_reset_text_names_only_the_runtime_and_model(self):
         stderr = "429: You exceeded your current Quota.\n"
@@ -1231,7 +1277,9 @@ class RunTest(unittest.TestCase):
         self.assertNotIn("Security audit — quota stop:", tracker)
         again = self._another_tree("worker-2")
         self._stopped(stderr="", result=forged, exit_code=0, tree=again)
-        self.assertEqual(self._report(again)["status"], "human_review")
+        self.assertEqual((self._report(again)["status"], self._report(again)["cause"]),
+                         ("human_review", "launcher check"))
+        self.assertIn("HUMAN REVIEW NEEDED (launcher check)", self.tracker.read_text())
         self.assertIn("already relaunched once", self.tracker.read_text())
 
     def _stop_status(self, stderr: str, n: int) -> dict:
@@ -1863,9 +1911,12 @@ class RunTest(unittest.TestCase):
         hold.assert_called_once()
         self.assertEqual(hold.call_args.args[0].number, 7)
         body = comment.call_args.args[2]
+        self.assertEqual(body.splitlines()[0],
+                         "Human review needed — worker's call. One-shot worker worker01 stopped.")
         self.assertIn("unclear policy", body)
         self.assertIn("changed parser", body)
         self.assertIn("partial.txt", body)
+        self.assertIn("HUMAN REVIEW NEEDED (worker's call)", self.tracker.read_text())
         self.assertIn("| Security audit | Security audit | Robin | waiting |", self.tracker.read_text())
 
     def _commented_with(self, backlog_line: str, issue: str):
@@ -2782,6 +2833,155 @@ class ConcurrentLaunchTest(unittest.TestCase):
             self.assertEqual(p.exitcode, 0, f"claim {p.pid} exited {p.exitcode}")
         outcomes = [f.read_text() for f in self.out.iterdir()]
         self.assertEqual((outcomes.count("in"), outcomes.count("refused")), (cap, claimants - cap), outcomes)
+
+
+class CauseTest(unittest.TestCase):
+    """#203: `reconcile` classifies every human-review stop into its cause on the report, Log line, and issue comment."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.enterContext(private_git_views(self.root / "private-views"))
+        (self.root / "CLAUDE.md").write_text(
+            CLAUDE + "- Settings: `chief-of-stuff.toml`\n"
+            "- Backlog: GitHub issues; repo https://github.com/team/repo (private)\n")
+        (self.root / "chief-of-stuff.toml").write_text(
+            '[kanban]\nstages = ["00 - PLAN", "03 - BUILD"]\n'
+            'human_review_label = "!! - HUMAN REVIEW REQUIRED"\n'
+            '[kanban.map]\nimplement = 1\n')
+        (self.root / "daily").mkdir()
+        self.tracker = self.root / "daily/2026-09-18-tracker.md"
+        self.tree = self.root / "trees/worker"
+        self.tree.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(self.tree)], check=True)
+        (self.tree / ".gitignore").write_text(".chief-of-stuff/\n")
+        git_env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.test",
+                   "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.test"}
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.tree, env=git_env, check=True)
+        subprocess.run(["git", "commit", "-qm", "initial"], cwd=self.tree, env=git_env, check=True)
+        self.before = one_shot.git_head(self.tree)
+
+    def _reset_tracker(self, log_extra: str = "", owner: str = "worker01", state: str = "running 09:00") -> None:
+        self.tracker.write_text(
+            "## Tasks\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            f"| Security audit | Security audit | {owner} | {state} | 09:00 | | M | build | implement | #7 | Inspect |\n"
+            "\n## Log\n\n- 09:00 opened\n" + log_extra)
+
+    def _reconcile(self, result: str | None, exit_code: int = 0, *, dirty: bool = False, require_green: bool = False,
+                   stderr: str = "", log_extra: str = "", owner: str = "worker01", state: str = "running 09:00",
+                   runtime: str = "codex", model: str = "m-test") -> tuple[dict, mock.MagicMock]:
+        self._reset_tracker(log_extra=log_extra, owner=owner, state=state)
+        toml = (
+            '[kanban]\nstages = ["00 - PLAN", "03 - BUILD"]\n'
+            'human_review_label = "!! - HUMAN REVIEW REQUIRED"\n'
+            '[kanban.map]\nimplement = 1\n'
+        )
+        if require_green:
+            toml += "[workers]\nrequire_green_tests = true\n"
+        (self.root / "chief-of-stuff.toml").write_text(toml)
+        private = self.tree / ".chief-of-stuff"
+        shutil.rmtree(private, ignore_errors=True)
+        private.mkdir(parents=True)
+        (private / ".gitignore").write_text("*\n")
+        partial = self.tree / "partial.txt"
+        if dirty:
+            partial.write_text("uncommitted work\n")
+        elif partial.exists():
+            partial.unlink()
+        if stderr:
+            (private / "worker-stderr.log").write_text(stderr)
+        if result is not None:
+            (self.tree / one_shot.RESULT).write_text(result)
+        with mock.patch.object(one_shot.forge, "add_human_hold", return_value=""), \
+             mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
+            report = one_shot.reconcile(self.root, "2026-09-18", "Security audit", "worker01", self.tree, exit_code,
+                                        self.before, runtime=runtime, model=model)
+        return report, comment
+
+    def _assert_review_cause(self, report: dict, comment: mock.MagicMock, cause: str) -> None:
+        self.assertEqual((report["status"], report["cause"]), ("human_review", cause))
+        self.assertIn(f"HUMAN REVIEW NEEDED ({cause})", self.tracker.read_text())
+        comment.assert_called_once()
+        body = comment.call_args.args[2]
+        self.assertEqual(body.splitlines()[0],
+                         f"Human review needed — {cause}. One-shot worker worker01 stopped.")
+
+    def test_each_human_review_class_is_recorded_in_report_log_and_comment(self):
+        # 1. worker's call (preserves suite-count evidence on the report)
+        report, comment = self._reconcile(
+            "status: human_review\nreason: conflicting requirement\nchanges: none\npassed: 9\nfailed: 0\nskipped: 1\nxfailed: 0\n", 0)
+        self._assert_review_cause(report, comment, "worker's call")
+        self.assertEqual(report["reason"], "conflicting requirement")
+        self.assertEqual((report["passed"], report["failed"], report["skipped"], report["xfailed"]), (9, 0, 1, 0))
+        # 2. no result file
+        report, comment = self._reconcile(None, 0)
+        self._assert_review_cause(report, comment, "no result file")
+        self.assertIn("exit 0", report["reason"])
+        # 3. timeout
+        report, comment = self._reconcile(None, 124)
+        self._assert_review_cause(report, comment, "timeout")
+        self.assertIn("exit 124", report["reason"])
+        # 4. runtime exit
+        report, comment = self._reconcile(None, 3)
+        self._assert_review_cause(report, comment, "runtime exit")
+        self.assertIn("exit 3", report["reason"])
+        # 5. launcher check: done with dirty tree
+        report, comment = self._reconcile("status: done\nreason: complete\nchanges: none\n", 0, dirty=True)
+        self._assert_review_cause(report, comment, "launcher check")
+        self.assertIn("worktree is not clean", report["reason"])
+        # launcher check: suite gate hold preserves suite counts and records launcher check
+        report, comment = self._reconcile(
+            "status: done\nreason: complete\nchanges: tested\npassed: 4\nfailed: 1\nskipped: 0\nxfailed: 0\n",
+            0, require_green=True)
+        self._assert_review_cause(report, comment, "launcher check")
+        self.assertIn("suite is not green", report["reason"])
+        self.assertEqual((report["passed"], report["failed"]), (4, 1))
+        # launcher check: relaunch with changes
+        report, comment = self._reconcile("status: relaunch\nreason: base moved\nchanges: none\n", 0, dirty=True)
+        self._assert_review_cause(report, comment, "launcher check")
+        self.assertIn("asked to be relaunched but left changes", report["reason"])
+        # launcher check: second relaunch today
+        earlier = "- 08:30 one-shot worker00: relaunch requested for Security audit — worker: base moved.\n"
+        report, comment = self._reconcile("status: relaunch\nreason: base moved again\nchanges: none\n", 0,
+                                          log_extra=earlier)
+        self._assert_review_cause(report, comment, "launcher check")
+        self.assertIn("already relaunched once", report["reason"])
+
+    def test_dirty_tree_whose_worker_asked_for_review_stays_workers_call(self):
+        report, comment = self._reconcile("status: human_review\nreason: blocked on creds\nchanges: none\n", 0,
+                                          dirty=True)
+        self._assert_review_cause(report, comment, "worker's call")
+        self.assertEqual(report["reason"], "blocked on creds")
+
+    def test_done_relaunch_and_quota_stops_record_expected_causes(self):
+        # done -> ""
+        report, comment = self._reconcile("status: done\nreason: finished\nchanges: none\n", 0)
+        self.assertEqual((report["status"], report["cause"]), ("done", ""))
+        comment.assert_not_called()
+        # relaunch -> ""
+        report, comment = self._reconcile("status: relaunch\nreason: base moved\nchanges: none\n", 0)
+        self.assertEqual((report["status"], report["cause"]), ("relaunch", ""))
+        comment.assert_not_called()
+        # first quota stop -> promoted to relaunch, cause cleared to ""
+        quota = "Error: code 429 RESOURCE_EXHAUSTED: individual quota reached, resets in 4h\n"
+        report, comment = self._reconcile(None, 3, stderr=quota)
+        self.assertEqual((report["status"], report["cause"]), ("relaunch", ""))
+        comment.assert_not_called()
+        # repeated quota stop -> restores kept cause ("runtime exit" for exit 3)
+        earlier_quota = "- 08:30 one-shot worker00: relaunch requested for Security audit — quota stop: codex m-test; resets in 4h.\n"
+        report, comment = self._reconcile(None, 3, stderr=quota, log_extra=earlier_quota)
+        self._assert_review_cause(report, comment, "runtime exit")
+        self.assertTrue(report["reason"].startswith("quota stop repeated: codex m-test"))
+
+    def test_row_changed_during_run_records_launcher_check_cause(self):
+        report, comment = self._reconcile("status: done\nreason: finished\nchanges: none\n", 0,
+                                          owner="someone-else", state="running 09:00")
+        self.assertEqual((report["status"], report["cause"]), ("human_review", "launcher check"))
+        self.assertTrue(any(e.startswith(dispatch_prompt.TRACKER_ERROR) for e in report["errors"]))
+        comment.assert_not_called()
 
 
 if __name__ == "__main__":

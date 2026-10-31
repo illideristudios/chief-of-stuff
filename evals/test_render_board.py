@@ -2097,6 +2097,69 @@ class LaneColumnsTest(unittest.TestCase):
         self.assertNotRegex(html, r'href="[^"]*workflow')
         self.assertNotIn("#workflow", html)
 
+    def test_a_held_card_names_its_review_cause_when_present_and_plain_needs_input_otherwise(self) -> None:
+        # #203: a card waiting on the user at a non-gate stage carries `NEEDS INPUT · <cause>` when its latest Log move
+        # is a classified human-review stop, and plain `NEEDS INPUT` when class-less or without a review end.
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        tracker = (
+            "# Tracker 2026-09-16\n\nCoordinator: coordinator. Board: board-7.\n\n## Tasks\n\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Cut the release | Cut the release branch | Robin | waiting | 10:30 | 23:00 | M | build | implement | #9 | Checklist: cut |\n"
+            "| Write README | Write eval README | Robin | waiting | 09:00 | 17:00 | S | build | implement | #10 | Checklist: readme |\n"
+            "\n## Log\n\n"
+            "- 09:00 stage: Cut the release → implement\n"
+            "- 09:15 one-shot impl-1 started: codex, worktree `trees/cut`, task Cut the release branch\n"
+            "- 09:45 one-shot impl-1: HUMAN REVIEW NEEDED (worker's call) — conflicting test. Changes: none.\n"
+            "- 10:00 one-shot impl-2 started: codex, worktree `trees/readme`, task Write eval README\n"
+            "- 10:20 one-shot impl-2: HUMAN REVIEW NEEDED — old class-less line. Changes: none.\n"
+        )
+        def card_for(page: str, title: str) -> str:
+            flow = page.split('<section id="flow">')[1].split('</figure></section>')[0]
+            matches = [part for part in flow.split('<div class="columns-card')[1:] if f">{title}<" in part]
+            self.assertEqual(len(matches), 1, (title, flow))
+            return matches[0]
+
+        html = rb.render(tracker, cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        cut_card = card_for(html, "Cut the release")
+        readme_card = card_for(html, "Write README")
+        self.assertIn(">NEEDS INPUT · worker&#x27;s call<", cut_card)
+        self.assertNotIn("columns-chip", cut_card)
+        self.assertIn(">NEEDS INPUT<", readme_card)
+        self.assertNotIn("NEEDS INPUT ·", readme_card)
+        self.assertNotIn("columns-chip", readme_card)
+        # A later stage move using the task's short name clears the review cause even when the launch used the longer item.
+        cleared = rb.render(tracker + "- 10:30 stage: Cut the release → implement\n",
+                            cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        self.assertIn(">NEEDS INPUT<", card_for(cleared, "Cut the release"))
+        self.assertNotIn("NEEDS INPUT ·", card_for(cleared, "Cut the release"))
+        self.assertIn(">NEEDS INPUT<", card_for(cleared, "Write README"))
+
+    def test_short_name_beats_later_tasks_item_when_resolving_log_moves(self) -> None:
+        # #203 review R3: a task's short `name` must not be shadowed in Log resolution by a later row's `item`.
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        base_tracker = (
+            "# Tracker 2026-09-16\n\nCoordinator: coordinator. Board: board-7.\n\n## Tasks\n\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Foo | Long item A | Robin | waiting | 10:30 | 23:00 | M | build | implement | #9 | Checklist: a |\n"
+            "| Bar | Foo | Robin | waiting | 09:00 | 17:00 | S | build | implement | #10 | Checklist: b |\n"
+            "\n## Log\n\n"
+            "- 09:15 one-shot impl-1 started: codex, worktree `trees/foo`, task Long item A\n"
+            "- 09:45 one-shot impl-1: HUMAN REVIEW NEEDED (worker's call) — conflicting test. Changes: none.\n"
+        )
+        before = rb.render(base_tracker, cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        before_flow = before.split('<section id="flow">')[1].split('</figure></section>')[0]
+        before_foo = [part for part in before_flow.split('<div class="columns-card')[1:] if ">Foo<" in part]
+        self.assertEqual(len(before_foo), 1, before_flow)
+        self.assertIn(">NEEDS INPUT · worker&#x27;s call<", before_foo[0])
+        after = rb.render(base_tracker + "- 10:30 stage: Foo → implement\n", cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        after_flow = after.split('<section id="flow">')[1].split('</figure></section>')[0]
+        after_foo = [part for part in after_flow.split('<div class="columns-card')[1:] if ">Foo<" in part]
+        self.assertEqual(len(after_foo), 1, after_flow)
+        self.assertIn(">NEEDS INPUT<", after_foo[0])
+        self.assertNotIn("NEEDS INPUT ·", after_foo[0])
+
 
 class WorkflowTokenTest(unittest.TestCase):
     """#366 review R15: the token is tracker-row vocabulary, so `Task` answers it once and audit_tasks, dispatch_prompt,

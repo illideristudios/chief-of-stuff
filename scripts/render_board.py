@@ -192,7 +192,8 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                   held: dict[Task, str] | None = None, loops: set[Task] | frozenset[Task] = frozenset(),
                   live_keys: frozenset[str] = frozenset(), live_tasks: set[Task] | frozenset[Task] = frozenset(),
                   ambiguous_numbers: set[int] | None = None,
-                  threads: dict[str, str] | None = None, moves: list | None = None) -> list[columns.Column]:
+                  threads: dict[str, str] | None = None, moves: list | None = None,
+                  causes: dict[Task, str] | None = None) -> list[columns.Column]:
     """The Build board: a card at the stage Flow keeps, with done cards only in main.
     Task cards sort by issue number. Sources add each card's changes
     and marks, and a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
@@ -244,6 +245,8 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                  + ((columns.Mark("looping", "looping"),) if task in loops and not finished else ())
                  + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ()))
         owner = task.shown_owner
+        cause = (causes or {}).get(task)
+        flag = columns.Mark(f"NEEDS INPUT · {cause}" if cause else "NEEDS INPUT", "hold") if task in held else None
         live = task.issue in live_keys or task in live_tasks
         if live and task.kind == "done":
             marks += (columns.Mark("running", "running"),)
@@ -251,12 +254,12 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
             chip, kind = "running", "running"
         elif held.get(task) == EXHAUSTED_CHIP:
             chip, kind = EXHAUSTED_CHIP, "waiting"
-        elif task.kind == "waiting" and task in held:
-            chip, kind = "needs input", task.kind
+        elif task.kind == "waiting" and flag is not None:
+            chip, kind = flag.text.casefold(), task.kind
         else:
             chip, kind = task.state, task.kind
         return columns.Card(task.label, kind, refs, owner, chip, marks,
-                            flag=columns.Mark("NEEDS INPUT", "hold") if task in held else None,
+                            flag=flag,
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
 
@@ -432,8 +435,26 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
     ambiguous_numbers = ambiguous_issue_numbers(known, sources.home)
     threads = _worker_threads(db) if db is not None else {}
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    by_issue = {issue_key(t.issue, sources.home): t for t in tasks if t.issue.strip() and not t.workflow}
+    resolved = []
+    for t in known:
+        has_issue = bool(t.issue.strip() and not t.workflow)
+        key = issue_key(t.issue, sources.home) if has_issue else ""
+        target = t if t in tasks else (by_issue.get(key) if has_issue else None)
+        if target is None and t.name.strip():
+            named = by_name.get(t.name.strip().casefold())
+            if named is not None and not (has_issue and named.issue.strip() and not named.workflow
+                                          and issue_key(named.issue, sources.home) != key):
+                target = named
+        if target is not None:
+            resolved.append((t, target))
+    find = {**{t.item.strip().casefold(): target for t, target in resolved if t.item.strip()},
+            **{t.name.strip().casefold(): target for t, target in resolved if t.name.strip()}}
+    causes = tracker_log.review_causes(flow_moves, lambda name: find.get(name.strip().casefold()))
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops, live_keys,
-                               source_worker_tasks(sources, tasks), ambiguous_numbers, threads, moves=flow_moves)
+                               source_worker_tasks(sources, tasks), ambiguous_numbers, threads, moves=flow_moves,
+                               causes=causes)
     inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols, inline=inline, linked_inline=lambda text: markdown_inline(text, links=False))}'

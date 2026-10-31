@@ -69,29 +69,32 @@ def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type:
     return [argv[0], *lead, *argv[1:], *flags, *tail, prompt]
 
 
-def worker_result(path: Path, exit_code: int) -> tuple[str, str, str, dict[str, int | None]]:
-    """Return (status, reason, changes, counts); never infer success from the CLI exit code or free-form final response."""
+def worker_result(path: Path, exit_code: int) -> tuple[str, str, str, str, dict[str, int | None]]:
+    """Return (status, cause, reason, changes, counts); never infer success from the CLI exit code or free-form final response.
+    Exit 124 is the launcher's timeout code (`_launch`); a runtime exiting 124 on its own is indistinguishable here."""
+    bad = "timeout" if exit_code == 124 else "runtime exit" if exit_code else "no result file"
     counts = dict.fromkeys(dispatch_prompt.SUITE_KEYS)
     try:
-        raw = path.read_text()
-    except OSError as exc:
-        return "human_review", f"worker did not write a valid TOON result ({exc}); exit {exit_code}", "", counts
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return "human_review", bad, f"worker did not write a valid TOON result ({exc}); exit {exit_code}", "", counts
     try:
         data = toon_decode(raw)
     except (ToonDecodeError, ValueError, TypeError) as exc:
         try:  # some workers write JSON instead of TOON (#154); same fields either way
             data = json.loads(raw)
         except ValueError:
-            return "human_review", f"worker wrote an unreadable TOON result ({exc}); exit {exit_code}: {_brief(raw)}", "", counts
+            return "human_review", bad, f"worker wrote an unreadable TOON result ({exc}); exit {exit_code}: {_brief(raw)}", "", counts
     if isinstance(data, dict):
         counts = dispatch_prompt.suite_counts(data)
     if not isinstance(data, dict) or data.get("status") not in ("done", "human_review", "relaunch") or any(
         not isinstance(data.get(k), str) or not data[k].strip() for k in ("reason", "changes")
     ):
-        return "human_review", f"worker result is incomplete or invalid; exit {exit_code}", "", counts
+        return "human_review", bad, f"worker result is incomplete or invalid; exit {exit_code}", "", counts
     if exit_code:
-        return "human_review", f"worker exited {exit_code}: {data['reason']}", data["changes"], counts
-    return data["status"], data["reason"], data["changes"], counts
+        return "human_review", bad, f"worker exited {exit_code}: {data['reason']}", data["changes"], counts
+    cause = "worker's call" if data["status"] == "human_review" else ""
+    return data["status"], cause, data["reason"], data["changes"], counts
 
 
 QUOTA_STOP = "quota stop: "
@@ -266,7 +269,7 @@ def record_launch(path: Path, task: str, name: str, tree: str, runtime: str, mod
 
 
 def update_tracker(path: Path, task: str, name: str, owner: str, status: str, reason: str, changes: str,
-                   at: str, hold_error: str = "", carried: bool = False) -> None:
+                   at: str, hold_error: str = "", carried: bool = False, cause: str = "") -> None:
     """Set the dispatched row to waiting, or back to ready on a relaunch, and append a durable local result note.
 
     A row the midnight rollover carried over starts open under the worker (#576), not running. A failed
@@ -287,7 +290,7 @@ def update_tracker(path: Path, task: str, name: str, owner: str, status: str, re
             note = relaunch_line(at, name, task, _brief(reason))
         else:
             lines[i] = _set_owner_state(lines[i], running, f"| {owner} | waiting |", why)
-            note = ended_line(at, name, status, _brief(reason), _brief(changes))
+            note = ended_line(at, name, status, _brief(reason), _brief(changes), cause=cause)
         text = tracker_write.append_log("".join(lines), note, create=True)
         if hold_error:
             text = tracker_write.append_log(text, hold_failed_line(at, name, task, hold_error))
@@ -337,7 +340,8 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     if expected_common is None:
         commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
         expected_common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
-    status, reason, changes, counts = worker_result(cwd / RESULT, exit_code)
+    status, cause, reason, changes, counts = worker_result(cwd / RESULT, exit_code)
+    kept = cause
     suite = "Suite: " + ", ".join(f"{key}={value if value is not None else 'missing or invalid'}"
                                   for key, value in counts.items())
     actual = changed_files(cwd, expected_common=expected_common)
@@ -353,17 +357,17 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         carried = launch != end and _launch_row_running(launch, task, name)
         path = end
     if status == "done" and actual:
-        status = "human_review"
+        status, cause = "human_review", "launcher check"
         reason = f"worker reported completion but the worktree is not clean: {actual}"
     # Git/worktree violations take precedence over the suite gate.
     if status == "done" and suite_holds(counts, require_green=settings.workers.require_green_tests):
-        status, reason = "human_review", f"suite is not green; {suite}; worker said: {reason}"
+        status, cause, reason = "human_review", "launcher check", f"suite is not green; {suite}; worker said: {reason}"
     quota = ""
     if status == "human_review" and not changes and not actual and commits == NO_COMMITS:
         # No valid result from an unchanged tree: a quota stop returns it to ready rather than holding it (#422).
         quota = quota_stop(cwd / dispatch_prompt.PROMPT_DIR / "worker-stderr.log", runtime, model)
         if quota:
-            status, reason = "relaunch", quota
+            status, cause, reason = "relaunch", "", quota
     if status == "relaunch":
         # A relaunch is for a run that changed nothing, once: anything else is someone's to look at.
         # A quota relaunch does not spend that limit; it has its own, once per task and runtime+model a day (#422).
@@ -372,13 +376,13 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         if not quota and _brief(reason).startswith(QUOTA_STOP):  # as the Log folds it, so padding cannot dodge it
             reason = f"worker: {reason}"  # the launcher's marker is the launcher's alone
         if actual or commits != NO_COMMITS:
-            status, reason = "human_review", f"worker asked to be relaunched but left changes: {reason}"
+            status, cause, reason = "human_review", "launcher check", f"worker asked to be relaunched but left changes: {reason}"
         elif quota:
             mine = re.escape(quota_marker(runtime, model))  # then the line goes on with `;` and a snippet, or ends with `.`
             if any(marker in line and re.match(mine + r"(?:;|\.?$)", line.split(marker, 1)[1]) for line in log):
-                status, reason = "human_review", f"quota stop repeated: {quota[len(QUOTA_STOP):]}"
+                status, cause, reason = "human_review", kept, f"quota stop repeated: {quota[len(QUOTA_STOP):]}"
         elif any(marker in line and not line.split(marker, 1)[1].startswith(QUOTA_STOP) for line in log):
-            status, reason = "human_review", f"already relaunched once today and stopped again: {reason}"
+            status, cause, reason = "human_review", "launcher check", f"already relaunched once today and stopped again: {reason}"
     # Keep launcher evidence ahead of worker prose and reserve room for each part.
     evidence = (f"{suite}\nCommits from this run:\n{commits[:FIELD_MAX // 4]}" +
                 (f"\nWorking tree:\n{actual[:FIELD_MAX // 4]}" if actual else "\nWorking tree clean") + "\n")
@@ -392,7 +396,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     if row is None or row.owner.strip().lower() != name.lower() or (
             # The rollover twin is the same row, open (#576); any other drift from running is a changed row.
             row.kind != "running" and not (carried and row.kind == "open")):
-        report = {"status": "human_review", "task": task, "worker": name, "runtime_exit": exit_code,
+        report = {"status": "human_review", "cause": "launcher check", "task": task, "worker": name, "runtime_exit": exit_code,
                   "reason": "task row changed during the one-shot run; reconcile it manually",
                   "changes": summary, **counts,
                   "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
@@ -415,16 +419,16 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 cfg.backlog.sibling(ref.repo)
                 if isinstance(cfg.backlog, backlog.Backlog) else None)
         if home is not None:
-            body = f"One-shot worker {name} needs human review.\n\nWhy: {reason}\n\nChanges made:\n{summary}"
+            body = f"Human review needed — {cause}. One-shot worker {name} stopped.\n\nWhy: {reason}\n\nChanges made:\n{summary}"
             commented = backlog.comment(home, ref.number, body, commit=True)
             if not commented.done:
                 errors.append(f"issue comment: {commented.error}")
     try:
         update_tracker(path, task, name, cfg.user, status, reason, log_summary,
-                       tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open")
+                       tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open", cause=cause)
     except (OSError, ValueError) as exc:
         errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
-    report = {"status": status, "task": task, "worker": name, "runtime_exit": exit_code,
+    report = {"status": status, "cause": cause, "task": task, "worker": name, "runtime_exit": exit_code,
               "reason": reason, "changes": summary, **counts, "errors": errors}
     return write_report(root, cwd, report)
 
