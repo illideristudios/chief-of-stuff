@@ -90,8 +90,8 @@ class CommandHelpTest(unittest.TestCase):
     def test_every_routed_command_is_grouped_or_hidden_and_store_backed_ones_exist(self):
         visible = {name for name, (_, group) in cli.COMMAND_REGISTRY.items() if group}
         self.assertEqual(visible, {"init", "work", "engine", "supervisor", "worktree", "backlog", "kanban",
-                                   "pipeline", "health", "pages", "decisions", "performance", "limits",
-                                   "architect-signals", "docs"})
+                               "pipeline", "merge-order", "health", "pages", "decisions", "performance", "limits",
+                               "architect-signals", "docs"})
         self.assertLessEqual(cli.STORE_BACKED, set(cli.COMMANDS))
 
     def test_retiring_commands_are_routable_but_not_discoverable(self):

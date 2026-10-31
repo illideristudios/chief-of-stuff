@@ -314,6 +314,75 @@ CARD_COLOURS = {**columns.PALETTE, "merged today": columns.PALETTE["done"],
                 "looping": ("var(--surface)", "var(--stage-fix)", "1px solid var(--stage-fix)")}
 
 
+MERGE_SHOWN = 5
+
+
+def merge_order_page(sources: board_sources.Sources) -> str:
+    """HTML for the `/merge-order` route (file merge-order.html): same `merge_order.report` text as the CLI (#75)."""
+    import html as html_lib
+    import merge_order as merge_order_cmd
+
+    github = isinstance(sources.home, board_sources.backlog.GitHubBacklog) if sources.home is not None else True
+    mark = "#" if github else "!"
+    changes = []
+    for c in sources.changes.values():
+        if c.state != "open" or c.draft:
+            continue
+        m = TRAILING_NUMBER.search(c.ref)
+        if not m:
+            continue
+        changes.append(merge_order_cmd.Change(int(m[1]), c.title, c.url, c.head or "", c.base or "main",
+                                              frozenset(c.files), complete=True))
+    # Board cache has no trial-merge results; overlapping pairs stay unverified so the shared
+    # order still prefers disjoint changes, matching a command run that could not trial.
+    text = merge_order_cmd.report(changes, {}, mark)
+    body = html_lib.escape(text) if text else "No open changes."
+    return (
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<title>Merge order</title></head>"
+        f"<body><h1>Merge order</h1><pre>{body}</pre>"
+        "<p>Same report as <code>chief-of-stuff merge-order</code>. "
+        "Trial merges run in the command; this page uses the board's cached changes.</p>"
+        "</body></html>\n"
+    )
+
+
+def write_merge_order(root: Path, pages_dir: Path) -> Path:
+    """Render `merge-order.html`; the page server calls this for `/merge-order` (#75)."""
+    cfg = read_config(root)
+    sources = board_sources.for_home(board_sources.load(pages_dir), cfg.backlog)
+    out = pages_dir / "merge-order.html"
+    write_if_changed(out, merge_order_page(sources))
+    return out
+
+
+def merge_order(sources: board_sources.Sources) -> panels.Panel:
+    """Open changes in the order to merge them: approved first, then in review; within each, a passed pipeline
+    first, then those sharing no file with another open change (#75's least-conflict order, by file overlap)."""
+    # `chief-of-stuff merge-order` offers pairwise trial merges; this panel keeps its filename-overlap ranking.
+    open_ = [c for c in sources.changes.values() if c.state == "open"]
+    shared = {c.ref: sorted({o.ref for o in open_ if o is not c and set(o.files) & set(c.files)}) for c in open_}
+    overlap = {c.ref: len({f for o in open_ if o is not c for f in set(o.files) & set(c.files)}) for c in open_}
+
+    def number(c: board_sources.Change) -> int:
+        m = TRAILING_NUMBER.search(c.ref)
+        return int(m[1]) if m else 0
+
+    ready = sorted((c for c in open_ if not c.draft),
+                   key=lambda c: (not c.approved, c.pipeline != "passed", bool(shared[c.ref]), number(c)))
+    rows = tuple(panels.Row(c.title, " · ".join([
+        "approved" if c.approved else "in review",
+        *([f"pipeline {c.pipeline}"] if c.pipeline else []),
+        *([f"base {c.base}"] if c.base else []),
+        f"shares {_plural(overlap[c.ref], 'file')} with {', '.join(shared[c.ref])}" if shared[c.ref] else "no shared files",
+    ]), num=str(i), ref=c.ref, href=c.url) for i, c in enumerate(ready, 1))
+    approved = sum(c.approved for c in ready)
+    rest = len(rows) - MERGE_SHOWN
+    return panels.Panel("merge", "MERGE ORDER", "merge", len(rows), rows[:MERGE_SHOWN],
+                        f"{approved} approved · {len(rows) - approved} in review",
+                        foot=f"+ {rest} more" if rest > 0 else "", href="/merge-order")
+
+
 def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: int, drift: int, orphaned: int,
                *, actual_running: int | None = None) -> list[panels.Tile]:
     """Six counts in the artboard's order and words, each linking to where its items are listed. ALL counts every
@@ -664,6 +733,8 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
                   looked=looked, look_log=look_log, loop_log=sorted(loop_log), db=db,
                   engine_status=read_engine_status(root))
     write_if_changed(out, page)
+    # #75: automatic merge-order page beside the board; served only as `/merge-order`.
+    write_merge_order(root, out.parent)
     return out, cfg, now, tracker_text, req_texts
 
 

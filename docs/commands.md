@@ -289,6 +289,21 @@ options:
                newest run; GitLab reads the latest pipeline
 ```
 
+### `merge-order`
+
+```text
+usage: merge_order.py [-h] --root ROOT [--repo REPO]
+
+Propose a least-conflict order for open changes using pairwise trial merges.
+
+options:
+  -h, --help   show this help message and exit
+  --root ROOT  workspace holding CLAUDE.md and the git checkout
+  --repo REPO  owner/name or group/name; default the backlog's
+
+Pairwise clean results do not guarantee a clean sequential merge.
+```
+
 ## Observability
 
 ### `health`
