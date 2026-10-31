@@ -116,6 +116,46 @@ class FakeForge:
 
 
 class EngineTest(unittest.TestCase):
+    def test_recovery_read_failure_is_isolated_to_its_issue(self):
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        def gather(db, key, **kwargs):
+            if key == KEY:
+                raise OSError("unreadable recovery")
+            return None
+        with mock.patch.object(engine.engine_facts, "recovery_candidates", side_effect=gather):
+            self.run_pass(clone=self.root)
+        self.assertEqual([row[0] for row in self.launched], [OTHER])
+        self.assertIn("recovery read failed: unreadable recovery", " ".join(row.message for row in self.db.log(KEY)))
+
+    def test_recovery_does_not_consult_or_hold_when_stall_and_failure_spend_the_issue_budget(self):
+        self.db.upsert_item(KEY, stage="implement")
+        t1 = (NOW - timedelta(minutes=2)).isoformat()
+        t2 = (NOW - timedelta(minutes=1)).isoformat()
+        self.db.record_segment(KEY, "implement", 1, t1, t1, "stalled", model="model-1")
+        self.db.record_segment(KEY, "implement", 2, t2, t2, "failed", model="model-2")
+        self.db.set_resume(KEY, {"recovery": {"stage": "implement", "candidates": [
+            {"path": "/trees/a", "branch": "work/issue-1-implement-1", "head": "a", "readable": True,
+             "quarantined": False, "merge_in_progress": False},
+            {"path": "/trees/b", "branch": "work/issue-1-implement-2", "head": "b", "readable": True,
+             "quarantined": False, "merge_in_progress": False},
+        ]}})
+        model = mock.Mock()
+        actions = self.run_pass(model=model)
+        model.assert_not_called()
+        self.assertEqual(actions, [reconcile.Escalate(KEY, "park: two failures on this issue", "implement")])
+        self.assertEqual(self.db.decisions(KEY), [])
+
+    def test_recovery_candidates_skip_an_active_stall_stop(self):
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        self.db.set_resume(KEY, {"stall_recovery": {"stage": "implement", "attempt": 1, "phase": "stopping"},
+                                 "runs": {"implement-1": {"pid": 123, "runner_pid": 124, "session_id": "s1",
+                                                          "run_dir": str(self.root / "missing")}}})
+        with mock.patch.object(engine.engine_facts.process_status, "identity",
+                               side_effect=AssertionError("stopping stall owns liveness")):
+            self.assertIsNone(engine.engine_facts.recovery_candidates(
+                self.db, KEY, trees=self.trees, clone=self.root, root=self.root))
+
     def test_legacy_suite_hold_becomes_a_failed_attempt_for_automatic_retry(self):
         self.db.upsert_item(KEY, stage="implement", human_review=True)
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "human_review")
@@ -571,7 +611,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(len(waits), 1)
         self.assertIn("compare: permission denied", waits[0])
 
-    def test_terminal_failed_exit_replaces_its_live_claim_but_keeps_other_live_owners(self):
+    def test_terminal_failed_exit_preserves_recoverable_work_without_a_hold(self):
         self.p.workflows["standard"] = policy.Workflow("standard", "implement")
         self.run_pass()
         segment = self.db.segments(KEY)[0]
@@ -582,7 +622,7 @@ class EngineTest(unittest.TestCase):
                  mock.patch.object(engine, "_close_segment") as close:
                 engine._finish_worker(self.forge, self.db, segment,
                                       "failed", "exit 1", NOW, policies=self.p, facts=facts)
-                self.assertEqual(close.call_args.args[7], not bool(others))
+                self.assertFalse(close.call_args.args[7])
 
     def assert_unconfirmed_merge_keeps_review_stage(self, outcome, message, *, merge_pending=False):
         self.run_pass()
@@ -956,7 +996,7 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(self.db.items()[0].human_review)
         self.assertEqual(len(self.launched), 1)
 
-    def test_a_failed_adapter_exit_with_unlanded_changes_requires_a_hold(self):
+    def test_a_failed_adapter_exit_with_unlanded_changes_retries_without_a_hold(self):
         self.run_pass()
         run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
         run.mkdir(parents=True)
@@ -966,8 +1006,8 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 2, None), False, NOW)), \
              mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]):
             self.run_pass()
-        self.assertTrue(self.db.items()[0].human_review)
-        self.assertEqual(len(self.launched), 1)
+        self.assertFalse(self.db.items()[0].human_review)
+        self.assertEqual(len(self.launched), 2)
 
     def test_failed_completion_hold_write_keeps_the_segment_open(self):
         self.run_pass()
