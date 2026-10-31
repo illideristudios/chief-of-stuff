@@ -21,6 +21,8 @@ import chief_of_stuff as cli  # noqa: E402
 import claude_adapter  # noqa: E402
 import performance_report  # noqa: E402
 import probe_health  # noqa: E402
+import backlog  # noqa: E402
+import pipeline_cli  # noqa: E402
 import shell_setup  # noqa: E402
 import supervisor  # noqa: E402
 
@@ -36,7 +38,7 @@ def _help_sections(help_text: str) -> dict[str, str]:
 
 
 # A per-command help issue opts in here after bringing its parser up to the standard.
-ENFORCED = frozenset({"docs", "health", "pages", "performance"})
+ENFORCED = frozenset({"backlog", "docs", "health", "pages", "performance", "pipeline"})
 
 
 def missing_sections(help_text: str, name: str) -> list[str]:
@@ -801,6 +803,170 @@ class HealthHelpTest(unittest.TestCase):
             tokens = shlex.split(example)
             self.assertEqual(tokens[:2], ["chief-of-stuff", "health"])
             parser.parse_args(tokens[2:])
+
+
+class BacklogHelpTest(unittest.TestCase):
+    """#844: `chief-of-stuff backlog --help` is the reference an agent discovers and trusts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+
+    def run_backlog(self, *args, env=None):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "backlog", *args],
+            cwd=self.cwd, env=env, capture_output=True, text=True,
+        )
+
+    def test_missing_sections_checks_shared_standard(self):
+        complete = (
+            "usage: chief-of-stuff sample [-h]\n\nDo the sample operation.\n\n"
+            "options:\n  -h, --help  show this help message and exit\n\n"
+            "When not to use:\n  Use another operation for other work.\n\n"
+            "Output:\n  A sample on stdout.\n\nExit codes:\n  0: success; 2: usage error.\n\n"
+            "Side effects:\n  None.\n\nExamples:\n  chief-of-stuff sample --help\n"
+        )
+        self.assertEqual(missing_sections(complete, "sample"), [])
+        for section in cli.HELP_SECTIONS[1:]:
+            with self.subTest(section=section):
+                heading = section.lower() if section == "Options" else section
+                deficient = re.sub(rf"(?m)^{heading}:\n(?:  .+\n)+", "", complete)
+                self.assertIn(section, missing_sections(deficient, "sample"))
+                empty = re.sub(rf"(?m)(^{heading}:\n)(?:  .+\n)+", r"\1", complete)
+                self.assertIn(section, missing_sections(empty, "sample"))
+        self.assertIn("Purpose", missing_sections(complete.replace("Do the sample operation.", ""), "sample"))
+        self.assertIn(
+            "usage must name the installed command",
+            missing_sections(complete.replace("usage: chief-of-stuff sample", "usage: sample.py"), "sample"),
+        )
+        self.assertIn(
+            "Examples must invoke the installed command",
+            missing_sections(complete.replace("  chief-of-stuff sample --help", "  sample.py --help"), "sample"),
+        )
+
+    def test_backlog_help_meets_shared_standard_and_covers_backlog_contract(self):
+        self.assertIn("backlog", ENFORCED)
+        done = self.run_backlog("--help")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(list(self.cwd.iterdir()), [])
+        self.assertEqual(missing_sections(done.stdout, "backlog"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = backlog.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = backlog.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        not_for = " ".join(sections["when not to use"].split())
+        for alt in ("work", "kanban", "pipeline", "tracker", "log", "board", "pages"):
+            self.assertIn(alt, cli.COMMANDS)
+            self.assertIn(f"chief-of-stuff {alt}", not_for)
+
+        output = " ".join(sections["output"].split())
+        for fact in ("Plain text", "not TOON", "not JSON", "stdout", "stderr", "backlog:", "unknown",
+                     "never", "0 open", "empty backlog", "nothing was written: add --commit to make these real"):
+            self.assertIn(fact, output, fact)
+
+        codes = " ".join(sections["exit codes"].split())
+        for fact in ("0", "1", "2", "usage"):
+            self.assertIn(fact, codes, fact)
+
+        effects = " ".join(sections["side effects"].split())
+        for fact in ("--commit", "--parent", "--blocked-by", "GitHub", "GitLab",
+                     "CHIEF_OF_STUFF_GITLAB_TOKEN", "Keychain", "glab", "preview",
+                     "store.db", "acme-co/ledger-demo", "https://gitlab.example.test"):
+            self.assertIn(fact, effects, fact)
+
+        examples = [line.strip() for line in sections["examples"].splitlines()
+                    if line.strip().startswith("chief-of-stuff backlog")]
+        self.assertEqual(len(examples), 3, examples)
+        for example in examples:
+            tokens = shlex.split(example)
+            self.assertEqual(tokens[:2], ["chief-of-stuff", "backlog"])
+            parser.parse_args(tokens[2:])
+        examples_text = "\n".join(examples)
+        for fact in ("--list", "--state all", "--create", "Add retry to the invoice export",
+                     "--parent 12", "--blocked-by 7", "--commit"):
+            self.assertIn(fact, examples_text, fact)
+
+    def test_documented_exit_codes_for_missing_config_and_unknown_read(self):
+        missing = self.run_backlog("--config", str(self.cwd / "missing.md"))
+        self.assertEqual(missing.returncode, 2)
+        self.assertEqual(missing.stdout, "")
+        self.assertIn("no config at", missing.stderr)
+
+        cfg = self.cwd / "CLAUDE.md"
+        cfg.write_text("# Workspace\n\n## Coordinator\n\n- Backlog: GitHub issues; repo acme-co/ledger-demo\n")
+        stub = self.cwd / "fake-gh"
+        stub.write_text(f"#!{sys.executable}\nimport sys\nsys.stderr.write('HTTP 503: service unavailable\\n')\nsys.exit(1)\n")
+        stub.chmod(0o755)
+        env = dict(os.environ, CHIEF_OF_STUFF_GH=str(stub))
+        failed = self.run_backlog("--config", str(cfg), "--list", env=env)
+        self.assertEqual(failed.returncode, 1)
+        self.assertEqual(failed.stdout, "")
+        self.assertIn("backlog: unknown", failed.stderr)
+        self.assertNotIn("0 open", failed.stderr)
+
+
+class PipelineHelpTest(unittest.TestCase):
+    """#845: `chief-of-stuff pipeline --help` is the reference an agent discovers and trusts."""
+
+    def run_pipeline(self, *args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "pipeline", *args],
+            capture_output=True, text=True,
+        )
+
+    def test_pipeline_help_meets_shared_standard_and_covers_pipeline_contract(self):
+        self.assertIn("pipeline", ENFORCED)
+        done = self.run_pipeline("--help")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(missing_sections(done.stdout, "pipeline"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = pipeline_cli.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = pipeline_cli.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            if action.option_strings:
+                self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        help_text = " ".join(done.stdout.split())
+        for phrase in ("--id", "--ref", "aggregate", "every workflow", "ID and URL", "latest", "merge-ready"):
+            self.assertIn(phrase, help_text, phrase)
+        self.assertTrue("status: none" in help_text or ("null" in help_text and "none" in help_text))
+
+        # One mutually exclusive selector is required: neither option is required "with" the other.
+        selectors = {action.option_strings[0]: action.help for action in parser._actions
+                     if action.option_strings and action.option_strings[0] in ("--id", "--ref")}
+        for flag, text in selectors.items():
+            self.assertIn("exactly one of --id or --ref is required", text, flag)
+            self.assertNotIn("required with", text, flag)
+
+        examples = [line.strip() for line in sections["examples"].splitlines()
+                    if line.strip().startswith("chief-of-stuff pipeline")]
+        self.assertEqual(len(examples), 3, examples)
+        for example in examples:
+            tokens = shlex.split(example)
+            self.assertEqual(tokens[:2], ["chief-of-stuff", "pipeline"])
+            args = parser.parse_args(tokens[2:])
+            self.assertTrue((args.id is None) != (args.ref is None), example)
 
 
 if __name__ == "__main__":

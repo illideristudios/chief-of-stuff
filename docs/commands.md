@@ -129,30 +129,131 @@ options:
 ### `backlog`
 
 ```text
-usage: backlog.py [-h] [--config CONFIG] [--list] [--state {opened,closed,all}] [--labels LABELS]
-                  [--timeout TIMEOUT] [--create TITLE] [--body BODY] [--parent PARENT]
-                  [--blocked-by IID] [--close ISSUE] [--comment IID] [--view N] [--comments]
-                  [--commit]
+usage: chief-of-stuff backlog [-h] [--config CONFIG] [--list] [--state {opened,closed,all}]
+                              [--labels LABELS] [--timeout TIMEOUT] [--create TITLE] [--body BODY]
+                              [--parent PARENT] [--blocked-by IID] [--close ISSUE] [--comment IID]
+                              [--view N] [--comments] [--commit]
 
-Read the GitLab or GitHub backlog named in a ## Coordinator block.
+Read and write the configured GitHub or GitLab backlog.
+
+Use it to count, list, view, create, comment on, or close issues in the forge named by the
+Backlog: line of a workspace's ## Coordinator block.
 
 options:
-  -h, --help            show this help message and exit
-  --config CONFIG       workspace CLAUDE.md holding the block
-  --list                one line per issue instead of a count
+  -h, --help            flag, default: off. Print this help text on stdout and exit 0.
+  --config CONFIG       path, default: CLAUDE.md. Workspace markdown file holding the ##
+                        Coordinator block.
+  --list                flag, default: off. Print one line per issue instead of open and closed
+                        counts.
   --state {opened,closed,all}
-                        which issues
-  --labels LABELS       comma-separated labels to narrow the ask
-  --timeout TIMEOUT     seconds per request
-  --create TITLE        file one issue
-  --body BODY           the issue body, or the comment's text
-  --parent PARENT       GitHub parent issue number for --create
-  --blocked-by IID      GitHub blocker issue number for --create; repeat for multiple blockers
-  --close ISSUE         close one issue: N, #N, or a reference in the Backlog
-  --comment IID         comment on one issue
-  --view N              print one issue's title, state, body and labels (#63)
-  --comments            with --view, add the issue's comments in order
-  --commit              actually write. Without it every write is printed and not made.
+                        choice (opened, closed, all), default: opened. Which issues --list
+                        returns; ignored by counts and writes.
+  --labels LABELS       comma-separated string, default: "" (none). Narrow --list to issues with
+                        every label, or attach labels on --create.
+  --timeout TIMEOUT     float seconds, default: 5.0. Per-request timeout for GitLab API calls
+                        (GitHub gh calls use 60s).
+  --create TITLE        string TITLE, default: none. File one issue with TITLE (and --body,
+                        --labels, --parent, --blocked-by). Previews unless --commit.
+  --body BODY           string, default: "". Issue description for --create or note text for
+                        --comment.
+  --parent PARENT       int issue number, default: none. GitHub parent issue number for --create;
+                        refused on GitLab (exit 1).
+  --blocked-by IID      repeatable int IID, default: [] (none). GitHub blocker issue number for
+                        --create; repeat for multiple blockers; refused on GitLab (exit 1).
+  --close ISSUE         issue reference (N, #N, owner/repo#N, or URL in this backlog), default:
+                        none. Close one issue; previews unless --commit.
+  --comment IID         int IID, default: none. Post --body as a comment on issue IID (positive
+                        integer); previews unless --commit.
+  --view N              int N, default: none. Print issue N's title, state, body, and labels
+                        (#63). Do not combine with write flags.
+  --comments            flag, default: off. With --view, append the issue's non-system comments in
+                        chronological order.
+  --commit              flag, default: off. Execute the write on the forge; without it every write
+                        is previewed and not made.
+
+When not to use:
+  To start engine work under a new or existing issue and record its store row,
+  use chief-of-stuff work.
+  To preview or sync a tracked issue's Kanban stage or Project status, use
+  chief-of-stuff kanban.
+  To read forge pipeline status or branch CI, use chief-of-stuff pipeline.
+  To read or write daily tracker rows, use chief-of-stuff tracker or
+  chief-of-stuff log.
+  To render or serve the HTML workspace board, use chief-of-stuff board or
+  chief-of-stuff pages.
+
+Output:
+  Plain text only (not TOON and not JSON); there are no structured record fields.
+  - Default count mode (no --list, --view, or write flags) prints one line on
+    stdout: "backlog: OPEN open, CLOSED closed" when both counts succeed, or
+    "backlog: unknown — REASON" on stdout when a count fails.
+  - --list prints one "#IID TITLE [LABEL, ...]" line per matching issue on
+    stdout (the bracketed label list is omitted when an issue has no labels).
+    A failed or truncated list prints "backlog: unknown — REASON" on stderr
+    and leaves stdout empty.
+  - --view N prints "#N TITLE [LABEL, ...]", then "state: opened|closed", then
+    the issue body on stdout. With --comments, each non-system comment follows
+    in chronological order as "CREATED_AT AUTHOR: BODY". A failed view or
+    comment read prints "backlog: unknown — REASON" on stderr and leaves stdout
+    empty.
+  - Write flags (--create, --close, --comment) print one line per write on
+    stdout: "would create: TITLE", "would close: #IID", or
+    "would comment: #IID" in preview mode; "created #IID: TITLE",
+    "closed #IID", or "commented on #IID" when --commit succeeds; or
+    "ACTION failed: TARGET — REASON" when a write fails. When --commit is
+    omitted, stderr also prints
+    "nothing was written: add --commit to make these real".
+  - An unknown result is never an empty backlog and never prints "0 open".
+  - Usage and configuration faults print to stderr and leave stdout empty.
+
+Exit codes:
+  0  Read succeeded, write preview succeeded (without --commit), or committed
+     write (--commit) succeeded.
+  1  Forge read or write failed, including a missing gh binary or GitLab token,
+     HTTP or network failure, non-JSON response, truncated backlog or comment
+     list (5000 or more GitHub issues, or more than 50 GitLab pages of 100
+     items), or --parent / --blocked-by used against a GitLab backlog.
+  2  usage fault or configuration fault, including an invalid CLI flag or
+     argument type, a missing --config file, an absent or malformed Backlog:
+     line in ## Coordinator, or --close / --view naming an issue outside the
+     configured backlog.
+
+Side effects:
+  - Reads the markdown file at --config (default CLAUDE.md) and parses the
+    Backlog: line in its ## Coordinator section:
+    - GitHub: "- Backlog: GitHub issues; repo acme-co/ledger-demo" (or a full
+      https://github.com/acme-co/ledger-demo URL). Invokes gh (or the absolute
+      executable path in $CHIEF_OF_STUFF_GH) using gh authentication.
+    - GitLab: "- Backlog: GitLab; host https://gitlab.example.test; project
+      acme-co/ledger-demo; token env CHIEF_OF_STUFF_GITLAB_TOKEN". Reads the
+      token from the named environment variable (default
+      CHIEF_OF_STUFF_GITLAB_TOKEN), then macOS Keychain (account
+      "chief-of-stuff", service "gitlab-HOST"), then "glab config get token
+      --host HOST". Never accepts a token flag or a literal token in CLAUDE.md.
+  - Preview by default: --create, --close, and --comment are dry-run previews
+    unless --commit is passed. Without --commit, no issue, comment, state
+    change, or label is written on the forge. A GitHub preview makes no gh
+    call (so it does not check labels, --parent, or --blocked-by, and the
+    preview line does not echo --parent or --blocked-by). A GitLab --create
+    preview checks for a token and, when --labels is set, reads existing
+    project labels without creating any.
+  - With --commit, writes go to the forge only:
+    - --create on GitLab creates any missing labels from --labels first (POST
+      /api/v4/projects/PROJECT/labels, color #428bca) before creating the
+      issue. On GitHub, --create passes --label, --parent, and --blocked-by to
+      "gh issue create" (missing labels fail in gh).
+    - --parent and --blocked-by attach native GitHub issue relationships on
+      --create; GitLab refuses them with exit 1 in both preview and --commit
+      modes.
+    - --close closes the issue on the forge; --comment posts a note on the
+      issue.
+  - Writes no local files, never opens or modifies store.db or daily trackers,
+    and starts or stops no services or workers.
+
+Examples:
+  chief-of-stuff backlog --list --state all --labels defect,export
+  chief-of-stuff backlog --create "Add retry to the invoice export" --parent 12 --blocked-by 7
+  chief-of-stuff backlog --create "Add retry to the invoice export" --body "Retry once on HTTP 502." --labels defect --parent 12 --blocked-by 7 --commit
 ```
 
 ## Forge
@@ -181,18 +282,82 @@ options:
 ### `pipeline`
 
 ```text
-usage: pipeline_cli.py [-h] --root ROOT (--id ID | --ref REF)
+usage: chief-of-stuff pipeline [-h] --root ROOT (--id ID | --ref REF)
 
-Read a pipeline's status or branch CI from the configured forge. For GitHub branches, status is an
-aggregate of every workflow's latest run at the head; ID and URL identify the newest run, whose
-status may differ from the aggregate. GitLab branches report the latest pipeline at the head.
+Read one pipeline or one branch head's CI from the workspace Backlog: forge.
+
+Use it when the question is that pipeline's status. A failed status is still a successful read.
 
 options:
-  -h, --help   show this help message and exit
-  --root ROOT  workspace holding CLAUDE.md and its Backlog: line
-  --id ID      GitLab pipeline ID or GitHub Actions run ID
-  --ref REF    branch head and CI: GitHub aggregates every workflow; ID and URL identify the
-               newest run; GitLab reads the latest pipeline
+  -h, --help   flag, default: off. Print this help text on stdout and exit 0.
+  --root ROOT  path, default: none (required). Workspace whose CLAUDE.md Backlog: line selects the
+               forge and repository.
+  --id ID      int, default: none; exactly one of --id or --ref is required. One GitLab pipeline
+               or one GitHub Actions run. Mutually exclusive with --ref; must be > 0. Does not
+               aggregate.
+  --ref REF    string, default: none; exactly one of --id or --ref is required. Branch name.
+               GitHub: status is the aggregate of every workflow's latest run at that head; ID and
+               URL identify the newest run, whose own status may differ. GitLab: the latest
+               pipeline at that head (one pipeline, so id, url, and status agree). Mutually
+               exclusive with --id.
+
+When not to use:
+  To decide whether an open pull or merge request is ready to merge, use
+  chief-of-stuff merge-ready. That verdict already includes the head pipeline
+  plus conflicts, draft, review threads, and a stale pipeline sha. This command
+  does not.
+
+Output:
+  TOON on stdout, one object, fields in this order: id (int, or null), ref
+  (string), sha (string), status (string), url (string, "" when there is no
+  pipeline). Stderr is empty on success.
+
+  No pipeline (--ref and the head has no runs): exit 0, id: null, status: none,
+  url: "". A missing --id is not this result; it is a read error.
+
+  GitHub status, for the single --id run and for the --ref aggregate: passed
+  when every included check completed with success, neutral, or skipped;
+  failed when any included check completed with another conclusion; running when
+  none failed and at least one has not completed. On --ref, a truncated workflow
+  list is a read error, not a partial aggregate.
+
+  For --ref on GitHub, status is the aggregate of every workflow's latest run at
+  that head; ID and URL identify the newest run, whose own status may differ
+  from the aggregate. For --ref on GitLab, the latest pipeline at that head sets
+  id, url, and status together.
+
+  GitLab status, for --id and for the latest --ref pipeline: success maps to
+  passed; failed and canceled map to failed; skipped, pending, created,
+  waiting_for_resource, waiting_for_callback, preparing, scheduled, manual,
+  draft, and canceling stay as those words; any other word maps to running.
+
+  Stderr: pipeline: … on a read or config error, and argparse usage text on a
+  usage fault. A usage fault prints no TOON.
+
+Exit codes:
+  0  The read succeeded, including status: failed and status: none; --help.
+  1  Config or forge read failed (no Backlog: line, missing GitLab credential,
+     HTTP error, unreadable payload, truncated GitHub run list, branch name
+     that is blank, untrimmed, ".", or ".."). Stdout empty.
+  2  Usage fault: missing --root, missing both selectors, both --id and --ref,
+     a non-integer --id, or --id that is not positive.
+
+Side effects:
+  Reads only. No dry run and no --commit, because nothing is written.
+
+  Reads CLAUDE.md (the Backlog: line), then the forge. GitHub uses gh api.
+  GitLab uses REST on that line's host, including a self-hosted host, with the
+  credential backlog.token already resolves (not a flag). --id reads
+  actions/runs/<id> or pipelines/<id>. --ref reads the branch, then that head's
+  runs.
+
+  Writes: none. Not the store, not the board cache, not the worktree, not the
+  forge.
+
+Examples:
+  chief-of-stuff pipeline --root ~/cedar-desk --id 71
+  chief-of-stuff pipeline --root ~/cedar-desk --ref main
+  chief-of-stuff pipeline --root ~/cedar-desk --ref release/ledger
 ```
 
 ## Observability
