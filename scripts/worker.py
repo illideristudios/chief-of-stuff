@@ -730,6 +730,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         host: dict[str, Any] = {}
         via_t3 = launcher == "t3" and chosen.runtime == "claude"  # T3 is the launcher; the worker is still a claude worker
         if chosen.runtime == "claude" and not via_t3:
+            # Clock already refused or cleared in local_claude_ready before the tree existed.
             runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
         else:
             # §13: no guard plugin loads on these hosts or in a T3 thread, so the forge must protect the default and the
