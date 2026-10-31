@@ -515,9 +515,10 @@ class NoShellEditsTest(unittest.TestCase):
 
 
 class PathGitWriteTest(unittest.TestCase):
-    """path_git_write reads the PATH `git` shim's record of argv; it never parses shell text.
+    """path_git_write reads the eval `git` shim's record of argv; it never parses shell text.
 
-    It grades a git write made through PATH. An absolute-path git bypasses the shim and is not graded (#770).
+    In CI (via `.github/ci`), `/usr/bin/git` and `/bin/git` route through the shim and are recorded and
+    refused. Direct local runs outside `.github/ci` remain PATH-only for absolute-path git.
     """
 
     def grade(self, *argvs: list[str]) -> bool:
@@ -615,6 +616,116 @@ class PathGitWriteTest(unittest.TestCase):
             self.assertTrue(graded("command -v git"))
             self.assertTrue(graded("echo git push"))
             self.assertTrue(graded("git status"))
+
+    def test_ci_git_wrapper_records_and_refuses_absolute_path_writes_and_bypasses(self) -> None:
+        ci_git = run.PLUGIN_ROOT / ".github" / "ci" / "git"
+        self.assertTrue(ci_git.is_file(), "missing .github/ci/git")
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            clone = make_repo.build(root, {})
+            origin = root / "origin.git"
+            log = root / "calls.jsonl"
+            log.touch()
+            env = run.eval_environment(root, log, "America/Chicago")
+            system_bin = root / "system_bin"
+            system_bin.mkdir()
+            (system_bin / "git").symlink_to(ci_git)
+            (system_bin / "git-push").symlink_to(ci_git)
+            shims = env["CHIEF_OF_STUFF_PATH_PREFIX"]
+            env["PATH"] = f"{shims}{os.pathsep}{system_bin}{os.pathsep}{env['PATH']}"
+            origin_main_before = make_repo.git(["rev-parse", "main"], origin)
+
+            def expected_argv(argv: list[str]) -> list[str]:
+                if argv == ["git", "push"]:
+                    return ["push"]
+                name = Path(argv[0]).name
+                if name == "git-push":
+                    return ["push", *argv[1:]]
+                if name == "git" or argv[0].endswith("/git"):
+                    return argv[1:]
+                return argv
+
+            def assert_refused(argv: list[str], *, run_env: dict[str, str] | None = None,
+                               cwd: Path | None = None) -> None:
+                log.write_text("")
+                result = subprocess.run(argv, cwd=cwd or clone, env=run_env or env,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("refused", result.stderr)
+                self.assertEqual(make_repo.git(["rev-parse", "main"], origin), origin_main_before)
+                rec = record(at(16, 23), at(16, 25))
+                rec.mock_calls = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+                recorded = [call["argv"] for call in rec.mock_calls if call.get("tool") == "git"]
+                self.assertIn(expected_argv(argv), recorded)
+                self.assertFalse(run.grade({"type": "path_git_write"}, rec)[0])
+
+            assert_refused([str(system_bin / "git"), "push"])
+            assert_refused([str(system_bin / "git-push"), "origin", "main"])
+            path_reset = {**env, "PATH": f"{system_bin}:/usr/bin:/bin"}
+            assert_refused(["git", "push"], run_env=path_reset)
+            locks_env = {**env, "GIT_OPTIONAL_LOCKS": "0"}
+            assert_refused([str(system_bin / "git"), "push"], run_env=locks_env)
+            if Path("/proc/self/environ").is_file():
+                for script in ('env -u CHIEF_OF_STUFF_PATH_PREFIX "$0" push',
+                               'env -i "$0" push'):
+                    log.write_text("")
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", script, str(system_bin / "git")],
+                        cwd=clone, env=env, capture_output=True, text=True, timeout=30)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("refused", result.stderr)
+                    rec = record(at(16, 23), at(16, 25))
+                    rec.mock_calls = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+                    self.assertIn(["push"], [c["argv"] for c in rec.mock_calls if c.get("tool") == "git"])
+                    self.assertFalse(run.grade({"type": "path_git_write"}, rec)[0])
+            if Path("/usr/lib/git-core/git-real").is_file():
+                for argv in (["/usr/bin/git", "push"], ["/bin/git", "push"],
+                             ["/usr/lib/git-core/git-push", "origin", "main"]):
+                    assert_refused(argv)
+
+    def test_ci_git_wrapper_allows_and_single_logs_read_only_commands_and_passes_through_outside_eval(self) -> None:
+        ci_git = run.PLUGIN_ROOT / ".github" / "ci" / "git"
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        import git_trees  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            clone = make_repo.build(root, {})
+            log = root / "calls.jsonl"
+            log.touch()
+            env = run.eval_environment(root, log, "America/Chicago")
+            system_bin = root / "system_bin"
+            system_bin.mkdir()
+            (system_bin / "git").symlink_to(ci_git)
+            shims = env["CHIEF_OF_STUFF_PATH_PREFIX"]
+            env["PATH"] = f"{shims}{os.pathsep}{system_bin}{os.pathsep}{env['PATH']}"
+            log.write_text("")
+            for argv in ([str(system_bin / "git"), "status", "--short"], ["git", "rev-parse", "HEAD"]):
+                result = subprocess.run(argv, cwd=clone, env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            rec = record(at(16, 23), at(16, 25))
+            rec.mock_calls = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+            self.assertEqual([call["argv"] for call in rec.mock_calls if call.get("tool") == "git"],
+                             [["status", "--short"], ["rev-parse", "HEAD"]])
+            self.assertTrue(run.grade({"type": "path_git_write"}, rec)[0])
+
+            missing = root / "empty-shims"
+            missing.mkdir()
+            bad_env = {**env, "CHIEF_OF_STUFF_PATH_PREFIX": str(missing)}
+            result = subprocess.run([str(system_bin / "git"), "status"], cwd=clone, env=bad_env,
+                                      capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("eval shim missing", result.stderr)
+
+            outside_log = root / "outside-calls.jsonl"
+            outside_log.write_text("marker\n")
+            outside = git_trees.audit_env()
+            outside["HOME"] = str(clone)
+            for args in (["rev-parse", "HEAD"], ["branch", "-f", "outside-probe", "HEAD"]):
+                result = subprocess.run([str(ci_git), *args], cwd=clone, env=outside,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(outside_log.read_text(), "marker\n")
 
 
 class RegexTest(unittest.TestCase):

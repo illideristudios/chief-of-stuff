@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+"""System-path git wrapper for the CI image (#770).
+
+In the CI container, the real git binary lives at /usr/lib/git-core/git-real and every
+standard git path (/usr/bin/git, /bin/git, /usr/lib/git-core/git*) points here.
+When an eval fixture is active (CHIEF_OF_STUFF_PATH_PREFIX in the environment or an
+ancestor shell), invocations are routed through the eval harness's PATH git shim so
+every call is recorded in calls.jsonl and non-allowlisted calls are refused.
+Outside eval_environment, calls delegate directly to git-real.
+"""
+import ast
+import os
+import sys
+from pathlib import Path
+
+REAL_GIT_CONTAINER = Path("/usr/lib/git-core/git-real")
+SHELL_COMMS = {"sh", "dash", "bash", "zsh", "env"}
+
+
+def _normalized_argv() -> list[str]:
+    name = Path(sys.argv[0]).name
+    if name.startswith("git-") and name != "git-real":
+        return [name[4:], *sys.argv[1:]]
+    return list(sys.argv[1:])
+
+
+def _ancestor_prefix() -> tuple[str | None, str | None]:
+    """Recover CHIEF_OF_STUFF_PATH_PREFIX from an ancestor shell if `env -i` / `env -u` stripped it."""
+    if os.environ.get("GIT_NO_REPLACE_OBJECTS") == "1":
+        return None, None
+    pid = os.getppid()
+    visited: set[int] = set()
+    while pid > 1 and pid not in visited:
+        visited.add(pid)
+        try:
+            comm = Path(f"/proc/{pid}/comm").read_text().strip()
+            raw_env = Path(f"/proc/{pid}/environ").read_bytes()
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            break
+        if comm not in SHELL_COMMS:
+            break
+        entries: dict[str, str] = {}
+        for item in raw_env.split(b"\0"):
+            if b"=" in item:
+                k, v = item.split(b"=", 1)
+                entries[k.decode("utf-8", "surrogateescape")] = v.decode("utf-8", "surrogateescape")
+        if entries.get("CHIEF_OF_STUFF_PATH_PREFIX"):
+            return entries["CHIEF_OF_STUFF_PATH_PREFIX"], entries.get("PATH")
+        try:
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (IndexError, ValueError):
+            break
+        pid = ppid
+    return None, None
+
+
+def _load_read_only_policy(shim_git: Path):
+    source = shim_git.read_text()
+    tree = ast.parse(source, filename=str(shim_git))
+    mod = ast.Module(
+        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_git_read_only"],
+        type_ignores=[],
+    )
+    ns: dict[str, object] = {}
+    exec(compile(mod, str(shim_git), "exec"), ns)
+    policy = ns.get("_git_read_only")
+    if not callable(policy):
+        sys.exit("git: eval shim missing _git_read_only policy")
+    return policy
+
+
+def _find_real_git(prefix: str | None) -> str:
+    override = os.environ.get("CHIEF_OF_STUFF_REAL_GIT")
+    if override and Path(override).is_file() and os.access(override, os.X_OK):
+        return override
+    if REAL_GIT_CONTAINER.is_file() and os.access(REAL_GIT_CONTAINER, os.X_OK):
+        return str(REAL_GIT_CONTAINER)
+    me = Path(__file__).resolve()
+    shim_dir = Path(prefix).resolve() if prefix else None
+    for candidate in ("/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git", "/bin/git"):
+        path = Path(candidate)
+        if not (path.is_file() and os.access(path, os.X_OK)):
+            continue
+        resolved = path.resolve()
+        if resolved == me or (shim_dir is not None and resolved.parent == shim_dir):
+            continue
+        return str(path)
+    sys.exit("git: real git binary not found")
+
+
+def main() -> None:
+    argv = _normalized_argv()
+    prefix = os.environ.get("CHIEF_OF_STUFF_PATH_PREFIX")
+    inherited_path = None
+    if not prefix:
+        prefix, inherited_path = _ancestor_prefix()
+    if prefix:
+        shim_git = Path(prefix) / "git"
+        if not (shim_git.is_file() and os.access(shim_git, os.X_OK)):
+            sys.exit("git: eval shim missing from CHIEF_OF_STUFF_PATH_PREFIX")
+        read_only = _load_read_only_policy(shim_git)
+        if not read_only(argv) or os.environ.get("GIT_OPTIONAL_LOCKS") != "0":
+            os.environ["CHIEF_OF_STUFF_PATH_PREFIX"] = prefix
+            current_path = os.environ.get("PATH") or inherited_path or "/usr/bin:/bin"
+            path_parts = [p for p in current_path.split(os.pathsep) if p]
+            if "/usr/bin" not in path_parts:
+                path_parts.append("/usr/bin")
+            os.environ["PATH"] = os.pathsep.join(path_parts)
+            os.execv(shim_git, [str(shim_git), *argv])
+    real_git = _find_real_git(prefix)
+    os.execv(real_git, ["git", *argv])
+
+
+if __name__ == "__main__":
+    main()

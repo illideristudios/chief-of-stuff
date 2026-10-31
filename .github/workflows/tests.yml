@@ -15,8 +15,4 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t chief-of-stuff-ci -f .github/ci/Dockerfile .
-      # The checkout is mounted read-only and copied, so the tests touch nothing on the host and need no network.
-      - run: >
-          docker run --rm --network none -v "$PWD":/repo:ro chief-of-stuff-ci
-          sh -c 'cp -R /repo/. . && python3 -m unittest discover -s evals -p "test_*.py"'
+      - run: ./.github/ci/run-evals
