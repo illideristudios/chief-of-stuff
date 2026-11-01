@@ -446,10 +446,12 @@ Serve the workspace's pages locally: the board and any page a session writes bes
 The pages are routes: `/` the board, `/workers` the running workers and today's ends, `/decisions` the list,
 `/decisions/<slug>` an authored decision page, `/decisions/<id>` (digits only) a store decision's page rendered
 from the store (#945), `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
-and diff. `/workers/` and `/decisions/` are the same pages as the bare routes (#988); other directory URLs stay 404
-(#340). A missing `/favicon.ico` answers 204 so the browser console stays clean; a real icon in the pages dir is
-served. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
-`issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the file's own name is a 404.
+and diff, `/report` the heartbeat report, `/merge-order` the shared merge-order report (#75). `/workers/` and
+`/decisions/` are the same pages as the bare routes (#988); other directory URLs stay 404 (#340). A missing
+`/favicon.ico` answers 204 so the browser console stays clean; a real icon in the pages dir is served. Each is
+rendered into its file (`<day>-board.html`, `workers.html`, `report.html`, `merge-order.html`, `decisions.html`,
+`decision-<slug>.html`, `issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the
+file's own name is a 404.
 A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the settings TOML, the decision JSON,
 `.sources.json`) is newer than its last render, or differs in bytes from what that render read, and `/workers` on every GET (it reads the session logs too), and a thread refreshes `.sources.json` from the forge every minute. An open tab
 reloads itself when the file changes.
