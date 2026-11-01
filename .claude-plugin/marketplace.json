@@ -5,6 +5,9 @@
     "name": "Zach Gardner",
     "email": "locriani@gmail.com"
   },
+  "allowCrossMarketplaceDependenciesOn": [
+    "ai-additions"
+  ],
   "plugins": [
     {
       "name": "chief-of-stuff",

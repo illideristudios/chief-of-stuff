@@ -17,6 +17,24 @@ def system() -> datetime:
     return datetime.now(timezone.utc)
 
 
+WORKER_CLOCK_PLUGIN = "datetime-inject@ai-additions"
+
+
+def user_clock(plugins: object) -> dict | None:
+    """The enabled user-scoped `datetime-inject@ai-additions` entry from `claude --setting-sources user plugin list --json`."""
+    if not isinstance(plugins, list):
+        return None
+    for entry in plugins:
+        if (
+            isinstance(entry, dict)
+            and entry.get("id") == WORKER_CLOCK_PLUGIN
+            and entry.get("scope") == "user"
+            and entry.get("enabled") is True
+        ):
+            return entry
+    return None
+
+
 HHMM = re.compile(r"^(\d{1,2}):(\d{2})$")
 # The clock a Log line or a tracker cell starts with; whatever follows it is the line's own text.
 LEADING = re.compile(r"^\s*(\d{1,2}):(\d{2})\b")

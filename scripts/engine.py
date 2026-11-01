@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Collection
-from dataclasses import is_dataclass, replace
+from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from functools import cache, partial
 from pathlib import Path
@@ -28,6 +28,7 @@ import decision_actions
 import decision_escalation
 import dispatch_prompt
 import engine_facts
+import completion
 import engine_merge
 import forge
 import guard_commands
@@ -52,6 +53,7 @@ import store_access
 import supervisor
 import trio_gate
 import worker
+import worker_health
 from forge_port import ForgeError
 from reconcile import OP_DECISION_COMMENT, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN
 from workspace import read_engine_status, settings_path, worktrees_dir, write_engine_status
@@ -448,7 +450,6 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
         _settle_asks(store, key)
 
 
-
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str,
                 *, release_hold: bool = False) -> None:
     result = forge.write_stage(int(key.rpartition("#")[2]), stage, expected=expected or None,
@@ -683,6 +684,9 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
                    facts: reconcile.Facts) -> None:
     """Close the exited run; the planner and cleanup gate merged-item completion on main CI."""
     key = segment.issue_key
+    if "recovery" in _resume(store, key):
+        # Unreadable orphans are set aside at launch; they do not require a human hold.
+        facts = replace(facts, unreadable=tuple(k for k in facts.unreadable if k != key))
     item = next((item for item in store.items() if item.issue_key == key), None)
     workflow = policies.workflow_for(_resume(store, key).get("issue_type") or getattr(item, "issue_type", None))
     verdict = reconcile.completion_verdict(key, segment, facts, workflow, report=outcome, worker_alive=False)
@@ -780,7 +784,7 @@ def _remember_health(store: Any, facts: reconcile.Facts) -> None:
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
              max_concurrency: int | None = None, require_green: bool = False, teardown_command: str = "",
-             model: model_port.Model | None = None) -> list[reconcile.Action]:
+             model: model_port.Model | None = None, clone: Path | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
@@ -808,6 +812,24 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     landing_shas = {row["issue_key"]: row["landing_sha"] for row in snapshots
                     if isinstance(row.get("landing_sha"), str) and row["landing_sha"]}
 
+    recovery_errors = set()
+
+    def recovery_failed(key: str, exc: Exception) -> None:
+        recovery_errors.add(key)
+        message = f"recovery read failed: {exc}"
+        if not any(row.message == message for row in store.log(key)):
+            store.add_log(key, message, clock().isoformat())
+
+    for item in store.items():
+        key = item.issue_key
+        try:
+            candidates = engine_facts.recovery_candidates(store, key, trees=trees, clone=clone, root=root)
+            if candidates is not None:
+                store.update_resume(key, lambda d, stage=item.stage, rows=[asdict(c) for c in candidates]: d.__setitem__(
+                    "recovery", {"stage": stage, "candidates": rows}))
+        except Exception as exc:
+            recovery_failed(key, exc)
+
     worker.deliver_messages(store, root, clock)
     facts = worker.collect(store, root, clock, trees,
                    gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
@@ -818,6 +840,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                    finish=partial(_finish_worker, forge, store, policies=policies),
                    require_green=require_green, teardown_command=teardown_command,
                    transcript_max_bytes=workers.transcript_max_bytes)
+    if is_dataclass(facts) and facts.unreadable:
+        # Unreadable orphans under recovery are quarantined at launch; Close must not hold on them either.
+        unreadable = tuple(k for k in facts.unreadable if "recovery" not in _resume(store, k))
+        if unreadable != facts.unreadable:
+            facts = replace(facts, unreadable=unreadable)
 
     now = clock()
     at = now.isoformat()
@@ -939,11 +966,57 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 _wait_log(store, key, f"suspected stall: recovery waiting for verified termination: {exc}", at)
         else:
             _wait_log(store, key, "stall recovery waiting for verified worker evidence", at)
+    recovery_pending = set()
+    for item in store.items():
+        key = item.issue_key
+        if key in recovery_errors:
+            continue
+        try:
+            data = _resume(store, key)
+            if item.forge_state == "closed":
+                if "recovery" in data or "recovery_choice" in data:
+                    store.update_resume(key, lambda d: (d.pop("recovery", None), d.pop("recovery_choice", None)))
+                continue
+            if "recovery" not in data:
+                continue
+            history = store.segments(key)
+            if (any(s.ended_at is None for s in history)
+                    or worker_health.failures(history, data.get("failure_acknowledged", ())) >= workers.failure_limit):
+                continue
+            verdict = completion.recovery(tuple(completion.Candidate(**row) for row in data["recovery"]["candidates"]))
+            if not worker.recovery_stopped(store, key):
+                recovery_pending.add(key)
+            elif isinstance(verdict, completion.Conflict):
+                stage = data["recovery"]["stage"]
+                attempt = max((s.attempt for s in history if s.stage == stage), default=0)
+                options = completion.conflict_options(verdict)
+                instance = ",".join(options)
+                context = json.dumps([asdict(c) for c in verdict.candidates], sort_keys=True)
+                choice = _choice(store, key, "recovery", "multiple safe worker trees survive", options,
+                                 _resolved(policies, store, key, stage), policies.personas, model,
+                                 context=context, instance=instance, stage=stage, attempt=attempt,
+                                 clock=clock, until=until)
+                if choice not in options:
+                    recovery_pending.add(key)
+                else:
+                    store.update_resume(key, lambda d, chosen=choice: d.__setitem__("recovery_choice", chosen))
+            else:
+                for row in decision_escalation.latest(store.decisions(key)).values():
+                    if row.topic == "recovery" and not (row.answer or "").strip():
+                        # The question no longer describes the facts. Preserve the remaining
+                        # work and retire the old wait so it cannot block later review/merge.
+                        trio_gate.record(store, key, decision_escalation.DecisionUpdate(
+                            row.topic, row.question, "superseded", "engine", {
+                                **row.record, "status": "superseded", "note": "recovery conflict no longer exists"}))
+        except Exception as exc:
+            recovery_failed(key, exc)
     items = [item for item in store.items()
-             if _resume(store, item.issue_key).get("stall_recovery", {}).get("phase") != "stopping"
+             if item.issue_key not in recovery_errors
+             and _resume(store, item.issue_key).get("stall_recovery", {}).get("phase") != "stopping"
              and (not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold"))]
     _remember_verified(store, facts, landing_shas)
     inputs = _planning_inputs(store, items)
+    inputs["pending_asks"].update((key, True) for key in recovery_pending)
     free_slots = slots.free_slots(max_concurrency, slots.running(store))
 
     def plan():
@@ -1024,6 +1097,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
+                                preserve_start=partial(worker.preserve_start, worker._run_dir(root, key, stage, action.attempt)),
                                 agent_type=agent_name)
                 except BaseException:
                     # claim removes the reservation on failure; retain a real launch failure only.
@@ -1463,6 +1537,7 @@ def main(argv: list[str] | None = None) -> int:
                                          launcher=launch_config.workers.worker_launcher,
                                          t3_providers=launch_config.workers.t3_providers)
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
+                                 clone=root / selected if selected else root,
                                  launch=launch, workers=launch_config.workers,
                                  max_concurrency=launch_config.workers.max_concurrency, model=model,
                                  require_green=launch_config.workers.require_green_tests,
@@ -1536,7 +1611,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except KeyboardInterrupt:
         return 0
-    except Exception as exc:
+    except (ValueError, RuntimeError, ForgeError, supervisor.ServiceError, OSError) as exc:
         print(f"engine: {exc}", file=sys.stderr)
         return 2
     finally:

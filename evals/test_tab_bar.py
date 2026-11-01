@@ -309,6 +309,17 @@ class LeadCountsTest(unittest.TestCase):
                 self.assertNotIn("href", got["Dispatch"].attrs)
                 self.assertNotIn("href", got["Epics"].attrs)
 
+    def test_the_workers_badge_matches_the_workers_page_needs_input_tile(self):
+        # #898: the badge is the page's lead count. #110 is human_review with no review segment, which the
+        # tile used to skip, so the tab said 1 and the tile said 0.
+        tile = re.search(r"<b>(\d+)</b><span class=\"cap\">NEEDS INPUT</span>", self.pages["workers"])
+        self.assertIsNotNone(tile)
+        for page in ("board", "task", "source", "workers"):
+            with self.subTest(page=page):
+                badge = re.search(r'href="/workers"[^>]*>Workers<span class="badge"[^>]*>(\d+)</span>', self.pages[page])
+                self.assertIsNotNone(badge, page)
+                self.assertEqual(badge.group(1), tile.group(1), page)
+
     def test_unbuilt_tabs_read_as_inactive(self):
         import fragment
         unbuilt = ("Dispatch", "Since you last looked", "Epics", "Limits")
