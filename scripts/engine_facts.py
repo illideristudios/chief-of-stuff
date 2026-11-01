@@ -7,22 +7,131 @@ this module only reads.
 from __future__ import annotations
 
 import subprocess
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import dispatch_prompt
+import completion
+import decision_escalation
 import git_trees
 import git_view
 import process_status
 import readiness
 import session_logs
 import t3_adapter
+import worker
 import worker_health
 from forge_port import ForgeError
 from orphans import Claim
 from reconcile import Facts, latest_segment
+
+
+def recovery_candidates(store: Any, key: str, *, trees: Path, clone: Path | None,
+                        root: Path | None = None) -> tuple[completion.Candidate, ...] | None:
+    """Read one stopped issue's survivors. None means no recovery is due (or no clone)."""
+    if clone is None:
+        return None
+    data = store.resume(key) or {}
+    history = store.segments(key)
+    latest = history[-1] if history else None
+    if latest is not None:
+        stall = data.get("stall_recovery", {})
+        if (stall.get("stage"), stall.get("attempt"), stall.get("phase")) == (
+                latest.stage, latest.attempt, "stopping"):
+            return None
+    record = _record(store, key, latest.stage, latest.attempt) if latest else None
+    if record is None and latest is not None and root is not None:
+        try:
+            run = worker._run_dir(root, key, latest.stage, latest.attempt)
+        except ValueError:
+            run = None
+        if run is not None and ((run / "started.json").is_file()
+                                or (run / "t3.json").is_file() or (run / "thread.json").is_file()):
+            record = json.loads((run / "started.json").read_text()) if (run / "started.json").is_file() else {}
+            record["run_dir"] = str(run)
+            if (run / "t3.json").is_file() or (run / "thread.json").is_file():
+                record.update(runtime="claude", launcher="t3")
+                if (run / "thread.json").is_file():
+                    record.update(worker._thread_fields(run))
+    decision_open = any(row.topic == "recovery" and not (row.answer or "").strip()
+                        for row in decision_escalation.latest(store.decisions(key)).values())
+    if "recovery" not in data and not decision_open:
+        if latest is None or latest.ended_at is not None or record is None:
+            return None
+        run_dir = Path(record["run_dir"]) if isinstance(record.get("run_dir"), str) and record["run_dir"] else None
+        is_t3 = record.get("launcher") == "t3" or (
+            run_dir is not None and ((run_dir / "t3.json").is_file() or (run_dir / "thread.json").is_file()))
+        if is_t3:
+            observed = t3_adapter.observe({**record, "launcher": "t3"})
+            if observed.error or observed.alive is not False:
+                return None
+            expected_code = 1 if observed.status in t3_adapter.FAILED else 0
+            if run_dir is not None and (run_dir / "exit.json").is_file():
+                try:
+                    payload = json.loads((run_dir / "exit.json").read_text())
+                except (OSError, ValueError):
+                    payload = None
+                if isinstance(payload, dict) and payload.get("exit_code") == expected_code:
+                    return None  # ordinary, fully recorded T3 exits already have a checkout for retry
+        else:
+            if run_dir is not None and (run_dir / "exit.json").exists():
+                return None  # ordinary, fully recorded exits already have a checkout for retry
+            # Even an exit file is not permission to move a tree while its host still runs.
+            for field, host in (("pid", True), ("runner_pid", False)):
+                pid, session = record.get(field), record.get("session_id")
+                if type(pid) is not int or pid <= 0 or not session:
+                    return None
+                if process_status.identity(pid, session, host=host) is not None:
+                    return None
+    common = git_view.locate(clone).common
+    number = key.rpartition("#")[2]
+    prefix = f"work/issue-{number}-"
+    paths = {p for p in trees.glob(f"issue-{number}-*") if p.is_dir()}
+    if raw := data.get("worktree"):
+        path = Path(raw).resolve()
+        if path.is_relative_to(trees.resolve()) and "quarantine" not in path.relative_to(trees.resolve()).parts:
+            paths.add(path)
+    code, refs = git_trees.git(["for-each-ref", "--format=%(refname)", f"refs/quarantine/{number}/"], clone)
+    if code:
+        raise RuntimeError("cannot read quarantined branches")
+    quarantined = {ref.split("/", 4)[4] for ref in refs.splitlines() if len(ref.split("/", 4)) == 5}
+    candidates, checked_out = [], set()
+    # A quarantined checkout can still name its old ref if the engine died during the rename.
+    for path in (trees / "quarantine").glob("**/.git"):
+        code, branch = git_trees.git(["symbolic-ref", "--short", "HEAD"], path.parent, expected_common=common)
+        if code == 0:
+            checked_out.add(branch)
+    for path in sorted(paths):
+        path = path.resolve()
+        if not path.is_relative_to(trees.resolve()) or "quarantine" in path.relative_to(trees.resolve()).parts:
+            continue
+        code, branch = git_trees.git(["symbolic-ref", "--short", "HEAD"], path, expected_common=common)
+        ok, head = git_trees.git(["rev-parse", "--verify", "HEAD"], path, expected_common=common)
+        readable = code == 0 and ok == 0 and branch.startswith(prefix)
+        # Preserve a known ref even when the checkout's metadata is damaged.
+        branch = branch if code == 0 else (data.get("work_branch", "") if str(path) == data.get("worktree") else "")
+        if not branch.startswith(prefix):
+            branch = ""
+        if branch:
+            checked_out.add(branch)
+        try:
+            layout = git_view.locate(path, expected_common=common)
+            merging = any((layout.gitdir / name).exists() for name in ("MERGE_HEAD", "rebase-merge", "rebase-apply"))
+        except git_view.Unviewable:
+            merging = False
+        candidates.append(completion.Candidate(str(path), branch, head if ok == 0 else "", readable,
+                                               branch in quarantined, merging))
+    code, refs = git_trees.git(["for-each-ref", "--format=%(refname:short) %(objectname)", f"refs/heads/{prefix}*"], clone)
+    if code:
+        raise RuntimeError("cannot read orphan branches")
+    for line in refs.splitlines():
+        branch, _, head = line.partition(" ")
+        if branch not in checked_out:
+            candidates.append(completion.Candidate("", branch, head, True, branch in quarantined, False))
+    return tuple(candidates)
 
 
 def _blockers(forge: Any) -> tuple[dict[str, tuple[str, ...]] | None, str]:

@@ -14,6 +14,45 @@ RISK = TreeState("feature", 1, 2, None)
 
 
 class CompletionTest(unittest.TestCase):
+    def test_recovery_reuses_exactly_one_safe_survivor(self):
+        safe = completion.Candidate("tree", "work/issue-1-implement-1", "head", True, False, False)
+        self.assertEqual(completion.recovery((safe,)), completion.Recovery(safe))
+        self.assertIsNone(completion.recovery(()))
+        other = completion.Candidate("other", "work/issue-1-plan-1", "other-head", True, False, False)
+        self.assertEqual(completion.recovery((safe, other)), completion.Conflict((safe, other)))
+
+    def test_conflict_options_offer_actionable_survivors_and_abort_never_hold(self):
+        first = completion.Candidate("/trees/a", "work/issue-1-implement-1", "head-a", True, False, False)
+        second = completion.Candidate("/trees/b", "work/issue-1-plan-1", "head-b", True, False, False)
+        conflict = completion.Conflict((first, second))
+        options = completion.conflict_options(conflict)
+        self.assertEqual(options, ("work/issue-1-implement-1", "work/issue-1-plan-1", "abort"))
+        self.assertNotIn("hold", options)
+        self.assertEqual(completion.selected_survivor(conflict, "work/issue-1-implement-1"), first)
+        self.assertEqual(completion.selected_survivor(conflict, "work/issue-1-plan-1"), second)
+        self.assertIsNone(completion.selected_survivor(conflict, "abort"))
+        self.assertIsNone(completion.selected_survivor(conflict, "hold"))
+        self.assertEqual(completion.selected_survivor(completion.Recovery(first)), first)
+
+    def test_conflict_options_disambiguate_duplicate_branch_names(self):
+        first = completion.Candidate("/trees/a", "work/issue-1-implement-1", "head-a", True, False, False)
+        second = completion.Candidate("/trees/b", "work/issue-1-implement-1", "head-b", True, False, False)
+        conflict = completion.Conflict((first, second))
+        options = completion.conflict_options(conflict)
+        self.assertEqual(options, ("work/issue-1-implement-1:/trees/a", "work/issue-1-implement-1:/trees/b", "abort"))
+        self.assertEqual(completion.selected_survivor(conflict, options[1]), second)
+
+    def test_unsafe_candidates_are_never_reused_or_held(self):
+        for readable, quarantined, merging in ((False, False, False), (True, True, False), (True, False, True)):
+            candidate = completion.Candidate("tree", "branch", "head", readable, quarantined, merging)
+            self.assertIsNone(completion.recovery((candidate,)))
+
+    def test_a_reusable_abandoned_tree_can_retry_without_a_human_hold(self):
+        for final in (True, False):
+            verdict = completion.abandoned(False, tree=RISK, tree_name="tree",
+                tree_claims=(orphans.Claim("worker", False),), landing_required=final)
+            self.assertEqual(verdict, completion.Verdict("failed", "worker gone"))
+
     def test_done_means_on_main_with_the_suite_run_there(self):
         self.assertIsNone(completion.done_on_main(True, True))
         self.assertEqual(completion.done_on_main(False, True), "not on main")
@@ -21,12 +60,9 @@ class CompletionTest(unittest.TestCase):
         self.assertEqual(completion.done_on_main(None, True), "on main is unknown")
         self.assertEqual(completion.done_on_main(True, None), "suite on main is unknown")
 
-    def test_unlanded_work_and_an_orphan_are_named(self):
+    def test_unlanded_work_is_named(self):
         self.assertIsNone(completion.unlanded(CLEAN))
         self.assertIn("uncommitted", completion.unlanded(RISK))
-        gone = orphans.Claim("worker", False, "has no process")
-        self.assertIsNone(completion.orphan_reason("tree", RISK, (orphans.Claim("worker", True),)))
-        self.assertIn("orphaned", completion.orphan_reason("tree", RISK, (gone,)).lower())
 
     def test_a_live_or_unknown_worker_is_not_abandoned(self):
         self.assertIsNone(completion.abandoned(True))

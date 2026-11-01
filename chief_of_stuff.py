@@ -59,6 +59,7 @@ COMMAND_REGISTRY = {
     "tracker": ("scripts/tracker_read.py", None),
     "merge-approved": ("scripts/merge_approved.py", None),
     "merge-ready": ("scripts/merge_ready.py", None),
+    "merge-order": ("scripts/merge_order.py", "forge"),
     "performance": ("scripts/performance_report.py", "observability"),
     "limits": ("scripts/limits_cli.py", "observability"),
     "review-threads": ("scripts/review_threads.py", None),
