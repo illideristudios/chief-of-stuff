@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -173,11 +174,17 @@ class StartTest(unittest.TestCase):
 
 class CancelTest(unittest.TestCase):
     def test_cancellation_waits_until_killed_leader_is_recorded_as_reaped(self):
+        stop = threading.Event()
+        other = threading.Thread(target=stop.wait)
+        other.start()
+        self.addCleanup(other.join, timeout=1)
+        self.addCleanup(stop.set)
         process = mock.Mock(pid=4242, returncode=None)
         seen = []
         previous = signal.signal(signal.SIGTERM, lambda *_: seen.append(process.returncode))
         def reap(*, timeout):
-            os.kill(os.getpid(), signal.SIGTERM)
+            # Exercise this thread's mask even when other suite fixtures have live threads.
+            signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
             process.returncode = -signal.SIGKILL
         process.wait.side_effect = reap
         try:
