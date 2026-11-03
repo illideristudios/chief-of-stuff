@@ -17,8 +17,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import create_engine, inspect, select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 import store
 
@@ -229,6 +229,54 @@ class StoreTest(unittest.TestCase):
         self.store.set_resume(KEY, {"next": "review", "waiting_on": ["ci"]})
         self.store.set_resume(KEY, {"next": "merge", "waiting_on": []})
         self.assertEqual(self.store.resume(KEY), {"next": "merge", "waiting_on": []})
+
+    def test_teardown_attempt_is_durable_and_independent_of_all_owner_resume_documents(self) -> None:
+        identity = ["/repo/.git/worktrees/tree", 1, 2, 3, "stack-stop"]
+        for key in (KEY, KEY + "-second"):
+            self.store.upsert_item(key)
+            self.store.set_resume(key, {"pending_stage": "implement"})
+            self.store.set_tree(key, "trees/tree")
+        self.assertIsNone(self.store.teardown_attempt("trees/tree"))
+        self.assertTrue(self.store.claim_teardown("trees/tree", identity))
+        other = store.Store(self.path)
+        self.addCleanup(other.engine.dispose)
+        for key in (KEY, KEY + "-second"):
+            self.assertEqual(other.resume(key), {"pending_stage": "implement"})
+            other.set_resume(key, ["engine owns this document"])
+        self.assertFalse(other.claim_teardown("trees/tree", identity))
+        self.assertEqual(other.teardown_attempt("trees/tree"), identity)
+        changed = [*identity[:-1], "stack-stop --retry"]
+        self.assertTrue(other.claim_teardown("trees/tree", changed))
+        self.assertEqual(self.store.teardown_attempt("trees/tree"), changed)
+
+    def test_the_0014_migration_downgrades_and_upgrades_without_losing_earlier_rows(self) -> None:
+        self.store.upsert_item(KEY, title="kept")
+        self.assertTrue(self.store.claim_teardown("trees/tree", ["stack-stop"]))
+        self.store.engine.dispose()
+        cfg = store._config(self.path)
+        command.downgrade(cfg, "0013")
+        self.assertNotIn("cleanup_teardown", inspect(self.store.engine).get_table_names())
+        self.assertIn("transcript", inspect(self.store.engine).get_table_names())  # 0013's table survives
+        self.assertEqual([item.issue_key for item in self.store.items()], [KEY])
+        command.upgrade(cfg, "0014")
+        self.assertIn("cleanup_teardown", inspect(self.store.engine).get_table_names())
+        self.assertEqual([item.issue_key for item in self.store.items()], [KEY])
+        self.assertIsNone(self.store.teardown_attempt("trees/tree"))  # the dropped attempt record is not restored
+
+    def test_failed_teardown_attempt_commit_rolls_back_and_allows_a_retry(self) -> None:
+        identity = ["/repo/.git/worktrees/tree", 1, 2, 3, "stack-stop"]
+
+        def fail_commit(conn):
+            raise SQLAlchemyError("attempt commit failed")
+
+        store.event.listen(self.store.engine, "commit", fail_commit)
+        try:
+            with self.assertRaises(SQLAlchemyError):
+                self.store.claim_teardown("trees/tree", identity)
+        finally:
+            store.event.remove(self.store.engine, "commit", fail_commit)
+        self.assertIsNone(self.store.teardown_attempt("trees/tree"))
+        self.assertTrue(self.store.claim_teardown("trees/tree", identity))
 
     def test_answer_ask_validates_options_and_single_answer(self) -> None:
         self.store.upsert_item(KEY, title="x")

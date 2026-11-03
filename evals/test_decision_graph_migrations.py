@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import store
 from alembic import command
-from alembic.script import ScriptDirectory
 
 
 class DecisionGraphMigrationTest(unittest.TestCase):
@@ -30,7 +29,8 @@ class DecisionGraphMigrationTest(unittest.TestCase):
             return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
     def test_0011_and_0012_upgrade_and_downgrade(self) -> None:
-        store.migrate(self.path)
+        cfg = store._config(self.path)
+        command.upgrade(cfg, "0012")
         self.assertIn("rotation_cursor", self._tables())
         self.assertIn("workflow", self._columns("segment"))
         for name in (
@@ -41,9 +41,6 @@ class DecisionGraphMigrationTest(unittest.TestCase):
             "decision_history_grant",
         ):
             self.assertIn(name, self._tables())
-
-        cfg = store._config(self.path)
-        self.assertEqual(ScriptDirectory.from_config(cfg).get_current_head(), "0012")
 
         command.downgrade(cfg, "0011")
         tables = self._tables()
@@ -64,8 +61,7 @@ class DecisionGraphMigrationTest(unittest.TestCase):
         self.assertNotIn("workflow", self._columns("segment"))
         self.assertIn("worker_message", tables)
 
-        command.upgrade(cfg, "head")
-        self.assertEqual(ScriptDirectory.from_config(cfg).get_current_head(), "0012")
+        command.upgrade(cfg, "0012")
         self.assertIn("decision_graph_node", self._tables())
         self.assertIn("workflow", self._columns("segment"))
 

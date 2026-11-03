@@ -119,7 +119,7 @@ class IdentityTest(unittest.TestCase):
                 self.assertNotIn("Other change", html)
                 self.assertNotIn("Old task", html)
         other_row = next(line for line in old.splitlines() if line.startswith("| Old task |"))
-        ambiguous = [(tip.TODAY, current.replace("\n\n## File ownership", "\n" + other_row + "\n\n## File ownership"))]
+        ambiguous = [(tip.TODAY, current.replace("\n## Log\n", "\n" + other_row + "\n## Log\n"))]
         for render in (issue_page.render, source_page.render):
             html = (render(109, ambiguous, src, tip.NOW, cfg=configured(home)) if render is issue_page.render
                     else render(109, ambiguous, src, tip.NOW))
@@ -240,7 +240,7 @@ class IdentityTest(unittest.TestCase):
         self.assertNotIn('00:03', html)
         self.assertIn('00:05', html)
         duplicate = next(line for line in old.splitlines() if line.startswith('| Upload size limit |'))
-        ambiguous = current.replace('\n\n## File ownership', '\n' + duplicate + '\n\n## File ownership')
+        ambiguous = current.replace('\n## Log\n', '\n' + duplicate + '\n## Log\n')
         self.assertIsNone(issue_page.render(109, [(tip.TODAY, ambiguous)], src, tip.NOW, tip.LANES))
 
     def test_refresh_fetches_explicit_gitlab_project_but_not_foreign_host(self):
@@ -289,7 +289,7 @@ class IdentityTest(unittest.TestCase):
         self.assertIn('00:05', html)
         self.assertNotIn('00:03', html)
         duplicate = next(line for line in old.splitlines() if line.startswith('| Old task |'))
-        ambiguous = current.replace('\n\n## File ownership', '\n' + duplicate + '\n\n## File ownership')
+        ambiguous = current.replace('\n## Log\n', '\n' + duplicate + '\n## Log\n')
         self.assertIsNone(issue_page.render(109, [(tip.TODAY, ambiguous)], src, tip.NOW, tip.LANES))
 
 class ReviewFindingsTest(unittest.TestCase):
@@ -354,10 +354,10 @@ class ReviewFindingsTest(unittest.TestCase):
         self.assertIn('00:03', html)
         self.assertIn('00:05', html)
         other = row.replace('#109', 'o/other#109')
-        reused = current.replace('\n\n## File ownership', '\n' + other + '\n\n## File ownership')
+        reused = current.replace('\n## Log\n', '\n' + other + '\n## Log\n')
         html = issue_page.render('github:o/app#109', [(tip.YESTERDAY, old), (tip.TODAY, reused)], src, tip.NOW, tip.LANES, configured(src.home))
         self.assertNotIn('00:05', html)
-        ambiguous_old = old.replace('\n\n## File ownership', '\n' + other + '\n\n## File ownership')
+        ambiguous_old = old.replace('\n## Log\n', '\n' + other + '\n## Log\n')
         html = issue_page.render('github:o/app#109', [(tip.YESTERDAY, ambiguous_old), (tip.TODAY, current)], src, tip.NOW, tip.LANES, configured(src.home))
         self.assertNotIn('00:05', html)
 

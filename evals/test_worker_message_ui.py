@@ -87,6 +87,16 @@ class WorkerMessageUITest(unittest.TestCase):
         self.db.fail_worker_message(other.id, KEY, 'implement', 1, self.sid, reason='not written')
         self.assertIn('Failed', self.request('GET', self.path)[1])
 
+    def test_a_message_accepted_by_a_t3_thread_is_not_labelled_as_delivered_to_the_claude_cli(self):
+        form = self.form(); form['message'] = 'check this'
+        self.assertEqual(self.post(form)[0], 303)
+        message = self.db.worker_messages(KEY)[0]
+        claim = self.db.begin_worker_message_delivery(message.id, KEY, 'implement', 1, self.sid)
+        self.db.ack_worker_message(message.id, KEY, 'implement', 1, self.sid,
+                                   delivery_id=claim.delivery_id, evidence='T3 accepted it as the thread next turn')
+        html = self.request('GET', self.path)[1]
+        self.assertIn('Sent to the T3 thread', html); self.assertNotIn('Delivered to Claude CLI', html)
+
     def test_ended_attempt_polls_until_its_messages_settle(self):
         form = self.form(); form['message'] = 'check this'
         self.assertEqual(self.post(form)[0], 303)

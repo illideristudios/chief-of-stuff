@@ -10,9 +10,11 @@ fetched objects behind, for `check_sha` and `make_worktree`.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 import git_view
 from tree_state import UNREADABLE_BRANCH, TreeState
@@ -397,3 +399,183 @@ def _own_git_dirs(cwd: Path, *, expected_common: Path | None = None) -> list[str
 def codex_add_dir_args(cwd: Path, *, expected_common: Path | None = None) -> list[str]:
     """The `--add-dir` argv that grants codex the validated git directories (#428)."""
     return [a for d in _own_git_dirs(cwd, expected_common=expected_common) for a in ("--add-dir", d)]
+
+
+_CONFIG_LIMIT = 1024 * 1024
+# A revision git may be asked for: no `..`, no leading dash, no revision:path in one token.
+_REV = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,200})?\Z")
+_SCP = re.compile(r"(?:[^@\s]+@)?([^:@\s]+):(.+)")
+
+
+def _origin_identity(url: str) -> tuple[str, str] | None:
+    """(host, project) of an https, ssh, or scp-style origin, or None when it is not one of those."""
+    raw = url.strip()
+    if not raw or any(c in raw for c in "\r\n\x00 \t"):
+        return None
+    if "://" in raw:
+        parts = urlsplit(raw)
+        if parts.scheme not in ("https", "http", "ssh") or not parts.hostname:
+            return None
+        host, path = parts.hostname.lower(), parts.path
+    else:
+        matched = _SCP.fullmatch(raw)
+        if not matched:
+            return None
+        host, path = matched.group(1).lower(), matched.group(2)
+    if path.endswith(".git"):
+        path = path[:-4]
+    path = path.strip("/")
+    parts = path.split("/")
+    if not host or not path or any(not part or part in (".", "..") or ":" in part or "\\" in part for part in parts):
+        return None
+    return host, path
+
+
+def _origin_url(common: Path) -> str | None:
+    """The literal `remote.origin.url`, or None. The safe git view rewrites every remote to /nonexistent, so this
+    reads the config file itself, with includes disabled, and never returns the URL into HTML."""
+    config = common / "config"
+    try:
+        data = git_view.read_regular(config, _CONFIG_LIMIT + 1, nofollow=True)
+    except OSError:
+        return None
+    if data is None or len(data) > _CONFIG_LIMIT:
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "config", "--file", str(config), "--no-includes", "--get", "remote.origin.url"],
+            cwd=Path("/"), env=audit_env(), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    text = out.stdout[:-1] if out.stdout.endswith("\n") else out.stdout
+    if not text or any(c in text for c in "\r\n\x00"):
+        return None
+    return text
+
+
+def _inside(root: Path, rel: Path) -> bool:
+    """False when `rel` is absolute, walks out of `root`, or a symlink along it leaves `root`."""
+    if rel.is_absolute() or not rel.parts or any(part in ("", ".", "..") for part in rel.parts):
+        return False
+    current = root
+    for index, part in enumerate(rel.parts):
+        if "\x00" in part or "/" in part:
+            return False
+        current = current / part
+        try:
+            linked = current.is_symlink()
+        except OSError:
+            return False
+        if linked:
+            try:
+                target = current.resolve()
+            except OSError:
+                return False
+            if not target.is_relative_to(root):
+                return False
+            current = target
+            continue
+        if not current.exists():
+            rest = current
+            for extra in rel.parts[index + 1:]:
+                rest = rest / extra
+            try:
+                return rest.is_relative_to(root)
+            except ValueError:
+                return False
+    try:
+        return current.resolve().is_relative_to(root)
+    except (OSError, ValueError):
+        return False
+
+
+def _owner(root: Path, rel: Path) -> tuple[git_view.Layout, str] | None:
+    """The nearest git repository at or below `root` that contains `rel`, and the path inside that repository."""
+    if not _inside(root, rel):
+        return None
+    logical = root.joinpath(*rel.parts)
+    start = logical if logical.is_dir() and not logical.is_symlink() else logical.parent
+    while not start.exists() and start != root:
+        parent = start.parent
+        if parent == start:
+            return None
+        start = parent
+    if not start.exists():
+        return None
+    try:
+        here = start.resolve()
+    except OSError:
+        return None
+    if not here.is_relative_to(root):
+        return None
+    while True:
+        if os.path.lexists(here / ".git"):
+            try:
+                layout = git_view.locate(here)
+            except git_view.Unviewable:
+                return None
+            tree = layout.tree
+            if tree is None or not tree.is_relative_to(root):
+                return None
+            try:
+                repo_rel = logical.relative_to(tree).as_posix()
+            except ValueError:
+                return None
+            parts = repo_rel.split("/")
+            if not repo_rel or repo_rel == "." or any(part in ("", ".", "..") for part in parts):
+                return None
+            return layout, repo_rel
+        if here == root:
+            return None
+        parent = here.parent
+        if parent == here:
+            return None
+        here = parent
+
+
+def _entry_kind(tree: Path, rev: str, rel: str) -> str | None:
+    """`blob` or `tree` when `rel` is that exact committed entry at `rev`. A submodule or a miss is None."""
+    code, out = git(["ls-tree", rev, "--", rel], tree)
+    if code != 0 or "\n" in out or "\t" not in out:
+        return None
+    mode, _, rest = out.partition(" ")
+    kind, _, rest = rest.partition(" ")
+    _oid, sep, found = rest.partition("\t")
+    if sep != "\t" or found != rel or mode == "160000" or kind not in ("blob", "tree"):
+        return None
+    return kind
+def reference_path(root: Path, workspace_path: str, identity: tuple[str, str] | None,
+                   at: str | None, need: str, cache: dict) -> str | None:
+    """Place a committed path only in a repository whose literal origin matches the requested forge.
+
+    Read-only probes use the audit environment; a render supplies its own short-lived cache.
+    """
+    rev = at or "HEAD"
+    if identity is None or not isinstance(rev, str) or not _REV.fullmatch(rev) or ".." in rev or "//" in rev or rev.endswith("/"):
+        return None
+    try:
+        root = root.resolve()
+        key = ("place", str(root), workspace_path, identity, rev, need)
+        if key in cache:
+            return cache[key]
+        found = None
+        owned = _owner(root, Path(workspace_path))
+        if owned is not None:
+            layout, repo_rel = owned
+            origin_key = ("origin", str(layout.common), identity)
+            if origin_key not in cache:
+                url = _origin_url(layout.common)
+                cache[origin_key] = bool(url and _origin_identity(url) == identity)
+            if cache[origin_key]:
+                entry_key = ("entry", str(layout.common), rev, repo_rel)
+                if entry_key not in cache:
+                    cache[entry_key] = _entry_kind(layout.tree, rev, repo_rel)
+                if cache[entry_key] == need:
+                    found = repo_rel
+        cache[key] = found
+        return found
+    except (OSError, ValueError, subprocess.SubprocessError, git_view.Unviewable):
+        return None

@@ -42,6 +42,7 @@ from tracker import issue_key  # noqa: E402
 import test_board_sources as tbs  # noqa: E402  (module-qualified: don't re-collect its TestCases)
 import test_issue_page as tip  # noqa: E402  (module-qualified: don't re-collect its TestCases)
 from test_flow_chart import CT, LANES, NOW, TODAY, TODAY_TRACKER, YESTERDAY, YESTERDAY_TRACKER, at, merged  # noqa: E402
+from workspace import parse_coordinator  # noqa: E402
 
 import issue_page as ip  # noqa: E402
 
@@ -191,6 +192,94 @@ class GroupedRowClipTest(unittest.TestCase):
             self.assertLessEqual(g.end, end, g)
 
 
+# --- #410: a close earlier than every move empties that issue's group and leaves other work visible -------
+
+EARLY_END_COORDINATOR = """# Workspace
+
+## Coordinator
+
+- User: Robin
+- Daily log dir: `daily/`
+- Tracker: `daily/<date>-tracker.md`
+- Timezone: America/Chicago
+- Backlog: GitLab; host https://forge.example; project grp/app
+"""
+
+EARLY_END_HOME = bs.backlog.Backlog("https://forge.example", "grp/app")
+
+
+def early_end_tracker() -> str:
+    """Two tasks share a closed issue and both move after it closed; a third task stays live (#410)."""
+    day = TODAY.isoformat()
+    head = "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n" + "|---" * 11 + "|\n"
+    return f"""# Tracker
+
+## Tasks
+
+{head}| Early cut | Early cut | unassigned | running 01:00 | {day} |  | S | build | implement | #410 | c |
+| Later cut | Later cut | unassigned | running 01:10 | {day} |  | S | build | implement | #410 | c |
+| Open work | Open work | unassigned | running 00:45 | {day} |  | S | build | implement | #411 | c |
+
+## Log
+
+- 00:45 stage: Open work → implement
+- 01:00 stage: Early cut → implement
+- 01:10 stage: Later cut → implement
+"""
+
+
+def early_end_sources() -> bs.Sources:
+    """Issue #410 closed at 00:30, before either of its tasks moved, and no merged change."""
+    closed_at = at(TODAY, "00:30")
+    issue = bs.Issue("#410", "u", "t", "closed", (), closed_at=closed_at)
+    return bs.Sources({}, {"#410": issue}, {}, (), {}, home=EARLY_END_HOME)
+
+
+class EndBeforeEveryMoveTest(unittest.TestCase):
+    """A close time before every move of a shared issue drops that group's segments; other live work stays (#410)."""
+
+    def built(self):
+        text = early_end_tracker()
+        tasks = rb.parse_tracker(text).tasks
+        ended = rb.forge_ends(tasks, early_end_sources(), CT)
+        return ended, fc.build(fc.moves(text, TODAY, CT), tasks, LANES, {}, {}, NOW, ended=ended)
+
+    def test_build_empties_the_closed_group_and_keeps_the_live_row(self):
+        ended, built = self.built()
+        close = at(TODAY, "00:30")
+        self.assertEqual(ended, {"Early cut": (close, "closed"), "Later cut": (close, "closed")})
+        closed = [(s, r) for s, r in built if r.ref == "#410"]
+        self.assertEqual(len(closed), 1, closed)
+        status, row = closed[0]
+        self.assertEqual((status, row.name, row.note, row.segments), ("closed", "Early cut", "closed 00:30", ()))
+        live = [(s, r) for s, r in built if r.ref == "#411"]
+        self.assertEqual(len(live), 1, live)
+        status, row = live[0]
+        self.assertEqual(status, "running")
+        self.assertEqual([(g.category, g.start, g.end, g.kind) for g in row.segments],
+                         [("implement", at(TODAY, "00:45"), NOW, "done")])
+
+    def test_the_board_omits_the_empty_closed_group_and_shows_the_live_row(self):
+        text = early_end_tracker()
+        cfg = parse_coordinator(EARLY_END_COORDINATOR, today=TODAY)
+        html = rb.render(text, cfg, NOW, lanes=LANES, sources=early_end_sources())
+        charts = re.findall(
+            r'<h2>Flow · ([^<]+)</h2>\n<div class="meta">([^<]*)</div>\n(<figure class="gantt".*?</figure>)',
+            html, re.S)
+        self.assertEqual([title for title, _, _ in charts], ["24 hours", "7 days"])
+        for _title, meta, figure in charts:
+            self.assertRegex(meta, r"^1 running · ")
+            self.assertNotIn("merged", meta)
+            self.assertNotIn("closed", meta)
+            rows = re.findall(r'<div class="gantt-row">.*?</div>', figure)
+            self.assertEqual(len(rows), 1, figure)
+            self.assertIn('<span class="gantt-name">Open work</span>', rows[0])
+            self.assertIn('class="gantt-bar gantt-done" data-cat="implement"', rows[0])
+            self.assertNotIn("Early cut", figure)
+            self.assertNotIn("Later cut", figure)
+            self.assertNotIn("#410", figure)
+
+
 # --- point 5: the task page's elapsed and worker spans read the same clipped rows ------------------------
 
 class TaskPageEndedRowsTest(unittest.TestCase):
@@ -209,6 +298,15 @@ class TaskPageEndedRowsTest(unittest.TestCase):
         issue = replace(tip.ISSUE, state="closed", closed_at=closed_at)
         html = ip.render(109, tip.work_trackers(), tip.sources(issue=issue), NOW, LANES, tip.BoardTest().cfg())
         self.assertRegex(tip.text(html), r"(?i)\bWorked\s+4h25m\s+of\s+5h35m\s+elapsed\s*·\s*1h10m\s+waiting\b")
+
+    def test_a_closed_issue_header_is_not_open(self):
+        closed_at = at(TODAY, "01:40").astimezone(timezone.utc)
+        issue = replace(tip.ISSUE, state="closed", closed_at=closed_at)
+        html = ip.render(109, tip.work_trackers(), tip.sources(issue=issue), NOW, LANES, tip.BoardTest().cfg())
+        header = re.search(r"<header\b.*?</header>", html, re.S)[0]
+        chip = re.search(r'<span class="chip[^"]*">([^<]+)</span>', header)[1]
+        self.assertNotRegex(chip, r"(?i)^(open|needs input)$")
+        self.assertRegex(chip, r"(?i)^(closed|done)$")
 
 
 # --- #409: issue state is keyed by host and project, not by number alone ---------------------------------

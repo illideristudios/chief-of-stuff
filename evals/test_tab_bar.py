@@ -149,8 +149,8 @@ def served(pending: int, answered: int, lead_counts: bool = False) -> dict[str, 
             try:
                 db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
                 db.upsert_item("github:example/repo#110", title="Await choice", human_review=True)
-                db.add_decision("github:example/repo#110", "scope", "First choice")
-                db.add_decision("github:example/repo#110", "design", "Second choice")
+                db.add_decision("github:example/repo#110", "scope", "First choice", None, "owner")
+                db.add_decision("github:example/repo#110", "design", "Second choice", None, "owner")
             finally:
                 db.engine.dispose()
         server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)
@@ -309,6 +309,17 @@ class LeadCountsTest(unittest.TestCase):
                 self.assertNotIn("href", got["Dispatch"].attrs)
                 self.assertNotIn("href", got["Epics"].attrs)
 
+    def test_the_workers_badge_matches_the_workers_page_needs_input_tile(self):
+        # #898: the badge is the page's lead count. #110 is human_review with no review segment, which the
+        # tile used to skip, so the tab said 1 and the tile said 0.
+        tile = re.search(r"<b>(\d+)</b><span class=\"cap\">NEEDS INPUT</span>", self.pages["workers"])
+        self.assertIsNotNone(tile)
+        for page in ("board", "task", "source", "workers"):
+            with self.subTest(page=page):
+                badge = re.search(r'href="/workers"[^>]*>Workers<span class="badge"[^>]*>(\d+)</span>', self.pages[page])
+                self.assertIsNotNone(badge, page)
+                self.assertEqual(badge.group(1), tile.group(1), page)
+
     def test_unbuilt_tabs_read_as_inactive(self):
         import fragment
         unbuilt = ("Dispatch", "Since you last looked", "Epics", "Limits")
@@ -369,8 +380,8 @@ class LeadCountsTest(unittest.TestCase):
             try:
                 db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
                 db.upsert_item("github:example/repo#110", title="Await choice", human_review=True)
-                db.add_decision("github:example/repo#110", "scope", "First choice")
-                db.add_decision("github:example/repo#110", "design", "Second choice")
+                db.add_decision("github:example/repo#110", "scope", "First choice", decided_by="owner")
+                db.add_decision("github:example/repo#110", "design", "Second choice", decided_by="owner")
                 row_id = next(r.id for r in db.decisions())
             finally:
                 db.engine.dispose()
@@ -415,9 +426,9 @@ class LeadCountsTest(unittest.TestCase):
                 db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
                 db.upsert_item("github:example/repo#110", title="Choice", forge_state="open")
                 db.upsert_item("github:example/repo#111", title="Closed", forge_state="closed")
-                row = db.add_decision("github:example/repo#110", "scope", "Open choice")
+                row = db.add_decision("github:example/repo#110", "scope", "Open choice", decided_by="owner")
                 db.add_decision("github:example/repo#110", "design", "Answered choice", answer="yes", decided_by="user")
-                db.add_decision("github:example/repo#111", "scope", "Closed issue choice")
+                db.add_decision("github:example/repo#111", "scope", "Closed issue choice", decided_by="owner")
             finally:
                 db.engine.dispose()
             server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)

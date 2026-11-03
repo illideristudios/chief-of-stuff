@@ -1,6 +1,7 @@
 """Unit tests for scripts/render_board.py: the board is a render of the tracker, and every bar cites a field."""
 
 import contextlib
+from dataclasses import replace
 import hashlib
 import http.server
 import io
@@ -24,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import estimate  # noqa: E402
 import md  # noqa: E402
 import render_board as rb  # noqa: E402
-from workspace import parse_coordinator  # noqa: E402
+from workspace import Deadline, parse_coordinator  # noqa: E402
 from test_board_flow_design import outline  # noqa: E402
 import tracker as tr  # noqa: E402
 from backlog import Backlog, GitHubBacklog  # noqa: E402
@@ -1203,6 +1204,87 @@ class DeadlineScopeTest(unittest.TestCase):
         self.assertIsNotNone(m, buf.getvalue())
 
 
+class ExpiredDeadlineClockTest(unittest.TestCase):
+    """When every configured deadline is past, the clock counts toward today's end of day, never backward."""
+
+    def setUp(self) -> None:
+        self.now = datetime(2026, 10, 18, 17, 42, tzinfo=CT)
+        self.cfg = parse_coordinator(CLAUDE_MD, today=self.now.date())
+
+    def test_every_deadline_past_selects_end_of_day(self) -> None:
+        self.assertEqual([d.name for d in self.cfg.deadlines], ["Launch", "Final"])
+        self.assertTrue(all(d.at < self.now for d in self.cfg.deadlines))
+        html = rb.render(TRACKER, self.cfg, self.now)
+        self._assert_clock(html, "2026-10-18T23:59:00-05:00", "end of day in", "6h17m00s")
+        self.assertNotIn("Final in", html)
+        self.assertNotIn("Launch in", html)
+        self.assertNotRegex(html, r'class="panels-left"[^>]*>-')
+
+    def test_no_configured_deadlines_use_the_same_fallback(self) -> None:
+        text = CLAUDE_MD.replace("- Deadlines:\n  - Launch: 2026-09-16 23:59\n  - Final: 2026-09-20 12:00\n", "")
+        cfg = parse_coordinator(text, today=self.now.date())
+        self.assertEqual(cfg.deadlines, ())
+        html = rb.render(TRACKER, cfg, self.now)
+        self._assert_clock(html, "2026-10-18T23:59:00-05:00", "end of day in", "6h17m00s")
+
+    def test_the_first_deadline_still_ahead_wins(self) -> None:
+        now = datetime(2026, 9, 17, 10, 0, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, now)
+        self._assert_clock(html, "2026-09-20T12:00:00-05:00", "Final in", None)
+        self.assertNotIn("end of day", html)
+
+    def test_a_deadline_equal_to_now_stays_and_reads_zero(self) -> None:
+        now = datetime(2026, 9, 16, 23, 59, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, now)
+        self._assert_clock(html, "2026-09-16T23:59:00-05:00", "Launch in", "0h00m00s")
+        self.assertNotIn("Launch passed", html)
+
+    def test_a_named_only_future_deadline_is_the_clock(self) -> None:
+        cfg = parse_coordinator(CLAUDE_MD_EXAM, today=SUNDAY.date())
+        html = rb.render(SUNDAY_TRACKER, cfg, SUNDAY)
+        self._assert_clock(html, "2026-09-26T23:59:00-05:00", "PCCAT 1st attempt in", None)
+        self.assertEqual(estimate.governing_deadline(cfg, SUNDAY).name, "end of day")
+        self.assertEqual(rb.horizon(cfg, SUNDAY), (datetime(2026, 9, 21, 0, 0, tzinfo=CT), "end of day"))
+
+    def test_an_expired_list_keeps_the_task_horizon(self) -> None:
+        self.assertEqual(rb.nearest_deadline(self.cfg, self.now).name, "end of day")
+        self.assertEqual(rb.nearest_deadline(self.cfg, self.now).at, datetime(2026, 10, 18, 23, 59, tzinfo=CT))
+        self.assertEqual(estimate.governing_deadline(self.cfg, self.now).at, datetime(2026, 10, 18, 23, 59, tzinfo=CT))
+        self.assertEqual(rb.horizon(self.cfg, self.now), (datetime(2026, 10, 19, 0, 0, tzinfo=CT), "end of day"))
+
+    def test_the_fallback_uses_the_workspace_zone(self) -> None:
+        zone = ZoneInfo("America/Los_Angeles")
+        now = datetime(2026, 10, 18, 17, 42, tzinfo=zone)
+        cfg = parse_coordinator(CLAUDE_MD.replace("America/Chicago", "America/Los_Angeles"), today=now.date())
+        html = rb.render(TRACKER, cfg, now)
+        self.assertIn('data-tz="America/Los_Angeles"', html)
+        self._assert_clock(html, "2026-10-18T23:59:00-07:00", "end of day in", "6h17m00s")
+
+    def test_after_2359_the_same_day_says_passed_and_the_next_day_is_new(self) -> None:
+        late = datetime(2026, 10, 18, 23, 59, 30, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, late)
+        self._assert_clock(html, "2026-10-18T23:59:00-05:00", "end of day passed", "0h00m30s ago")
+        nxt = datetime(2026, 10, 19, 0, 0, 1, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, nxt)
+        self._assert_clock(html, "2026-10-19T23:59:00-05:00", "end of day in", "23h58m59s")
+
+    def test_a_deadline_name_is_escaped_in_the_attribute_and_the_label(self) -> None:
+        now = self.now
+        name = 'A<B>&"C"'
+        cfg = replace(self.cfg, deadlines=(Deadline(name, datetime(2026, 10, 18, 20, 0, tzinfo=CT)),))
+        html = rb.render(TRACKER, cfg, now)
+        self.assertIn('data-deadline-name="A&lt;B&gt;&amp;&quot;C&quot;"', html)
+        self.assertIn('<span class="panels-clock-name">A&lt;B&gt;&amp;&quot;C&quot; in</span>', html)
+        self.assertNotIn("A<B>", html)
+
+    def _assert_clock(self, html: str, instant: str, label: str, left: str | None) -> None:
+        self.assertIn(f'data-deadline="{instant}"', html)
+        self.assertIn(f'<span class="panels-clock-name">{label}</span>', html)
+        self.assertIn(f'<time class="panels-left" datetime="{instant}">', html)
+        if left is not None:
+            self.assertIn(f'<time class="panels-left" datetime="{instant}">{left}</time>', html)
+
+
 class DecisionDeadlineTest(unittest.TestCase):
     """A recorded deadline reaches the clock, markers and task horizon on the board."""
 
@@ -1675,7 +1757,7 @@ class TaskStateCarriesAShaTest(unittest.TestCase):
         """Confirmed against the rendered artifact, not the call graph: chief-of-stuff-improvements
         read the code and said the sha would show; it also said its own read was a hypothesis."""
         text = ("# T\n\n## Tasks\n\n" + LANED_HEAD
-                + f"| A oldest | A oldest | worker | done 09:00–10:00 {self.SHA} | 2026-09-15 |  | M | build | merge |  | c |\n")
+                + f"| A oldest | A oldest | worker | done 09:00–10:00 {self.SHA} | 2026-09-15 |  | M | build | main |  | c |\n")  # done draws only at main (#1153)
         cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         html = rb.render(text, cfg, NOW)
         self.assertIn(self.SHA, html)
@@ -2014,6 +2096,69 @@ class LaneColumnsTest(unittest.TestCase):
         self.assertIn('<div class="meta">1 issue · 0 merge requests</div>', html)
         self.assertNotRegex(html, r'href="[^"]*workflow')
         self.assertNotIn("#workflow", html)
+
+    def test_a_held_card_names_its_review_cause_when_present_and_plain_needs_input_otherwise(self) -> None:
+        # #203: a card waiting on the user at a non-gate stage carries `NEEDS INPUT · <cause>` when its latest Log move
+        # is a classified human-review stop, and plain `NEEDS INPUT` when class-less or without a review end.
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        tracker = (
+            "# Tracker 2026-09-16\n\nCoordinator: coordinator. Board: board-7.\n\n## Tasks\n\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Cut the release | Cut the release branch | Robin | waiting | 10:30 | 23:00 | M | build | implement | #9 | Checklist: cut |\n"
+            "| Write README | Write eval README | Robin | waiting | 09:00 | 17:00 | S | build | implement | #10 | Checklist: readme |\n"
+            "\n## Log\n\n"
+            "- 09:00 stage: Cut the release → implement\n"
+            "- 09:15 one-shot impl-1 started: codex, worktree `trees/cut`, task Cut the release branch\n"
+            "- 09:45 one-shot impl-1: HUMAN REVIEW NEEDED (worker's call) — conflicting test. Changes: none.\n"
+            "- 10:00 one-shot impl-2 started: codex, worktree `trees/readme`, task Write eval README\n"
+            "- 10:20 one-shot impl-2: HUMAN REVIEW NEEDED — old class-less line. Changes: none.\n"
+        )
+        def card_for(page: str, title: str) -> str:
+            flow = page.split('<section id="flow">')[1].split('</figure></section>')[0]
+            matches = [part for part in flow.split('<div class="columns-card')[1:] if f">{title}<" in part]
+            self.assertEqual(len(matches), 1, (title, flow))
+            return matches[0]
+
+        html = rb.render(tracker, cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        cut_card = card_for(html, "Cut the release")
+        readme_card = card_for(html, "Write README")
+        self.assertIn(">NEEDS INPUT · worker&#x27;s call<", cut_card)
+        self.assertNotIn("columns-chip", cut_card)
+        self.assertIn(">NEEDS INPUT<", readme_card)
+        self.assertNotIn("NEEDS INPUT ·", readme_card)
+        self.assertNotIn("columns-chip", readme_card)
+        # A later stage move using the task's short name clears the review cause even when the launch used the longer item.
+        cleared = rb.render(tracker + "- 10:30 stage: Cut the release → implement\n",
+                            cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        self.assertIn(">NEEDS INPUT<", card_for(cleared, "Cut the release"))
+        self.assertNotIn("NEEDS INPUT ·", card_for(cleared, "Cut the release"))
+        self.assertIn(">NEEDS INPUT<", card_for(cleared, "Write README"))
+
+    def test_short_name_beats_later_tasks_item_when_resolving_log_moves(self) -> None:
+        # #203 review R3: a task's short `name` must not be shadowed in Log resolution by a later row's `item`.
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        base_tracker = (
+            "# Tracker 2026-09-16\n\nCoordinator: coordinator. Board: board-7.\n\n## Tasks\n\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Foo | Long item A | Robin | waiting | 10:30 | 23:00 | M | build | implement | #9 | Checklist: a |\n"
+            "| Bar | Foo | Robin | waiting | 09:00 | 17:00 | S | build | implement | #10 | Checklist: b |\n"
+            "\n## Log\n\n"
+            "- 09:15 one-shot impl-1 started: codex, worktree `trees/foo`, task Long item A\n"
+            "- 09:45 one-shot impl-1: HUMAN REVIEW NEEDED (worker's call) — conflicting test. Changes: none.\n"
+        )
+        before = rb.render(base_tracker, cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        before_flow = before.split('<section id="flow">')[1].split('</figure></section>')[0]
+        before_foo = [part for part in before_flow.split('<div class="columns-card')[1:] if ">Foo<" in part]
+        self.assertEqual(len(before_foo), 1, before_flow)
+        self.assertIn(">NEEDS INPUT · worker&#x27;s call<", before_foo[0])
+        after = rb.render(base_tracker + "- 10:30 stage: Foo → implement\n", cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        after_flow = after.split('<section id="flow">')[1].split('</figure></section>')[0]
+        after_foo = [part for part in after_flow.split('<div class="columns-card')[1:] if ">Foo<" in part]
+        self.assertEqual(len(after_foo), 1, after_flow)
+        self.assertIn(">NEEDS INPUT<", after_foo[0])
+        self.assertNotIn("NEEDS INPUT ·", after_foo[0])
 
 
 class WorkflowTokenTest(unittest.TestCase):

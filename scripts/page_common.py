@@ -251,7 +251,7 @@ code{font-family:ui-monospace,monospace;font-size:.88em;background:var(--ref-bg)
 .options{display:flex;flex-direction:column;background:var(--surface);border-top:3px solid var(--brass);border-radius:5px;padding:4px 14px;box-shadow:0 2px 6px color-mix(in srgb,var(--fg) 8%,transparent)}
 .opt{display:grid;grid-template-columns:44px minmax(0,1fr);gap:2px 8px;padding:8px 6px;margin:0 -6px;width:calc(100% + 12px);border-radius:3px}
 .opt+.opt{border-top:1px dotted var(--line)}
-.opt:hover{background:var(--bg)}
+label.opt:hover{background:var(--bg)}
 label.opt,label.o{cursor:pointer} label.o:hover{border-color:var(--brass)}
 .opt .k{font:700 16px/1.3 ui-monospace,monospace;color:var(--muted)}
 .opt input,.o input{accent-color:var(--brass);margin:0 4px 0 0}
@@ -343,3 +343,11 @@ h2.pend{color:var(--link)}
 @media (max-width:480px){header.top{flex-direction:column;align-items:flex-start;gap:6px}.refs{grid-template-columns:minmax(0,1fr)}}
 """ + TAB_CSS + PROSE_CSS + "</style>\n"
 HEAD = HEAD_OPEN + PAGE_CSS
+
+
+STEP_TIMELINE_CSS = """
+.step-body{min-width:0}
+details.step-report{margin-top:4px}
+details.step-report>summary{font-size:12px;color:var(--muted);cursor:pointer}
+details.step-report>.prose{margin-top:4px}
+"""

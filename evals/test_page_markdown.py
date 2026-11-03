@@ -21,7 +21,7 @@ import decision_page as dp
 import page_common
 import panels
 import source_page as sp
-from test_decision_page import decision, GH
+from test_decision_page import decision, GH, owned
 from test_issue_page import ISSUE, MR, NOW, page, sources
 import board_sources as bs
 
@@ -99,7 +99,8 @@ class MarkdownTest(unittest.TestCase):
         self.assertIn('&lt;!--', html)
 
     def test_forge_references_do_not_rewrite_links_or_fences(self):
-        html = dp._md('**#12** and `src/app.py:3` [#12](https://example.com/#12) <https://example.com/#12>', dp.Linker(GH))
+        root = owned(self, {"src/app.py": "x = 1\n"})
+        html = dp._md('**#12** and `src/app.py:3` [#12](https://example.com/#12) <https://example.com/#12>', dp.Linker(GH, root))
         self.assertEqual(html.count('class="ref"'), 2)
         self.assertFalse(Structure(html).nested_links)
         block = page_common.markdown_blocks('```\n#12 src/app.py:3\n```', dp.Linker(GH).resolve)

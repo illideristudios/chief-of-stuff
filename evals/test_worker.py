@@ -25,6 +25,9 @@ import slots
 import store
 import supervisor
 import worker
+import completion
+import engine_facts
+from evals import make_repo, git_taint
 from evals.test_engine import KEY, NOW, FakeForge, policies
 
 
@@ -52,6 +55,68 @@ class WorkerTest(unittest.TestCase):
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
         self.addCleanup(git.stop)
+        self.clock_patch = mock.patch.object(claude_adapter, "require_worker_clock")
+        self.clock = self.clock_patch.start()
+        self.addCleanup(self.clock_patch.stop)
+
+    def test_a_refused_clock_starts_no_worker_and_records_no_run(self):
+        # Like any refused start, it follows the tree cut (#551); the run record is what a refusal never writes.
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start") as start:
+            with self.assertRaisesRegex(claude_adapter.ClockError, "no clock"):
+                self.launch()
+        start.assert_not_called()
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def rotation_launch(self, rotation, **launch_kwargs):
+        """A real rotation (never a mocked selection) with every host launchable, claude and codex starts mocked."""
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(f'[models.implement]\nrotation = {json.dumps(rotation)}\n')
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "available", return_value=True), \
+             mock.patch.object(worker.t3_adapter, "available", return_value=True), \
+             mock.patch.object(worker, "below_limit", return_value=True), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
+             mock.patch.object(worker.host_adapter, "start",
+                               side_effect=lambda runtime, request, run_dir, env: (self.start(request, run_dir), "")) as host, \
+             mock.patch.object(worker.t3_adapter, "start", side_effect=lambda request, run_dir, **kw: self.start(request, run_dir)) as t3, \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as claude, \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            used = worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                                 policies=self.p, forge=self.forge, clock=lambda: NOW, **launch_kwargs)
+        return used, claude, host, t3
+
+    def test_a_refused_clock_makes_only_the_local_claude_entry_unlaunchable(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        used, claude, host, _ = self.rotation_launch(["claude:sonnet@high", "codex:gpt-6.1-sol@high"])
+        claude.assert_not_called()
+        host.assert_called_once()
+        self.assertEqual(used, ("gpt-6.1-sol", "high", "codex"))
+        self.clock.assert_called_once()
+
+    def test_a_refused_clock_with_no_other_entry_refuses_with_the_clock_error(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        with self.assertRaisesRegex(claude_adapter.ClockError, "no clock"):
+            self.rotation_launch(["claude:sonnet@high"])
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_a_t3_or_non_claude_launch_never_checks_the_local_clock(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        used, claude, _, t3 = self.rotation_launch(["claude:sonnet@high"], launcher="t3")
+        t3.assert_called_once()
+        claude.assert_not_called()
+        self.assertEqual(used, ("sonnet", "high"))
+        self.clock.assert_not_called()
+
+    def test_a_usable_clock_keeps_the_first_local_claude_entry(self):
+        used, claude, host, _ = self.rotation_launch(["claude:sonnet@high", "codex:gpt-6.1-sol@high"])
+        claude.assert_called_once()
+        host.assert_not_called()
+        self.assertEqual(used, ("sonnet", "high"))
+        self.clock.assert_called_once()
 
     def launch(self, stage="implement", attempt=1):
         return worker.launch(KEY, stage, attempt, None, store=self.db, root=self.root,
@@ -82,6 +147,43 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(worker.process_status, "identity", return_value=None):
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         return self.db.segments(KEY)[0]
+
+    def test_collect_captures_live_and_ended_attempts_without_the_source_after_restart(self):
+        run = self.launched()
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        (run / "command.json").write_text(json.dumps({"session_id": record["session_id"], "cwd": record["tree"],
+            "env": {"CLAUDE_CONFIG_DIR": str(self.root / "profile")}}))
+        path = claude_adapter.transcript_path(record)
+        path.parent.mkdir(parents=True)
+        line = json.dumps({"type": "assistant", "sessionId": record["session_id"],
+                           "message": {"content": "A generic reply"}}) + "\n"
+        path.write_text(line)
+        with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            worker.collect(self.db, self.root, transcript_max_bytes=2048)
+        got = self.db.transcript(KEY, "implement", 1)
+        self.assertEqual(got["events"][0]["kind"], "worker")
+        self.assertEqual(got["max_bytes"], 2048)
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+        with path.open("a") as f:
+            f.write(line)
+        worker.collect(self.db, self.root)
+        self.assertEqual(len(self.db.transcript(KEY, "implement", 1)["events"]), 2)
+        path.unlink()
+        worker.collect(self.db, self.root)
+        self.assertIn("unavailable", self.db.transcript(KEY, "implement", 1)["last_gap"])
+
+    def test_t3_and_other_runtimes_never_read_provider_local_transcripts(self):
+        segment = SimpleNamespace(issue_key=KEY, stage="implement", attempt=1, ended_at=None)
+        with mock.patch.object(claude_adapter, "transcript_path") as read:
+            for record in ({"launcher": "t3", "runtime": "claude"}, {"runtime": "codex"}):
+                worker._capture_transcript(self.db, segment, record, 1024)
+        read.assert_not_called()
+
+    def test_invalid_run_directory_marks_a_gap_without_interrupting_collection(self):
+        segment = SimpleNamespace(issue_key=KEY, stage="implement", attempt=1, ended_at=None)
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        worker._capture_transcript(self.db, segment, {"session_id": "generic-session", "run_dir": None}, 1024)
+        self.assertIn("unverified", self.db.transcript(KEY, "implement", 1)["last_gap"])
 
     def test_assignment_has_fixed_header_row_issue_job_and_persona_rules(self):
         persona = SimpleNamespace(role="builder", rules=("Tests first.",))
@@ -128,8 +230,52 @@ class WorkerTest(unittest.TestCase):
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
-                          trees=self.trees, policies=self.p, forge=self.forge, rules=("Keep tests.",), clock=lambda: NOW)
+                          trees=self.trees, policies=self.p, forge=self.forge,
+                          config=engine.settings.Settings(workers=engine.settings.Workers(rules=("Keep tests.",))),
+                          clock=lambda: NOW)
         self.assertIn("- Keep tests.\n", start.call_args.args[0].prompt)
+
+    def test_launch_uses_pass_snapshot_after_settings_change_on_disk(self):
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- Settings: `settings.toml`\n- Agent: builder task\n")
+        path = self.root / "settings.toml"
+        path.write_text('[lanes.code]\nstages = ["implement"]\n[workers]\nclaude_as_profile = "secondary"\nrules = ["Keep tests."]\n'
+                        '[stages.implement]\nagent = "builder"\nskills = ["original-skill"]\n')
+        config = engine.settings.load(self.root, "settings.toml")
+        path.write_text('[lanes.code]\nstages = ["implement"]\n[workers]\nclaude_as_profile = "other"\nrules = ["Changed rule."]\n'
+                        '[stages.implement]\nagent = "other"\nskills = ["changed-skill"]\n')
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
+                          trees=self.trees, policies=self.p, forge=self.forge, config=config, clock=lambda: NOW)
+        request = start.call_args.args[0]
+        self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
+        self.assertEqual(request.agent, "builder")
+        self.assertEqual(build.call_args.args[5], "builder")
+        self.assertIn("Skills: load and follow original-skill", request.prompt)
+        self.assertIn("- Keep tests.\n", request.prompt)
+        self.assertNotIn("Changed rule.", request.prompt)
+        self.assertNotIn("changed-skill", request.prompt)
+
+    def test_launch_without_a_snapshot_uses_the_configured_profile(self):
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `settings.toml`\n")
+        (self.root / "settings.toml").write_text('[workers]\nclaude_as_profile = "secondary"\n')
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            self.launch()
+        self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
+
+    def test_launch_explicit_empty_profile_uses_default_login(self):
+        config = engine.settings.Settings(workers=engine.settings.Workers(claude_as_profile="secondary"))
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
+                          trees=self.trees, policies=self.p, forge=self.forge, config=config,
+                          claude_as_profile="", clock=lambda: NOW)
+        self.assertEqual(start.call_args.kwargs["claude_as_profile"], "")
 
     def test_implement_assignment_requires_delivery_before_reporting_done(self):
         prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "implement", self.persona)
@@ -220,6 +366,7 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
              mock.patch.object(worker.claude_adapter, "cancel"), \
+             mock.patch.object(worker.process_status, "carriers", return_value=[]), \
              mock.patch.object(worker.time, "monotonic", side_effect=[0, 10]), \
              mock.patch.object(worker.process_status, "identity", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "verify"):
@@ -384,6 +531,31 @@ class WorkerTest(unittest.TestCase):
                               policies=self.p, forge=self.forge, clock=lambda: NOW, launcher="t3", claude_as_profile="alternate")
         start.assert_not_called()
 
+    def test_t3_starts_the_thread_on_the_provider_instance_mapped_from_the_account_profile(self):
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.dict(os.environ, {"T3CODE_HOME": str(self.root / "no-t3")}), \
+             mock.patch.object(worker, "_model", return_value=worker.ModelEntry("claude", "sonnet")), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.t3_adapter, "start", side_effect=lambda request, run_dir, **kw: self.start(request, run_dir)) as start:
+            worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees, policies=self.p,
+                          forge=self.forge, clock=lambda: NOW, launcher="t3", claude_as_profile="alternate",
+                          t3_providers={"alternate": "cl2"})
+        self.assertEqual(start.call_args.kwargs["provider"], "cl2")
+
+    def test_a_missing_provider_instance_refuses_the_t3_launch_before_any_thread_start(self):
+        self.forge.default_branch_protected = lambda: True
+        (self.root / "no-t3" / "userdata").mkdir(parents=True)
+        (self.root / "no-t3" / "userdata" / "settings.json").write_text('{"providerInstances": {"claudeAgent": {}}}')
+        with mock.patch.dict(os.environ, {"T3CODE_HOME": str(self.root / "no-t3")}), \
+             mock.patch.object(worker, "_model", return_value=worker.ModelEntry("claude", "sonnet")), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.t3_adapter, "start") as start:
+            with self.assertRaisesRegex(RuntimeError, "provider instance 'cl2' does not exist"):
+                worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees, policies=self.p,
+                              forge=self.forge, clock=lambda: NOW, launcher="t3", claude_as_profile="alternate",
+                              t3_providers={"alternate": "cl2"})
+        start.assert_not_called()
+
     def test_a_t3_rotation_with_only_unsupported_hosts_does_not_invent_a_claude_entry(self):
         (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
         (self.root / "chief-of-stuff.toml").write_text('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high"]\n')
@@ -442,6 +614,51 @@ class WorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "T3.*live"):
                 worker._clear_tree(self.root, self.tree, self.db, KEY, NOW.isoformat())
         stop.assert_not_called()
+
+    def t3_message(self, body="also update the docs"):
+        self.t3_launched()
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        self.db.queue_worker_message(KEY, "implement", 1, record["session_id"], body, request_id="r1")
+        return Path(record["run_dir"])
+
+    def deliver_t3(self, *, send=None, alive=True, error=""):
+        evidence = worker.t3_adapter.Evidence(alive=alive, launcher="t3", error=error)
+        with mock.patch.object(worker.t3_adapter, "observe", return_value=evidence), \
+             mock.patch.object(worker.t3_adapter, "send", side_effect=send) as sent:
+            worker.deliver_messages(self.db, self.root)
+        return sent, self.db.worker_messages(KEY)[0]
+
+    def test_a_message_to_a_t3_worker_goes_through_thread_send_and_never_claims_the_worker_read_it(self):
+        run_dir = self.t3_message()
+        sent, message = self.deliver_t3()
+        sent.assert_called_once_with(run_dir, "mcp:t-1", "also update the docs")
+        self.assertEqual(message.status, "delivered")
+        self.assertRegex(message.evidence, r"^T3 accepted .*does not show the worker read it")
+
+    def test_a_t3_refusal_fails_the_message_with_the_clis_words(self):
+        self.t3_message()
+        _, message = self.deliver_t3(send=RuntimeError("t3 thread send failed: No T3 Code thread matches"))
+        self.assertEqual(message.status, "failed")
+        self.assertIn("No T3 Code thread matches", message.evidence)
+        self.assertIn(worker.NEVER_WRITTEN, message.evidence)
+
+    def test_an_ambiguous_t3_send_stays_unconfirmed_and_is_never_sent_twice(self):
+        self.t3_message()
+        _, message = self.deliver_t3(send=subprocess.TimeoutExpired("t3", 120))
+        self.assertEqual(message.status, "sending")
+        sent, message = self.deliver_t3()
+        sent.assert_not_called()
+        self.assertEqual(message.status, "sending")
+
+    def test_a_message_waits_while_the_thread_is_unreadable_and_fails_once_it_has_ended(self):
+        self.t3_message()
+        sent, message = self.deliver_t3(error="T3 evidence unavailable: down")
+        sent.assert_not_called()
+        self.assertEqual(message.status, "queued")
+        sent, message = self.deliver_t3(alive=False)
+        sent.assert_not_called()
+        self.assertEqual(message.status, "failed")
+        self.assertIn("thread has ended", message.evidence)
 
     def test_a_t3_run_is_classified_as_a_host_without_a_claude_envelope_and_checked_for_outside_merges(self):
         self.t3_launched()
@@ -1066,25 +1283,22 @@ class WorkerTest(unittest.TestCase):
                     (run / "exit.json").unlink()
                 with mock.patch.object(worker.process_status, "identity", return_value=None):
                     self.suite_pass(forge, mock.Mock(return_value=("example", "")))
-                expected = "human_review" if exitless else "failed"
-                self.assertEqual(self.db.segments(KEY)[0].outcome, expected)
-                self.assertEqual("suite_hold" in self.db.resume(KEY), exitless)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "failed")
+                self.assertNotIn("suite_hold", self.db.resume(KEY))
 
     def test_a_dead_worker_without_an_exit_retries_a_red_suite(self):
         forge = self.suite_run()
         run_dir = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
         (run_dir / "exit.json").unlink()
-        forge.add_human_hold = mock.Mock(return_value="")
+        forge.add_human_hold = mock.Mock(wraps=forge.add_human_hold)
+        launch = mock.Mock(return_value=("example", ""))
         with mock.patch.object(worker.process_status, "identity", return_value=None), \
              mock.patch.object(engine.engine_facts.process_status, "identity", return_value=None):
-            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
-        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
-        self.assertEqual(self.db.resume(KEY)["suite_hold"]["stage"], "implement")
-        launch = mock.Mock(return_value=("example", ""))
-        self.suite_pass(forge, launch)
+            self.suite_pass(forge, launch)
         launch.assert_called_once_with(KEY, "implement", 2, "builder")
         self.assertEqual(self.db.segments(KEY)[0].outcome, "failed")
         self.assertNotIn("suite_hold", self.db.resume(KEY))
+        forge.add_human_hold.assert_not_called()
 
     def test_a_non_done_report_is_not_suite_gated(self):
         forge = self.suite_run(outcome="blocked")
@@ -1212,11 +1426,72 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual([s.outcome for s in self.db.segments()], ["failed", "failed"])
         self.assertEqual(len(self.db.log(KEY)), 2)
 
-    def test_a_gone_worker_with_no_exit_record_stays_open_for_the_planner(self):
-        self.launched()
+    def test_a_gone_worker_with_no_exit_record_is_collected(self):
+        run = self.launched()
+        self.report(run)
         with mock.patch.object(worker.process_status, "identity", return_value=None):
             worker.collect(self.db, self.root, lambda: NOW)
-        self.assertIsNone(self.db.segments()[0].ended_at)
+        self.assertEqual(self.db.segments()[0].outcome, "done")
+        self.assertEqual(self.db.asks(KEY), [])
+
+    def test_dead_run_without_exit_recovers_quota_from_stderr(self):
+        run = self.launched()
+        (run / "stderr").write_text("429 RESOURCE_EXHAUSTED quota; resets in 2 hours")
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW)
+        self.assertEqual(self.db.segments()[0].outcome, "quota")
+        self.assertEqual(self.db.resume(KEY)["quota"]["retry_at"], (NOW + timedelta(hours=2)).isoformat())
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertTrue(self.tree.exists())
+
+    def test_killed_launch_keeps_the_slot_and_adopts_without_a_second_start(self):
+        def killed(request, run_dir, **kwargs):
+            self.start(request, run_dir, **kwargs)
+            raise KeyboardInterrupt
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=killed):
+            with self.assertRaises(KeyboardInterrupt):
+                slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                            max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+        self.assertEqual(slots.running(self.db), 1)
+        worker._runners.clear()
+        with mock.patch.object(worker.process_status, "identity", return_value="start"), \
+             mock.patch.object(worker.claude_adapter, "start") as start:
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        start.assert_not_called()
+        self.assertEqual(slots.running(self.db), 1)
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["pid"], 77)
+
+    def test_finished_unrecorded_start_without_exit_uses_its_session_report(self):
+        run = self.launched()
+        self.report(run)
+        data = self.db.resume(KEY)
+        data.pop("runs")
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertEqual(self.db.asks(KEY), [])
+
+    def test_unrecorded_start_waits_when_the_process_probe_is_unavailable(self):
+        self.launched()
+        data = self.db.resume(KEY)
+        data.pop("runs")
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.process_status, "identity", side_effect=OSError("process view unavailable")):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(slots.running(self.db), 1)
+        self.assertEqual(self.db.asks(KEY), [])
+
+    def test_an_unstarted_live_runner_keeps_its_reservation(self):
+        run = worker._run_dir(self.root, KEY, "implement", 1)
+        run.mkdir(parents=True)
+        (run / "command.json").write_text(json.dumps({"session_id": "starting-session"}))
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        with mock.patch.object(worker.process_status, "carriers", return_value=[78]):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertTrue(run.exists())
+        self.assertEqual(slots.running(self.db), 1)
 
     def test_malformed_run_records_and_result_end_failed(self):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
@@ -1322,6 +1597,8 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments()[0].outcome, "failed")
 
     def test_real_detached_adapter_is_adopted_and_collected_after_engine_restart(self):
+        self.clock_patch.stop()
+        self.addCleanup(self.clock_patch.start)
         fake = Path(__file__).parent / "fixtures" / "fake_claude.py"
         cli = self.root / "fake-cli"
         cli.write_text(f"#!{sys.executable}\nimport time, runpy\ntime.sleep(0.5)\n"
@@ -1411,16 +1688,63 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["session_id"], saved["session_id"])
                 self.assertEqual(list(run.parent.glob(f"{run.name}-refused-*")), [])
 
-    def test_collect_keeps_a_command_only_start_reserved(self):
-        # Engine restart between Popen and started.json must not fail the reservation.
-        run = worker._run_dir(self.root, KEY, "implement", 1)
-        run.mkdir(parents=True)
-        (run / "command.json").write_text("{}")
-        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
-        worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
-        seg = self.db.segments(KEY)[0]
-        self.assertIsNone(seg.ended_at)
-        self.assertIsNone(seg.outcome)
+    def test_collect_quarantines_a_command_only_start_and_drops_the_empty_slot(self):
+        for body in ("{}", "{truncated"):
+            with self.subTest(body=body):
+                run = worker._run_dir(self.root, KEY, "implement", 1)
+                run.mkdir(parents=True, exist_ok=True)
+                (run / "command.json").write_text(body)
+                self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+                worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+                self.assertEqual(self.db.segments(KEY), [])
+                self.assertFalse(run.exists())
+                self.assertTrue(list((run.parent / "quarantine").glob(f"{run.name}-*")))
+
+    def test_t3_preserve_start_uses_thread_state_never_process_carriers(self):
+        self.db.set_resume(KEY, {"worktree": str(self.tree), "work_branch": "work/issue-1-implement-1"})
+        with mock.patch.object(worker.process_status, "carriers",
+                               side_effect=AssertionError("PID check forbidden for T3")), \
+             mock.patch.object(worker.process_status, "identity",
+                               side_effect=AssertionError("PID check forbidden for T3")):
+            # 1. Interrupted before launching.json or refused before thread start: quarantine and drop slot.
+            for extra in (None, "start_failed.json"):
+                run = worker._run_dir(self.root, KEY, "implement", 1)
+                run.mkdir(parents=True)
+                (run / "t3.json").write_text(json.dumps({"cli": "/t3", "tree": str(self.tree), "title": "w", "home": ""}))
+                (run / "command.json").write_text(json.dumps({"session_id": "t3-s1"}))
+                if extra:
+                    (run / "launching.json").write_text("{}")
+                    (run / extra).write_text('{"error": "refused"}')
+                self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+                worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+                self.assertEqual(self.db.segments(KEY), [])
+                self.assertFalse(run.exists())
+
+            # 2. Ambiguous launch in flight (launching.json present, thread unconfirmed): preserve reservation.
+            run = worker._run_dir(self.root, KEY, "implement", 1)
+            run.mkdir(parents=True)
+            (run / "t3.json").write_text(json.dumps({"cli": "/t3", "tree": str(self.tree), "title": "w", "home": ""}))
+            (run / "command.json").write_text(json.dumps({"session_id": "t3-s2"}))
+            (run / "launching.json").write_text("{}")
+            self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+            with mock.patch.object(worker.t3_adapter, "thread_state", side_effect=RuntimeError("unconfirmed")):
+                worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+            self.assertEqual(slots.running(self.db), 1)
+            self.assertTrue(run.exists())
+
+            # 3. Once thread_state recovers thread.json, collect adopts the T3 worker without started.json or PIDs.
+            def recover_thread(path, **kwargs):
+                (path / "thread.json").write_text(json.dumps({
+                    "thread_id": "mcp:t-9", "thread_link": "t3code://threads/env-1/mcp:t-9"}))
+                return {"threadId": "mcp:t-9", "status": "running"}
+
+            with mock.patch.object(worker.t3_adapter, "thread_state", side_effect=recover_thread), \
+                 mock.patch.object(worker.t3_adapter, "observe",
+                                   return_value=worker.t3_adapter.Evidence(alive=True, launcher="t3", status="running")):
+                worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+            self.assertEqual(slots.running(self.db), 1)
+            saved = self.db.resume(KEY)["runs"]["implement-1"]
+            self.assertEqual((saved["launcher"], saved["thread_id"], saved["session_id"]), ("t3", "mcp:t-9", "t3-s2"))
 
     def test_collect_still_fails_a_reservation_with_no_start_evidence(self):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
@@ -1632,6 +1956,410 @@ class WorkerTest(unittest.TestCase):
         self.finish("quota")
         worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         self.assertEqual(self.db.resume(KEY)["quota_percent"], 100)
+
+
+class RecoveryTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.addCleanup(mock.patch.stopall)
+        self.views = git_taint.private_git_views(self.root / "views")
+        self.views.__enter__()
+        self.addCleanup(self.views.__exit__, None, None, None)
+        self.clone = make_repo.build(self.root, {"worktrees": [
+            {"name": "issue-1-implement-1", "branch": "work/issue-1-implement-1", "merged": False, "dirty": True}]})
+        self.trees = self.root / "trees"
+        self.tree = self.trees / "issue-1-implement-1"
+        path = self.root / "store.db"
+        store.migrate(path)
+        self.db = store.Store(path, clock=lambda: NOW)
+        self.addCleanup(self.db.engine.dispose)
+        self.db.upsert_item(KEY, stage="implement")
+        self.p, self.forge = policies(), FakeForge()
+        self.forge.issue = lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(title="Build", body="Issue body"))
+        self.forge.protected_branches = lambda: ("main",)
+        self.now = NOW
+        self.head = make_repo.git(["rev-parse", "HEAD"], self.tree)
+        self.db.set_resume(KEY, {"worktree": str(self.tree), "work_branch": "work/issue-1-implement-1"})
+        mock.patch.object(engine, "_record_limits").start()
+        mock.patch.object(engine.cleanup, "execute", return_value=0).start()
+        mock.patch.object(engine.notify, "sync_workspace").start()
+        self.identity = mock.patch.object(worker.process_status, "identity", return_value="birth").start()
+        mock.patch.object(worker.process_status, "carriers", return_value=[]).start()
+        mock.patch.object(worker.claude_adapter, "require_worker_clock").start()  # the worker clock check is #636's
+        self.started = []
+        self.start = mock.patch.object(worker.claude_adapter, "start", side_effect=self.fake_start).start()
+
+    def fake_start(self, request, run_dir, **kwargs):
+        self.identity.return_value = "birth"
+        self.started.append(request.cwd)
+        (run_dir / "started.json").write_text(json.dumps({"pid": 77, "runner_pid": 78, "session_id": request.session_id}))
+        return SimpleNamespace(pid=78, poll=lambda: None)
+
+    def launch(self, key, stage, attempt, persona):
+        return worker.launch(key, stage, attempt, persona, store=self.db, root=self.root, trees=self.trees,
+                             clone=self.clone, policies=self.p, forge=self.forge, clock=lambda: self.now)
+
+    def run_pass(self, **kwargs):
+        return engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root, trees=self.trees,
+            clone=self.clone, launch=self.launch, workers=engine.settings.Workers(), clock=lambda: self.now, **kwargs)
+
+    def dead_run(self):
+        self.run_pass()
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        run = Path(record["run_dir"])
+        (run / "stdout").write_text('{"is_error": true, "result": "failed"}')
+        (run / "stderr").write_text("")
+        self.identity.return_value = None
+        return run
+
+    def test_s1_kill_then_s4_quota_resumes_without_prompt_or_state_loss(self):
+        self.run_pass()
+        segment = self.db.segments(KEY)[0]
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        worker._runners.clear()  # the engine is gone; the host remains alive
+        self.run_pass()
+        self.assertEqual(len(self.started), 1)
+        self.assertEqual(self.db.segments(KEY)[0].id, segment.id)
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"], record)
+        run = Path(record["run_dir"])
+        (run / "stdout").write_text("")
+        (run / "stderr").write_text("429 RESOURCE_EXHAUSTED quota; resets in 2 hours")
+        (run / "exit.json").write_text('{"exit_code": 1}')
+        self.identity.return_value = None
+        actions = self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "quota")
+        self.assertIn(reconcile.Wait(KEY, "quota reset pending"), actions)
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertEqual(self.db.decisions(KEY), [])
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.now += timedelta(hours=2)
+        self.run_pass()
+        self.assertEqual(len(self.started), 2)
+        self.assertEqual(self.db.segments(KEY)[-1].attempt, 2)
+        self.assertEqual(self.db.resume(KEY)["worktree"], str(self.tree))
+        self.assertEqual(make_repo.git(["symbolic-ref", "--short", "HEAD"], self.tree), "work/issue-1-implement-1")
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.tree), self.head)
+        self.assertEqual((self.tree / "scratch.txt").read_text(), "unsaved\n")
+        self.assertEqual(len(self.db.items()), 1)
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertEqual(self.db.decisions(KEY), [])
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+
+    def test_one_dirty_orphan_is_reused_without_asking(self):
+        self.dead_run()
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual(self.started, [str(self.tree), str(self.tree)])
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.tree), self.head)
+        self.assertTrue((self.tree / "scratch.txt").exists())
+        self.assertEqual(self.db.decisions(KEY), [])
+
+    def test_two_survivors_ask_once_with_actionable_options_then_reuse_the_single_survivor(self):
+        self.dead_run()
+        other = self.trees / "issue-1-plan-1"
+        make_repo.git(["worktree", "add", "-b", "work/issue-1-plan-1", str(other), "main"], self.clone)
+        # A legacy "hold" row from before hard-stop removal cannot trap recovery in an indefinite hold.
+        self.db.add_decision(KEY, "recovery", "multiple safe worker trees survive", "hold", "user",
+                             {"decision": {"options": ["abort", "hold"]}})
+        self.run_pass()
+        self.run_pass()
+        decisions = [d for d in self.db.decisions(KEY) if d.answer != "hold"]
+        self.assertEqual(len(decisions), 1)
+        decision = decisions[0]
+        self.assertEqual(decision.record["decision"]["options"],
+                         ["work/issue-1-implement-1", "work/issue-1-plan-1", "abort"])
+        self.assertNotIn("hold", decision.record["decision"]["options"])
+        self.assertEqual(self.db.resume(KEY)["decision_interrupts"][0]["kind"], "ambiguity")
+        self.assertEqual(len(self.started), 1)
+        self.assertIn(reconcile.Wait(KEY, "decision pending"), self.run_pass())
+        self.assertTrue(other.exists())
+        make_repo.git(["worktree", "move", str(other), str(self.trees / "elsewhere")], self.clone)
+        make_repo.git(["branch", "-m", "work/issue-1-plan-1", "another-issue"], self.clone)
+        self.run_pass()
+        self.assertEqual(self.started[-1], str(self.tree))
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+
+    def test_a_unanimous_recovery_trio_selects_a_survivor_without_holding(self):
+        self.dead_run()
+        other = self.trees / "issue-1-plan-1"
+        make_repo.git(["worktree", "add", "-b", "work/issue-1-plan-1", str(other), "main"], self.clone)
+        (other / "plan.txt").write_text("chosen plan\n")
+        self.p = replace(self.p, base=replace(self.p.base, trio=("builder", "critic", "operator")),
+            personas={**self.p.personas, "operator": replace(self.p.personas["critic"], name="operator")})
+        model = mock.Mock(return_value=worker.Reply("", {
+            "vote": "adopt", "choice": "work/issue-1-plan-1", "reasoning": "keep the plan checkout"}, "", 0.0, 1))
+        self.run_pass(model=model)
+        self.assertEqual(model.call_count, 3)
+        self.assertEqual(self.db.decisions(KEY)[0].answer, "work/issue-1-plan-1")
+        self.assertEqual(self.db.decisions(KEY)[0].decided_by, "trio")
+        self.assertEqual(self.started[-1], str(other.resolve()))
+        self.assertTrue((other / "plan.txt").exists())
+        self.assertFalse(self.tree.exists())
+        self.assertEqual(len(list((self.trees / "quarantine").glob("*/scratch.txt"))), 1)
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+
+    def test_outputless_dead_worker_with_unreadable_tree_recovers_without_human_hold(self):
+        self.run_pass()
+        self.identity.return_value = None
+        (self.tree / ".git").write_text("damaged metadata\n")
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "failed")
+        self.assertFalse(self.db.item(KEY).human_review)
+        self.run_pass()
+        self.assertEqual(len(self.started), 2)
+        self.assertNotEqual(self.started[-1], str(self.tree))
+        self.assertFalse(self.db.item(KEY).human_review)
+        self.assertEqual(len(list((self.trees / "quarantine").glob("*/scratch.txt"))), 1)
+
+    def test_t3_recovery_uses_thread_state_never_pids(self):
+        self.forge.default_branch_protected = lambda: True
+        self.forge.closing_request = mock.Mock(side_effect=worker.ForgeError("no open request"))
+
+        def t3_start(request, run_dir, **kwargs):
+            self.started.append(request.cwd)
+            (run_dir / "t3.json").write_text(json.dumps({"cli": "/t3", "tree": request.cwd, "title": "w", "home": ""}))
+            (run_dir / "thread.json").write_text(json.dumps({
+                "thread_id": f"mcp:t-{len(self.started)}",
+                "thread_link": f"t3code://threads/env-1/mcp:t-{len(self.started)}"}))
+            (run_dir / "started.json").write_text(json.dumps({"pid": 77, "runner_pid": 78, "session_id": request.session_id}))
+            return SimpleNamespace(pid=78, poll=lambda: None)
+
+        def launch_t3(key, stage, attempt, persona):
+            return worker.launch(key, stage, attempt, persona, store=self.db, root=self.root, trees=self.trees,
+                                 clone=self.clone, policies=self.p, forge=self.forge, clock=lambda: self.now,
+                                 launcher="t3")
+
+        with mock.patch.object(worker.t3_adapter, "start", side_effect=t3_start), \
+             mock.patch.object(worker.t3_adapter, "available", side_effect=lambda runtime: runtime == "claude"), \
+             mock.patch.object(worker.t3_adapter, "observe",
+                               return_value=worker.t3_adapter.Evidence(alive=True, launcher="t3", status="running")):
+            engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root, trees=self.trees,
+                            clone=self.clone, launch=launch_t3, workers=engine.settings.Workers(),
+                            clock=lambda: self.now)
+
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        # Even if the local poller exited (-15) and PID probes are forbidden, a live T3 thread is untouched.
+        (run / "exit.json").write_text('{"exit_code": -15}')
+        self.identity.side_effect = AssertionError("PID check forbidden for T3")
+        with mock.patch.object(worker.t3_adapter, "start", side_effect=t3_start), \
+             mock.patch.object(worker.t3_adapter, "available", side_effect=lambda runtime: runtime == "claude"), \
+             mock.patch.object(worker.t3_adapter, "observe",
+                               return_value=worker.t3_adapter.Evidence(alive=True, launcher="t3", status="running")):
+            engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root, trees=self.trees,
+                            clone=self.clone, launch=launch_t3, workers=engine.settings.Workers(),
+                            clock=lambda: self.now)
+        self.assertEqual(len(self.started), 1)
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+        self.assertNotIn("recovery", self.db.resume(KEY))
+
+        # Once T3 reports the thread ended without a matching exit record, recovery reuses the dirty survivor without PIDs.
+        (run / "exit.json").unlink()
+        (run / "stdout").write_text("")
+        (run / "stderr").write_text("remote failure")
+        with mock.patch.object(worker.t3_adapter, "start", side_effect=t3_start), \
+             mock.patch.object(worker.t3_adapter, "available", side_effect=lambda runtime: runtime == "claude"), \
+             mock.patch.object(worker.t3_adapter, "observe",
+                               return_value=worker.t3_adapter.Evidence(alive=False, launcher="t3", status="failed")), \
+             mock.patch.object(worker.t3_adapter, "refresh", return_value={"status": "failed"}):
+            engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root, trees=self.trees,
+                            clone=self.clone, launch=launch_t3, workers=engine.settings.Workers(),
+                            clock=lambda: self.now)
+            self.now += timedelta(minutes=2)
+            engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root, trees=self.trees,
+                            clone=self.clone, launch=launch_t3, workers=engine.settings.Workers(),
+                            clock=lambda: self.now)
+        self.assertEqual(self.started, [str(self.tree), str(self.tree)])
+        self.assertTrue((self.tree / "scratch.txt").exists())
+
+    def move_main(self):
+        (self.clone / "upstream.txt").write_text("landed elsewhere\n")
+        make_repo.git(["add", "upstream.txt"], self.clone)
+        make_repo.git(["commit", "-m", "upstream"], self.clone)
+        make_repo.git(["push", "origin", "main"], self.clone)
+        return make_repo.git(["rev-parse", "main"], self.clone)
+
+    def test_a_branch_with_its_own_commits_is_reused_after_main_moves(self):
+        self.dead_run()
+        self.move_main()
+        self.run_pass()
+        self.assertEqual(self.started, [str(self.tree), str(self.tree)])
+        self.assertEqual(make_repo.git(["symbolic-ref", "--short", "HEAD"], self.tree), "work/issue-1-implement-1")
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.tree), self.head)
+        self.assertTrue((self.tree / "scratch.txt").exists())
+        self.assertFalse((self.trees / "quarantine").exists())
+
+    def test_a_branch_without_its_own_commits_fast_forwards_to_main(self):
+        self.dead_run()
+        make_repo.git(["reset", "main"], self.tree)
+        main = self.move_main()
+        self.run_pass()
+        self.assertEqual(self.started[-1], str(self.tree))
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.tree), main)
+        self.assertTrue((self.tree / "scratch.txt").exists())
+
+    def test_a_repeated_recovery_read_failure_is_logged_once(self):
+        self.db.update_resume(KEY, lambda d: d.__setitem__("recovery", {"stage": "implement", "candidates": [{}]}))
+        with mock.patch.object(engine.engine_facts, "recovery_candidates", return_value=None):
+            self.run_pass()
+            self.run_pass()
+        failed = [row for row in self.db.log(KEY) if row.message.startswith("recovery read failed")]
+        self.assertEqual(len(failed), 1)
+
+    def test_failed_fast_forward_quarantines_and_starts_fresh_without_a_hold(self):
+        self.dead_run()
+        make_repo.git(["reset", "main"], self.tree)  # only a branch with no commits of its own fast-forwards
+        self.head = make_repo.git(["rev-parse", "HEAD"], self.tree)
+        trusted = worker.make_worktree.git_trusted
+        def fail_merge(args, cwd):
+            return (1, "cannot fast-forward") if args[0] == "merge" else trusted(args, cwd)
+        with mock.patch.object(worker.make_worktree, "git_trusted", side_effect=fail_merge):
+            self.run_pass()
+        self.assertEqual(len(self.started), 2)
+        self.assertNotEqual(self.started[-1], str(self.tree))
+        self.assertFalse(self.db.item(KEY).human_review)
+        self.assertEqual(self.db.decisions(KEY), [])
+        refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
+        self.assertIn(self.head, refs.splitlines())
+        self.assertEqual(len(list((self.trees / "quarantine").glob("*/scratch.txt"))), 1)
+        self.assertTrue(any(row.message.startswith("recovery quarantined") for row in self.db.log(KEY)))
+
+    def test_unreadable_checkout_is_quarantined_and_a_fresh_tree_starts(self):
+        self.dead_run()
+        (self.tree / ".git").write_text("damaged metadata\n")
+        self.run_pass()
+        self.assertEqual(len(self.started), 2)
+        self.assertNotEqual(self.started[-1], str(self.tree))
+        self.assertFalse(self.db.item(KEY).human_review)
+        self.assertEqual(self.db.decisions(KEY), [])
+        self.assertEqual(len(list((self.trees / "quarantine").glob("*/scratch.txt"))), 1)
+        refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
+        self.assertIn(self.head, refs.splitlines())
+
+    def test_review_recovery_quarantines_the_old_detached_checkout(self):
+        branch = "work/issue-1-implement-1"
+        make_repo.git(["push", "origin", branch], self.clone)
+        self.forge.closing_request = lambda key: SimpleNamespace(number=9, branch=branch, head=self.head)
+        self.forge.rows[0]["stage"] = "review"
+        self.run_pass()
+        record = self.db.resume(KEY)["runs"]["review-1"]
+        run, review = Path(record["run_dir"]), Path(record["tree"])
+        (run / "stdout").write_text('{"is_error": true, "result": "failed"}')
+        (run / "stderr").write_text("")
+        self.identity.return_value = None
+        self.run_pass()
+        self.assertEqual(len(self.started), 2)
+        self.assertFalse(review.exists())
+        self.assertTrue(list((self.trees / "quarantine").glob(f"{review.name}-*")))
+        self.assertNotIn("recovery", self.db.resume(KEY))
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.tree), self.head)
+        self.assertTrue((self.tree / "scratch.txt").exists())
+
+    def test_a_conflicted_detached_head_stays_reachable_after_quarantine(self):
+        self.dead_run()
+        make_repo.git(["checkout", "--detach"], self.tree)
+        (self.tree / "detached.txt").write_text("retained detached work\n")
+        make_repo.git(["add", "detached.txt"], self.tree)
+        make_repo.git(["commit", "-m", "detached work"], self.tree)
+        detached = make_repo.git(["rev-parse", "HEAD"], self.tree)
+        self.run_pass()
+        refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
+        self.assertIn(detached, refs.splitlines())
+        self.assertEqual(len(self.started), 2)
+
+    def test_branch_without_a_checkout_is_a_single_candidate(self):
+        self.dead_run()
+        # Moving outside the configured discovery directory leaves the registered checkout in git.
+        # A detached checkout leaves just the original branch as a recovery candidate.
+        make_repo.git(["checkout", "--detach"], self.tree)
+        self.db.update_resume(KEY, lambda d: (d.pop("worktree"), d.pop("work_branch")))
+        found = engine_facts.recovery_candidates(self.db, KEY, trees=self.trees, clone=self.clone)
+        self.assertTrue(any(c.branch == "work/issue-1-implement-1" and not c.path for c in found))
+
+    def test_interrupted_quarantine_cannot_restore_the_set_aside_branch(self):
+        self.dead_run()
+        make_repo.git(["reset", "main"], self.tree)  # only a branch with no commits of its own fast-forwards
+        trusted = worker.make_worktree.git_trusted
+        def interrupt_move(args, cwd):
+            if args[:2] == ["worktree", "move"]:
+                raise KeyboardInterrupt
+            return (1, "cannot fast-forward") if args[0] == "merge" else trusted(args, cwd)
+        with mock.patch.object(worker.make_worktree, "git_trusted", side_effect=interrupt_move):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_pass()
+        found = engine_facts.recovery_candidates(self.db, KEY, trees=self.trees, clone=self.clone)
+        self.assertIsNone(completion.recovery(found))
+        self.run_pass()
+        self.assertNotEqual(self.started[-1], str(self.tree))
+        self.assertTrue(list((self.trees / "quarantine").glob("*/scratch.txt")))
+
+    def test_a_disappearing_conflict_reuses_the_survivor_and_retires_its_question(self):
+        self.dead_run()
+        make_repo.git(["branch", "work/issue-1-plan-1", "main"], self.clone)
+        self.run_pass()
+        self.assertEqual(len(self.db.decisions(KEY)), 1)
+        make_repo.git(["branch", "-m", "work/issue-1-plan-1", "another-issue"], self.clone)
+        self.run_pass()
+        self.assertEqual(self.started[-1], str(self.tree))
+        self.assertFalse(engine.decision_escalation.pending_decisions(self.db.decisions(KEY), ()))
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+
+    def test_recovery_uses_the_trio_and_consults_a_split_only_once(self):
+        self.dead_run()
+        make_repo.git(["branch", "work/issue-1-plan-1", "main"], self.clone)
+        self.p = replace(self.p, base=replace(self.p.base, trio=("builder", "critic", "operator")),
+            personas={**self.p.personas, "operator": replace(self.p.personas["critic"], name="operator")})
+        votes = iter(("adopt", "concern", "adopt"))
+        model = mock.Mock(side_effect=lambda request: worker.Reply("", {
+            "vote": next(votes), "choice": "abort", "reasoning": "preserve both histories"}, "", 0.0, 1))
+        self.run_pass(model=model)
+        self.run_pass(model=model)
+        self.assertEqual(model.call_count, 3)
+        self.assertEqual(len(self.db.decisions(KEY)), 1)
+        self.assertEqual(len(self.started), 1)
+
+    def test_a_unanimous_recovery_trio_aborts_without_a_human_prompt(self):
+        self.dead_run()
+        make_repo.git(["branch", "work/issue-1-plan-1", "main"], self.clone)
+        self.p = replace(self.p, base=replace(self.p.base, trio=("builder", "critic", "operator")),
+            personas={**self.p.personas, "operator": replace(self.p.personas["critic"], name="operator")})
+        model = mock.Mock(return_value=worker.Reply("", {
+            "vote": "adopt", "choice": "abort", "reasoning": "preserve both histories"}, "", 0.0, 1))
+        self.run_pass(model=model)
+        self.assertEqual(model.call_count, 3)
+        self.assertEqual(self.db.decisions(KEY)[0].answer, "abort")
+        self.assertEqual(self.db.decisions(KEY)[0].decided_by, "trio")
+        self.assertEqual(len(self.started), 2)
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+
+    def test_abort_quarantines_every_tree_and_ref_and_starts_fresh(self):
+        self.dead_run()
+        other = self.trees / "issue-1-plan-1"
+        make_repo.git(["worktree", "add", "-b", "work/issue-1-plan-1", str(other), "main"], self.clone)
+        self.run_pass()
+        decision = self.db.decisions(KEY)[0]
+        self.db.add_decision(KEY, decision.topic, decision.question, "abort", "user", decision.record)
+        # A revived matching host must prevent quarantine, including after an abort answer.
+        self.identity.return_value = "birth"
+        self.run_pass()
+        self.assertTrue((self.tree / "scratch.txt").exists())
+        self.identity.return_value = None
+        # Start verification must see the new host after the old one is confirmed stopped.
+        def start(request, run_dir, **kwargs):
+            self.identity.return_value = "birth"
+            return self.fake_start(request, run_dir, **kwargs)
+        self.start.side_effect = start
+        self.run_pass()
+        quarantine = self.trees / "quarantine"
+        self.assertEqual(len(list(quarantine.glob("*/scratch.txt"))), 1)
+        refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
+        self.assertIn(self.head, refs.splitlines())
+        self.assertNotEqual(self.db.resume(KEY)["worktree"], str(self.tree))
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], Path(self.started[-1])),
+                         make_repo.git(["rev-parse", "main"], self.clone))
+        self.assertEqual(engine_facts.recovery_candidates(self.db, KEY, trees=self.trees, clone=None), None)
 
 
 class IdentityTest(unittest.TestCase):

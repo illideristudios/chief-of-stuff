@@ -76,6 +76,15 @@ class Segment(Base):
         return getattr(self, "_runner", "")
 
 
+class Transcript(Base):
+    """A bounded ordered event buffer and durable cursor, owned by exactly one segment."""
+    __tablename__ = "transcript"
+    segment_id: Mapped[int] = mapped_column(ForeignKey("segment.id", ondelete="CASCADE"), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String, unique=True)
+    source: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    state: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
 class Decision(Base):
     __tablename__ = "decision"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -163,6 +172,13 @@ class Resume(Base):
     __tablename__ = "resume"
     issue_key: Mapped[str] = mapped_column(ForeignKey("work_item.issue_key", ondelete="CASCADE"), primary_key=True)
     data: Mapped[Any] = mapped_column(JSON)
+
+
+class CleanupTeardown(Base):
+    """One attempt identity per tree, independent of owners' engine resume state."""
+    __tablename__ = "cleanup_teardown"
+    tree: Mapped[str] = mapped_column(String, primary_key=True)
+    identity: Mapped[list[Any]] = mapped_column(JSON)
 
 
 class RotationCursor(Base):
@@ -575,6 +591,49 @@ class Store:
                     row._runner = str(run_meta["runner"])
         return rows
 
+    def transcript(self, issue_key: str, stage: str, attempt: int) -> dict | None:
+        """Page-server read API: exact attempt identity, ordered events and loss/cursor metadata.
+
+        Reads only the store; the runtime and its original log need not still exist.
+        """
+        with self.session(write=False) as s:
+            row = s.scalar(select(Transcript).join(Segment).where(
+                Segment.issue_key == issue_key, Segment.stage == stage, Segment.attempt == attempt))
+            if row is None:
+                return None
+            return {"issue_key": issue_key, "stage": stage, "attempt": attempt,
+                    "session_id": row.session_id, "source": row.source, **deepcopy(row.state)}
+
+    def update_transcript(self, issue_key: str, stage: str, attempt: int, session_id: str,
+                          source: str | None, change: Callable[[dict, bool], None]) -> None:
+        """Serialize binding, ingestion and checkpoint in one ORM transaction.
+
+        The callback receives whether the immutable launch/source identity still matches.
+        A source or session already owned by another attempt is refused before reading content.
+        """
+        with self.session() as s:
+            segment = s.scalar(select(Segment).where(Segment.issue_key == issue_key,
+                               Segment.stage == stage, Segment.attempt == attempt))
+            if segment is None:
+                raise ValueError("transcript requires an existing segment")
+            row = s.get(Transcript, segment.id)
+            matches = row is None or (row.session_id == session_id
+                                      and (source is None or row.source is None or row.source == source))
+            if matches:
+                same_source = Transcript.source == source if source is not None else False
+                duplicate = s.scalar(select(Transcript.segment_id).where(
+                    Transcript.segment_id != segment.id, (Transcript.session_id == session_id) | same_source))
+                if duplicate is not None:
+                    raise ValueError("transcript source/session already bound to another attempt")
+            if row is None:
+                row = Transcript(segment_id=segment.id, session_id=session_id, source=source, state={})
+                s.add(row)
+            elif matches and row.source is None:
+                row.source = source
+            state = deepcopy(row.state)
+            change(state, matches)
+            row.state = state
+
     # worker trees
     def set_tree(self, issue_key: str, path: str) -> None:
         self._upsert(Worktree, ("issue_key", "path"), {"issue_key": issue_key, "path": path})
@@ -636,6 +695,22 @@ class Store:
 
     def engine_log(self) -> list[EngineLog]:
         return self._all(select(EngineLog).order_by(EngineLog.id))
+
+    # cleanup attempts (shared by all owners of a tree)
+    def teardown_attempt(self, tree: str) -> list[Any] | None:
+        with self.session() as s:
+            row = s.get(CleanupTeardown, tree)
+            return row.identity if row else None
+
+    def claim_teardown(self, tree: str, identity: list[Any]) -> bool:
+        """Atomically record a new attempt before execution; False means it was already recorded."""
+        with self.session() as s:
+            row = s.get(CleanupTeardown, tree)
+            if row is not None and row.identity == identity:
+                return False
+            stmt = insert(CleanupTeardown).values(tree=tree, identity=identity)
+            s.execute(stmt.on_conflict_do_update(index_elements=("tree",), set_={"identity": identity}))
+        return True
 
     # resume
     def set_resume(self, issue_key: str, data: Any) -> None:

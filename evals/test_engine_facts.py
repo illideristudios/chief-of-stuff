@@ -376,6 +376,40 @@ class GatherTest(unittest.TestCase):
         facts = engine_facts.gather(forge=forge, store=self.db, root=self.root, trees=self.trees, now=NOW)
         self.assertIsNone(facts.blockers)
 
+    def test_a_recorded_landing_commit_skips_landings_and_reports_green_on_main(self):
+        self.db.upsert_item(KEY, forge_state="closed", merge_state="merged")
+        self.db.upsert_item(OTHER, forge_state="closed", merge_state="merged")
+        self.db.set_resume(KEY, {"verified_landing": "squashed", "verified_landing_head": "source-head"})
+        source = mock.Mock(**{"blocked_by.return_value": {}})
+        source.branch_head = lambda ref: forge.Pipeline(1, "main", "squashed", "passed", "")
+        landings = mock.Mock(return_value={OTHER: (True, True)})
+        source.landings = landings
+        facts = self.gather(source)
+        landings.assert_called_once()
+        self.assertEqual(landings.call_args.args[1], [OTHER])
+        self.assertEqual(dict(facts.on_main), {KEY: True, OTHER: True})
+        self.assertEqual(dict(facts.suite_on_main), {KEY: True, OTHER: True})
+        self.assertEqual(dict(facts.landing_heads), {KEY: "source-head"})
+
+    def test_a_legacy_true_landing_memo_is_remembered_without_landings(self):
+        self.db.upsert_item(KEY, forge_state="closed", merge_state="merged")
+        self.db.set_resume(KEY, {"verified_landing": True})
+        source = mock.Mock(**{"blocked_by.return_value": {}})
+        source.branch_head = lambda ref: forge.Pipeline(1, "main", "main-sha", "passed", "")
+        source.landings = mock.Mock(side_effect=AssertionError("landings"))
+        facts = self.gather(source)
+        self.assertEqual(dict(facts.on_main), {KEY: True})
+        self.assertEqual(dict(facts.suite_on_main), {KEY: True})
+
+    def test_an_open_item_with_a_landing_memo_is_not_passed_to_landings(self):
+        self.db.upsert_item(KEY, forge_state="open", merge_state="")
+        self.db.set_resume(KEY, {"verified_landing": "squashed"})
+        source = mock.Mock(**{"blocked_by.return_value": {}})
+        source.branch_head = lambda ref: forge.Pipeline(1, "main", "squashed", "passed", "")
+        source.landings = mock.Mock(side_effect=AssertionError("landings"))
+        facts = self.gather(source)
+        self.assertNotIn(KEY, dict(facts.on_main))
+
 
 class BlockedByTest(unittest.TestCase):
     def test_github_blocked_by_is_the_open_nodes(self):

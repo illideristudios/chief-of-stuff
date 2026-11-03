@@ -8,9 +8,11 @@ The module the implementer creates is `scripts/source_page.py` with
     write(root: Path, pages_dir: Path, number: int) -> Path | None
 
 `render` returns None when no task in `trackers` names issue `number` (as issue_page.render). The change is the one the
-sources say closes the issue; its diff is read from the clone at `root / graph.clone`, fetched and merge-based as
-module_graph.draw does. `write` writes `<pages_dir>/issue-<n>-source.html`, or removes it and returns None when
-`render` does. pages.py serves it at `GET /issues/<n>/source`.
+sources say closes the issue; its diff is read from the clone at `root / graph.clone` when settings name a `[graph]`
+table, otherwise from `root` when that path is a git repository, fetched and merge-based as module_graph.draw does.
+With no clone path and no workspace repo, the page lists files from the sources cache only. `write` writes
+`<pages_dir>/issue-<n>-source.html`, or removes it and returns None when `render` does. pages.py serves it at
+`GET /issues/<n>/source`.
 
 Markup contract these tests read (keep to it; everything else is free):
 
@@ -277,8 +279,8 @@ class RenderTest(SourcePage):
         self.assertIn("&lt;script&gt;", row["raw"])
 
     def test_without_a_graph_table_the_files_are_listed_and_the_clone_is_named(self):
-        # "The diff comes from the configured clone; with no `[graph]` table the page still lists the files from the
-        # sources cache and says the diff needs the clone."
+        # "With no `[graph]` table and no workspace root passed, the page lists files from the sources cache, says the
+        # diff needs the clone, and does not link file paths to missing anchors."
         html = self.render(graph=False)
         got = items(html)
         self.assertEqual(set(got), {LIMITS, QUOTA, LEGACY})
@@ -288,6 +290,40 @@ class RenderTest(SourcePage):
         self.assertRegex(text(html), r"(?i)\bclone\b|\[graph\]")
         self.assertEqual([r for _, t in tables(html).values() for r in rows(t)], [])
         self.assertIsNone(re.search(r'<tr\b[^>]*class="[^"]*\b(?:add|del|ctx)\b', html))
+        m = re.search(r'<ul\b[^>]*class="[^"]*\bfiles\b[^"]*"[^>]*>(.*?)</ul>', html, re.S)
+        self.assertIsNotNone(m)
+        self.assertNotIn('href="#', m[1])
+
+    def test_a_workspace_repo_without_a_graph_table_shows_its_diff(self):
+        # "When settings name no `[graph]` table but the workspace root is the change's clone, the page shows the diff."
+        pages = self.root / "fresh-pages"
+        pages.mkdir()
+        html = sp.render(109, TRACKERS, self.sources(), NOW, None, pages, self.root / "repos" / "app")
+        self.assertIsNotNone(html)
+        diffs = tables(html)
+        self.assertEqual(set(diffs), {LIMITS, QUOTA, LEGACY})
+        self.assertNotRegex(text(html), r"\[graph\]")
+        m = re.search(r'<ul\b[^>]*class="[^"]*\bfiles\b[^"]*"[^>]*>(.*?)</ul>', html, re.S)
+        self.assertIsNotNone(m)
+        for path in (LIMITS, QUOTA, LEGACY):
+            with self.subTest(path=path):
+                anchor_id = diffs[path][0]
+                self.assertRegex(m[1], rf'href="#{re.escape(anchor_id)}"[^>]*>\s*{re.escape(path)}\s*</a>')
+
+    def test_workspace_fallback_keeps_stale_diff_notes_when_offline(self):
+        from unittest import mock
+        import module_graph
+        clone, pages = self.root / "repos" / "app", self.root / "pages"
+        sp.render(109, TRACKERS, self.sources(), NOW, None, pages, clone)
+        with mock.patch.object(module_graph, "fetch", side_effect=ValueError("offline")):
+            html = sp.render(109, TRACKERS, self.sources(), NOW, None, pages, clone)
+        self.assertIn("Stale cached diff: the current base could not be verified.", html)
+        self.assertIn('data-path="src/app/limits.py"', html)
+
+    def test_graph_without_a_workspace_root_remains_a_file_listing(self):
+        html = sp.render(109, TRACKERS, self.sources(), NOW, self.graph, self.root / "pages")
+        self.assertIn(LIMITS, html)
+        self.assertNotIn('href="#f-', html)
 
     def test_no_change_naming_the_issue_says_nothing_to_diff(self):
         # "With no change naming the issue the page says there is nothing to diff."

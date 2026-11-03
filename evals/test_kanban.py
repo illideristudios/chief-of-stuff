@@ -475,13 +475,15 @@ class AuditTest(unittest.TestCase):
         mixed = Kanban(FLOW.stages, FLOW.human_review_label, FLOW.stage_map,
                        FLOW.hold_stages, FLOW.terminal_stages, GitHubProject("example", 3, options=FLOW.stages))
         tasks = [SimpleNamespace(standing=False, lane="build", stage="implement",
-                                 issue=f"#{n}", label=f"Build {n}", kind="open", item=f"Build {n}") for n in (7, 8)]
-        issues = {n: backlog.Issue(n, f"Build {n}", "opened", ()) for n in (7, 8)}
+                                 issue=f"#{n}", label=f"Build {n}", kind="open", item=f"Build {n}") for n in (7, 8, 9)]
+        issues = {n: backlog.Issue(n, f"Build {n}", "closed" if n == 9 else "opened", ()) for n in (7, 8, 9)}
         project_items = {backlog.IssueRef("example/app", n).url: FLOW.stages[3] for n in (7, 8)}
         with mock.patch.object(audit_tasks, "issue_states", return_value=issues), \
              mock.patch.object(forge, "project_items", return_value=(project_items, "")) as items:
             self.assertEqual(audit_tasks.kanban_faults(tasks, cfg, mixed), [])
         items.assert_called_once()
+        self.assertEqual(items.call_args.args[2],
+                         (backlog.IssueRef("example/app", 7), backlog.IssueRef("example/app", 8)))
 
     def test_github_project_audit_matches_mixed_case_repo(self):
         cfg = backlog.GitHubBacklog("Example/App")

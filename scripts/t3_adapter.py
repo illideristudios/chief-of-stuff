@@ -163,15 +163,37 @@ def _write_channel(tree: Path, files: dict, manifest: Path | None) -> None:
         os.close(directory)
 
 
+def provider_instance(profile: str, mapping: dict[str, str], home: Path | str | None = None) -> str:
+    """The T3 provider instance a Claude worker under `profile` runs as: T3's default for no profile, else the one
+    `[workers.t3_providers]` maps it to. T3 lists its instances in its settings file, which is no documented interface:
+    when that cannot be read, an unknown instance is left to T3 to refuse."""
+    if not profile:
+        return PROVIDERS["claude"]
+    instance = mapping.get(profile)
+    if not instance:
+        raise ShellError(f"no T3 provider instance is mapped to claude_as_profile {profile!r}; add it to [workers.t3_providers]")
+    base = Path(home or os.environ.get("T3CODE_HOME") or Path.home() / ".t3")
+    try:
+        known = list(json.loads((base / "userdata" / "settings.json").read_text())["providerInstances"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return instance
+    if instance not in known:
+        raise ShellError(f"T3 provider instance {instance!r} does not exist (mapped from claude_as_profile {profile!r}); "
+                         f"T3 has: {', '.join(known)}")
+    return instance
+
+
 def start(request: Request, run_dir: Path, *, env: dict[str, str], cli: str | None = None, home: Path | str | None = None,
-          poll_s: float = POLL_S) -> "subprocess.Popen":
+          poll_s: float = POLL_S, provider: str | None = None) -> "subprocess.Popen":
     """Start a worker as a T3 thread, detached: the runner of `claude_adapter` runs `run` below."""
     binary = cli or globals()["cli"]()
     if not binary:
         raise ShellError("`t3` is not on PATH and T3CODE_CLI_PATH is not set")
-    provider = PROVIDERS.get(request.runtime or "claude")
+    provider = provider or PROVIDERS.get(request.runtime or "claude")
     if provider is None:
         raise ValueError(f"no T3 provider for {request.runtime}")
+    if provider != PROVIDERS["claude"] and not request.model:
+        raise ValueError(f"T3 provider instance {provider!r} needs a model: `t3 thread start` ignores --provider without --model")
     guard = Path(request.plugin_dirs[0])
     environment = environment_id(home)  # fail before touching the worker's tree
     write_channel(Path(request.cwd), env, agent=request.agent, guard=guard, state=run_dir.parent)
@@ -191,6 +213,16 @@ def start(request: Request, run_dir: Path, *, env: dict[str, str], cli: str | No
 def _t3(spec: dict, *argv: str, stdin: str | None = None) -> subprocess.CompletedProcess:
     base = ["--base-dir", spec["home"]] if spec["home"] else []
     return subprocess.run([spec["cli"], *argv, *base], input=stdin, capture_output=True, text=True, timeout=120)
+
+
+def send(run_dir: Path, thread: str, body: str) -> None:
+    """Hand an operator message to the thread as its next turn (`t3 thread send`, the body on stdin so no text is a flag).
+
+    A CLI refusal raises RuntimeError with its words. A timeout or a missing CLI raises the OS or subprocess error: the
+    message may or may not have reached the thread, so the caller must not read that as a failure."""
+    done = _t3(json.loads((run_dir / "t3.json").read_text()), "thread", "send", thread, "-", stdin=body)
+    if done.returncode:
+        raise RuntimeError(f"t3 thread send failed: {(done.stderr or done.stdout).strip()[:300]}")
 
 
 def observe(record: dict | Path) -> Evidence | dict:

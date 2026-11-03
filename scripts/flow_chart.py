@@ -262,8 +262,11 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
     return _ordered(_merge_issues(out), now)
 
 
-def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> list[tuple[str, gantt.Row]]:
-    """Build one Gantt row per store issue with all its `(issue, stage, attempt)` segments (M6 item 1, Exit S2)."""
+def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> list[tuple[str, str, gantt.Row]]:
+    """Build one Gantt row per store issue with all its `(issue, stage, attempt)` segments (M6 item 1, Exit S2).
+
+    Each entry is `(issue_key, status, row)` so callers can pair by key (bake S2) without zip-by-position.
+    """
     items = db.items()
     all_segments = db.segments()
     all_decisions = current_rows(db.decisions())  # rows are append-only: each decision's latest
@@ -275,7 +278,7 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
         if state_of(dec).status in ("open", "blocked"):
             open_decs_by_key.setdefault(dec.issue_key, []).append(dec)
 
-    out: list[tuple[str, gantt.Row]] = []
+    out: list[tuple[str, str, gantt.Row]] = []
     for item in items:
         key = item.issue_key
         raw_segs = segs_by_key.get(key, [])
@@ -331,17 +334,17 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
             href=issue_href(key),
             ref_title=item.title or key,
         )
-        out.append((status, row))
+        out.append((key, status, row))
     far_future = now + WINDOWS[-1][2] * 1000
     return sorted(
         out,
-        key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)),
+        key=lambda ksr: (BUCKETS.index(_bucket(ksr[1])), min((g.start for g in ksr[2].segments), default=far_future)),
     )
 
 
 def from_store(db, start: datetime, end: datetime) -> list[gantt.Row]:
     """Return Gantt rows from the store overlapping `[start, end]`, one row per issue with `(issue, stage, attempt)` segments."""
-    rows = [row for _, row in build_from_store(db, end, include_hold_bars=False)]
+    rows = [row for _, _, row in build_from_store(db, end, include_hold_bars=False)]
     return [
         r for r in rows
         if not r.segments or any(g.end >= start and g.start <= end for g in r.segments)
