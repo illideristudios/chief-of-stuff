@@ -1,7 +1,7 @@
 """The page reload check, run in node against a stub page (#337: "four mutants of its reload and typing logic survive
 the suite"). test_pages.py pins the snippet's text; this runs its branches.
 
-node is the runtime (Zach: "node's fine"), used with built-ins only: a hand-written stub of the few DOM calls the
+node is the runtime (the owner: "node's fine"), used with built-ins only: a hand-written stub of the few DOM calls the
 snippet makes, a fake clock (the test calls the interval's function) and a fake fetch. Without node the node tests
 skip with a reason naming node and #337; the skip reason itself is tested in a class that never skips.
 """

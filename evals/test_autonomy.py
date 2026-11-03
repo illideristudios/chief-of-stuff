@@ -22,19 +22,19 @@ from evals.test_reconcile import Item, Segment, NOW, KEY, policies
 
 
 class AutonomyTest(unittest.TestCase):
-    def plan(self, history=(), *, stage="implement", findings=None, configured=None):
+    def plan(self, history=(), *, stage="implement", findings=None, configured=None, **kwargs):
         p = configured or policies()
         return reconcile.plan([Item(stage=stage, merge_state="ready")], {KEY: history}, p, {}, 1, NOW,
-                              {KEY: findings or {}})
+                              {KEY: findings or {}}, **kwargs)
 
     def test_legacy_stage_gates_do_not_ask_even_without_standing_approval(self):
-        p = replace(policies(), base=policy.Policy(zach_gates=("plan", "merge")))
+        p = policies()
         self.assertEqual(self.plan([Segment("implement")], configured=p), [reconcile.Review(KEY, 1)])
         self.assertEqual(self.plan([Segment("review")], stage="merge", configured=p), [reconcile.Merge(KEY)])
 
     def test_saved_legacy_gate_decisions_do_not_hold_a_workflow_that_has_removed_its_gates(self):
         import decision_escalation
-        row = SimpleNamespace(topic="merge", question="legacy owner approval", answer=None, decided_by="zach",
+        row = SimpleNamespace(topic="merge", question="legacy owner approval", answer=None, decided_by="owner",
                               record={"decision": {"gate": True, "options": ["approve", "hold"]}})
         self.assertFalse(decision_escalation.pending_decisions([row], ()))
         self.assertEqual(decision_escalation.owner_waits([row], (), ()), [])
@@ -43,8 +43,33 @@ class AutonomyTest(unittest.TestCase):
         import tomllib
         data = tomllib.loads((ROOT / "assets/policy.toml").read_text())
         data.setdefault("policy", {})["zach_gates"] = ["merge"]
-        parsed = policy.parse(data)
-        self.assertEqual(reconcile.passed_gates(parsed.workflows[parsed.default_workflow], parsed, None, NOW), set())
+        with self.assertWarnsRegex(UserWarning, "zach_gates.*ignored"):
+            parsed = policy.parse(data)
+        self.assertNotIn("zach_gates", vars(parsed.base))
+
+    def test_retired_settings_warn_once_and_do_not_enter_runtime_configuration(self):
+        import tomllib
+        data = tomllib.loads((ROOT / "assets/policy.toml").read_text())
+        data.setdefault("policy", {})["zach_gates"] = ["retired-stage"]
+        with self.assertWarnsRegex(UserWarning, "zach_gates.*ignored") as warning:
+            parsed = policy.parse(data)
+        self.assertEqual(len(warning.warnings), 1)
+        self.assertNotIn("zach_gates", vars(parsed.base))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "cos.toml"
+            for table, key, value in (("workflow", "merge_owner", '"worker"'),
+                                      ("kanban", "hold_stages", '["retired-stage"]')):
+                text = f'[{table}]\n{key} = {value}\n'
+                if table == "kanban":
+                    text += 'stages = ["doing"]\nhuman_review_label = "problem"\n[kanban.map]\nimplement = 0\n'
+                path.write_text(text)
+                with self.assertWarnsRegex(UserWarning, f"{key}.*ignored") as warning:
+                    config = settings.load(root, path)
+                self.assertEqual(len(warning.warnings), 1)
+                self.assertNotIn("merge_owner", vars(config.workflow))
+                if config.kanban:
+                    self.assertFalse(config.kanban.holds("implement"))
 
     def test_two_failures_across_stages_park_the_issue(self):
         history = [Segment("implement", outcome="failed"), Segment("review", started_at=NOW-timedelta(minutes=30), ended_at=NOW-timedelta(minutes=20), outcome="failed")]
@@ -64,7 +89,22 @@ class AutonomyTest(unittest.TestCase):
                 history.append(Segment("implement", i + 1, NOW - timedelta(minutes=19-i*2), NOW - timedelta(minutes=18-i*2)))
         action, = self.plan(history, stage="review", findings={"minor": 1})
         self.assertIsInstance(action, reconcile.Escalate)
-        self.assertIn("three fix rounds", action.reason)
+        self.assertIn("3 fix rounds", action.reason)
+
+    def test_configured_fix_round_limit_parks_only_after_that_many_completed_fixes(self):
+        history = []
+        for i in range(3):
+            history.append(Segment("review", i + 1, NOW - timedelta(minutes=20-i*2), NOW - timedelta(minutes=19-i*2)))
+            if i < 2:
+                history.append(Segment("implement", i + 1, NOW - timedelta(minutes=19-i*2), NOW - timedelta(minutes=18-i*2)))
+        for limit in (1, 2, 4):
+            with self.subTest(limit=limit):
+                action, = self.plan(history, stage="review", findings={"minor": 1}, fix_round_limit=limit)
+                if limit <= 2:
+                    self.assertIsInstance(action, reconcile.Escalate)
+                    self.assertIn(f"{limit} fix rounds", action.reason)
+                else:
+                    self.assertIsInstance(action, reconcile.Dispatch)
 
     def test_legacy_merge_owner_modes_normalize_to_coordinator_without_an_approver(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -73,7 +113,7 @@ class AutonomyTest(unittest.TestCase):
             for mode in (None, "user", "approval", "worker", "coordinator"):
                 with self.subTest(mode=mode):
                     path.write_text('[workflow]\n' + (f'merge_owner = "{mode}"\n' if mode else ""))
-                    self.assertEqual(settings.load(root, path).workflow.merge_owner, "coordinator")
+                    self.assertNotIn("merge_owner", vars(settings.load(root, path).workflow))
 
     def test_interactive_launches_do_not_start_in_owner_plan_gates(self):
         for runtime, template in spawn_session.TEMPLATES.items():
@@ -83,7 +123,7 @@ class AutonomyTest(unittest.TestCase):
 
     def test_commit_delivery_keeps_merges_with_the_engine_without_an_owner_wait(self):
         for mode in ("user", "approval", "worker", "coordinator"):
-            text = dispatch_prompt.commit_rule(settings.Workflow(merge_owner=mode), ROOT)
+            text = dispatch_prompt.commit_rule(settings.Workflow(), ROOT)
             self.assertIn("engine", text)
             self.assertNotIn("user approves", text)
             self.assertNotIn("user's alone", text)
@@ -113,7 +153,7 @@ class AutonomyTest(unittest.TestCase):
         request = SimpleNamespace(number=12, verdict="ready")
         for mode in ("user", "approval", "worker", "coordinator"):
             with self.subTest(mode=mode), mock.patch.object(merge_approved, "forge", return_value=(
-                    settings.Workflow(merge_owner=mode), None, True, "example/repo")), \
+                    settings.Workflow(), None, True, "example/repo")), \
                     mock.patch("merge_ready.read", return_value=[request]), \
                     mock.patch("merge_ready.line", return_value="ready"), redirect_stdout(io.StringIO()):
                 self.assertEqual(merge_approved.main(["--root", "."], gh=lambda *args: (1, "", "unexpected call")), 0)

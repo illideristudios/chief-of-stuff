@@ -246,7 +246,7 @@ class AssignmentTest(unittest.TestCase):
     def test_it_says_to_commit_and_not_to_merge(self):
         """Superseded 0.12.0: this pinned a "write only" line that forbade commits, which contradicted the
         workspace rule the assignment exists to carry — every session makes meaningful small commits,
-        because uncommitted work is how work gets lost (Zach, 2026-09-18 23:00). The gate is the merge."""
+        because uncommitted work is how work gets lost (the owner, 2026-09-18 23:00). The gate is the merge."""
         self.assertRegex(self.body(), r"(?m)^Commits: Commit small and often\b")
         self.assertIn("never push to main or merge locally", self.body())
 
@@ -392,8 +392,8 @@ class PositiveHalfTest(unittest.TestCase):
 
 
 
-    def test_the_commit_line_is_zachs_rule_not_its_opposite(self):
-        """Zach, 2026-09-18 23:00: every session makes meaningful small commits; uncommitted work is how work gets lost."""
+    def test_the_commit_line_carries_the_owners_rule(self):
+        """the owner, 2026-09-18 23:00: every session makes meaningful small commits; uncommitted work is how work gets lost."""
         self.assertNotIn("do not commit", self.body)
         self.assertIn("Commit small and often", self.body)
         self.assertIn("never push to main or merge locally", self.body)
@@ -713,7 +713,7 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         self.assertIn("chief-of-stuff inbox list --recipient coordinator --unread", self.content)
 
     def test_the_board_is_served_from_this_mac(self):
-        # Zach, 2026-09-24 14:07: "we should host our own webserver and ensure they are set up as part of the agent's boot loop."
+        # the owner, 2026-09-24 14:07: "we should host our own webserver and ensure they are set up as part of the agent's boot loop."
         ensure = "chief-of-stuff pages --ensure"
         for move in ("## Open the day", "## Resume", "## Check"):
             # By heading, not by substring: "## Resume" alone first matches the "`## Resume` block" in Open the day.
@@ -830,8 +830,8 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         self.assertIn("chief-of-stuff backlog --create", self.content)
         self.assertNotIn("~/.claude/plugins/cache/ai-additions", self.content)
 
-    def test_live_prompt_does_not_name_the_original_workspace_user(self):
-        self.assertNotIn("Zach", self.content)
+    def test_live_prompt_addresses_the_owner_by_role(self):
+        self.assertIn("coordinator for the owner's day", self.content)
 
 
     # #391, the user, 2026-10-06: a review finding that is a clear fix "should have automatically been a fix". The rule is gated (review of
@@ -880,7 +880,7 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         self.assertNotIn("review your pull request with ponytail-review", self.content)
 
 
-# Zach, 2026-09-22 22:20: each task "is actually backed by an entry in github"; a task with none is refused.
+# the owner, 2026-09-22 22:20: each task "is actually backed by an entry in github"; a task with none is refused.
 ISSUE_CLAUDE = CLAUDE + "- Backlog: GitHub issues; repo https://github.com/o/backlog (private)\n"
 
 ISSUE_TRACKER = """# Tracker 2026-09-18
@@ -918,7 +918,7 @@ class IssueDispatchTest(unittest.TestCase):
         self.assertIn("chief-of-stuff backlog --create", str(e.exception))
 
     def test_a_gitlab_backlog_refuses_too_and_links_to_gitlab(self):
-        """Zach, 2026-09-23 22:40: "make everything use gitlab now that we have that going"."""
+        """the owner, 2026-09-23 22:40: "make everything use gitlab now that we have that going"."""
         claude = CLAUDE + "- Backlog: GitLab; host https://gl.example; project o/backlog\n"
         tmp, root = workspace(ISSUE_TRACKER, claude)
         self.addCleanup(tmp.cleanup)
@@ -997,7 +997,7 @@ class IssueDispatchTest(unittest.TestCase):
 
 
 class SessionNameTest(unittest.TestCase):
-    """Zach, 2026-09-23 00:04: "when a session gets a name, it should stick with that name. that should
+    """the owner, 2026-09-23 00:04: "when a session gets a name, it should stick with that name. that should
     be part of the prompt every session gets". The launch gives the name; this file says it is the only one.
     """
 
@@ -1038,7 +1038,7 @@ class SessionNameTest(unittest.TestCase):
 
 
 class PullRequestTest(unittest.TestCase):
-    """Zach, 2026-09-23 15:31: "all code changes should require a PR" … "This will fully supersede CIMP".
+    """the owner, 2026-09-23 15:31: "all code changes should require a PR" … "This will fully supersede CIMP".
 
     The assignment is the only rulebook a dispatched session is handed, so the route to main is in it.
     """
@@ -1056,7 +1056,7 @@ class PullRequestTest(unittest.TestCase):
         self.assertIn("never push to main or merge locally", line)
 
     def test_the_session_opens_it_when_green(self):
-        """Zach, 2026-09-23 19:40: "I don't want to stop for PR … PRs should be autononmous"."""
+        """the owner, 2026-09-23 19:40: "I don't want to stop for PR … PRs should be autononmous"."""
         line = [x for x in self.body.splitlines() if x.startswith("Commits: ")][0]
         self.assertIn("when the work is finished and its suite is green", line)
         self.assertNotIn("when you are told to", line)
@@ -1067,7 +1067,7 @@ class PullRequestTest(unittest.TestCase):
 
 
 class PonytailTest(unittest.TestCase):
-    """Zach, 2026-09-23 17:01: ponytail "a core part of this" — in the dispatch, a review on every PR, ultra."""
+    """the owner, 2026-09-23 17:01: ponytail "a core part of this" — in the dispatch, a review on every PR, ultra."""
 
     def setUp(self):
         self.tmp, self.root = workspace()
@@ -1079,7 +1079,7 @@ class PonytailTest(unittest.TestCase):
         self.assertNotIn("ponytail, ultra", self.body)
 
     def test_a_new_task_is_a_new_plan(self):
-        """Zach, 2026-09-23 22:25: a later task handed to this session starts in plan mode too."""
+        """the owner, 2026-09-23 22:25: a later task handed to this session starts in plan mode too."""
         self.assertIn("**Plan and proceed.**", self.body)
         agy = dp.compose(self.root, "2026-09-18", "Security audit", name="implementer-GFlash38H-01", runtime="agy")
         self.assertIn("**Plan and proceed.**", agy)
@@ -1092,7 +1092,7 @@ class PonytailTest(unittest.TestCase):
         self.assertIn("The failing test comes first", self.body)
 
     def test_the_session_reports_the_pr_and_stops(self):
-        """#33 stage 3 (Zach, 2026-09-23: "Reviewer + my triage"): the reviewer session reviews, Zach triages."""
+        """#33 stage 3 (the owner, 2026-09-23: "Reviewer + my triage"): the reviewer session reviews, the owner triages."""
         line = [x for x in self.body.splitlines() if x.startswith("Commits: ")][0]
         self.assertIn("report its URL and head sha to the coordinator, then stop", line)
 
@@ -1104,7 +1104,7 @@ class PonytailTest(unittest.TestCase):
 
 
 class OnlyTheUserMergesTest(unittest.TestCase):
-    """Zach, 2026-09-23 17:26: "I'll review and click the auto merge button on all PRs from here on forward."
+    """the owner, 2026-09-23 17:26: "I'll review and click the auto merge button on all PRs from here on forward."
 
     The line used to say the merge waits for a word, which read as a session merging once it had one.
     """
@@ -1131,7 +1131,7 @@ class ReviewerRoutingTest(unittest.TestCase):
 
     def test_legacy_merge_modes_keep_the_engine_merge_gate(self):
         for mode in ("user", "approval", "worker", "coordinator"):
-            text = dp.commit_rule(Workflow(merge_owner=mode), Path("."))
+            text = dp.commit_rule(Workflow(), Path("."))
             self.assertIn("The engine merges", text)
             self.assertNotIn("user approves", text)
 
@@ -1246,7 +1246,7 @@ class DetachedWorktreeTest(unittest.TestCase):
 
 class ReviewReportTest(unittest.TestCase):
     """#563: every agent that reviews a pull or merge request reports in one shape, whatever its runtime, because
-    Triage reads R-numbers, axis, severity, confidence and the suggestion off it. Zach, 2026-10-08 21:10: "we need a
+    Triage reads R-numbers, axis, severity, confidence and the suggestion off it. the owner, 2026-10-08 21:10: "we need a
     code review report template for agents to follow that are code reviewing"."""
 
     TEMPLATE = Path(dp.__file__).resolve().parents[1] / "skills/review-pipeline/review-report.md"

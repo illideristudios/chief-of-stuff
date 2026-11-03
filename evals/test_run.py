@@ -230,7 +230,7 @@ class ModelGuardTest(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_run_py_default_model_is_sonnet(self) -> None:
-        # Zach, 2026-09-19: the runner's default moved. What ships did not -- see the next test.
+        # the owner, 2026-09-19: the runner's default moved. What ships did not -- see the next test.
         self.assertEqual(run.DEFAULT_MODEL, "sonnet")
 
     def test_the_agent_frontmatter_still_pins_opus(self) -> None:
@@ -380,7 +380,7 @@ class MarkdownUnwrappedTest(unittest.TestCase):
         self.assertFalse(ok, why)
 
 class GoldenSetTest(unittest.TestCase):
-    """The opus set. Zach, 2026-09-19: sonnet to iterate, opus on the golden cases only for green.
+    """The opus set. the owner, 2026-09-19: sonnet to iterate, opus on the golden cases only for green.
 
     The mechanism is separate from the selection on purpose: which cases are golden is a policy
     call that will change, and it lives in the case files. What must not change is that asking for

@@ -266,4 +266,4 @@ class QueueLockTest(unittest.TestCase):
         self.assertEqual(before, ws.queue.read_bytes())
 
 
-# The macOS-only launchd smoke test is removed until CI can run it (#855; Zach, 2026-10-17, approved).
+# The macOS-only launchd smoke test is removed until CI can run it (#855; the owner, 2026-10-17, approved).

@@ -181,7 +181,7 @@ class ReconcileTest(unittest.TestCase):
                 start += timedelta(minutes=1)
                 history.append(Segment("review", round + 1, started_at=start, ended_at=start + timedelta(seconds=30)))
             self.assertEqual(self.plan(item, history, {"minor": 1}),
-                             [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open", stage="implement")])
+                             [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="implement")])
 
     def test_review_target_gets_initial_work_before_any_completed_review(self):
         self.p = replace(self.p, base=policy.Policy(retry_limit=0))
@@ -218,7 +218,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(replace(Item(), stage="review", review_state="approved", merge_state="ready"),
                                    [Segment("review")], {}, quota_resets={KEY: later}),
                          [reconcile.Merge(KEY)])
-        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.p.stages["implement"] = policy.Place("implement", "builder", {})
         # #750 ruling 1 (rule 11): a gate Ask is a trio consult that spends model quota, so a reset holds it too.
         self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: later}),
                          [reconcile.Wait(KEY, "quota reset pending")])
@@ -244,7 +244,7 @@ class ReconcileTest(unittest.TestCase):
             for order in (history, history[::-1]):
                 with self.subTest(stage=stage, history=order):
                     self.assertEqual(self.plan(replace(item, stage=stage), order, {"minor": 1}),
-                                     [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open", stage="implement")])
+                                     [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="implement")])
 
     def test_separate_fix_stage_loops_to_review_until_its_retry_limit(self):
         self.p.stages["fix"] = policy.Place("fix", "builder")
@@ -259,7 +259,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(item, [Segment("review", started_at=NOW - timedelta(hours=4),
                                            ended_at=NOW - timedelta(hours=3)),
                                    Segment("fix", 3), Segment("review", 3, started_at=NOW)],
-                                   {"minor": 1}), [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open", stage="fix")])
+                                   {"minor": 1}), [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="fix")])
 
     def test_shipped_workflow_reviews_all_three_fix_rounds_before_escalating(self):
         path = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"
@@ -278,7 +278,7 @@ class ReconcileTest(unittest.TestCase):
                 start += timedelta(minutes=1)
                 history.append(Segment("review", attempt + 1, started_at=start, ended_at=start + timedelta(seconds=30)))
         self.assertEqual(self.plan(item, history, {"minor": 1}),
-                         [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open", stage="fix")])
+                         [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="fix")])
         history.append(Segment("architect", started_at=history[-1].started_at, ended_at=NOW))
         self.assertEqual(self.plan(item, history, {}, architect_reviews={KEY: reconcile.ArchitectReview(
             HEAD, (f"Architect: APPROVED {HEAD}",))}), [reconcile.Merge(KEY)])
@@ -295,13 +295,13 @@ class ReconcileTest(unittest.TestCase):
                                         ended_at=NOW - timedelta(hours=3)),
                                 Segment("repair", attempts)] if attempts else []) + [Segment("review", started_at=NOW)]
                     expected = (reconcile.Dispatch(KEY, "repair", "builder", attempts + 1) if attempts < 3
-                                else reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open", stage="repair"))
+                                else reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="repair"))
                     self.assertEqual(self.plan(replace(Item(), stage=stage), history, {"minor": 1}), [expected])
         self.assertEqual(self.plan(replace(Item(), stage="repair"),
                                    [Segment("review", started_at=NOW - timedelta(hours=4),
                                             ended_at=NOW - timedelta(hours=3)),
                                     Segment("repair", 3, outcome="failed")]),
-                         [reconcile.Escalate(KEY, "park: three fix rounds ended with findings still open", stage="repair")])
+                         [reconcile.Escalate(KEY, "park: 3 fix rounds ended with findings still open", stage="repair")])
         self.assertEqual(self.plan(replace(Item(), stage="repair"), [Segment("repair", 3)]),
                          [reconcile.Review(KEY, 1)])
 
@@ -544,7 +544,7 @@ class ReconcileTest(unittest.TestCase):
                 with self.subTest(stage=stage, history=order):
                     self.assertEqual(self.plan(replace(item, stage=stage), order, {}, slots=0),
                                      [reconcile.Merge(KEY)])
-        self.p.stages["architect"] = policy.Place("architect", "builder", {"zach_gates": ("merge",)})
+        self.p.stages["architect"] = policy.Place("architect", "builder", {})
         self.assertEqual(self.plan(item, history, {}),
                          [reconcile.Merge(KEY)])
 
@@ -668,7 +668,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(item, findings={}), [reconcile.Wait(KEY, "no unique incoming merge edge")])
 
     def test_merge_rechecks_only_the_route_taken_into_merge(self):
-        self.p.stages["plan"] = policy.Place("plan", "builder", {"zach_gates": ("merge",)})
+        self.p.stages["plan"] = policy.Place("plan", "builder", {})
         self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(
             policy.Edge("implement", "plan"), policy.Edge("implement", "merge"),
             policy.Edge("plan", "merge", "merge")))
@@ -695,7 +695,7 @@ class ReconcileTest(unittest.TestCase):
         self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(
             policy.Edge("implement", "review"), policy.Edge("implement", "merge"),
             policy.Edge("review", "merge", "merge")))
-        self.p.stages["review"] = policy.Place("review", "critic", {"zach_gates": ("merge",)})
+        self.p.stages["review"] = policy.Place("review", "critic", {})
         item = replace(Item(), stage="merge", review_state="approved", merge_state="ready")
         for attempt in (1, 2):
             history = [Segment("implement", attempt), Segment("review")]
@@ -787,8 +787,6 @@ class ReconcileTest(unittest.TestCase):
                     item = replace(Item(), stage=stage, human_review=True)
                     history = [Segment(stage, outcome=outcome)]
                     self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}), [action])
-                    self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}, hold_stages=(stage,)),
-                                     [reconcile.Wait(KEY, "human review")])
                     self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}, slots=0),
                                      [reconcile.Wait(KEY, "no free worker slots")])
                     self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}, quota_resets={KEY: NOW + timedelta(hours=1)}),
@@ -873,7 +871,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(item, [Segment("review")]), [reconcile.Wait(KEY, "review findings are unknown")])
 
     def test_asks_and_escalations_do_not_need_slots(self):
-        self.p = replace(self.p, base=policy.Policy(zach_gates=("plan",)))
+        self.p = replace(self.p, base=policy.Policy())
         self.assertEqual(self.plan(history=[Segment("implement")], slots=0), [reconcile.Wait(KEY, "no free worker slots")])
         self.p = replace(self.p, base=policy.Policy(retry_limit=0))
         self.assertIsInstance(self.plan(history=[Segment("implement", 1, outcome="failed"), Segment("implement", 2, outcome="failed")], slots=0)[0], reconcile.Escalate)
@@ -905,7 +903,7 @@ class ReconcileTest(unittest.TestCase):
         history = [Segment("implement", outcome="human_review")]
         self.assertEqual(self.plan(history=history, facts=self.released_facts(), slots=0),
                          [reconcile.Wait(KEY, "no free worker slots")])
-        self.p = replace(self.p, base=policy.Policy(zach_gates=("plan",)))
+        self.p = replace(self.p, base=policy.Policy())
         self.assertIsInstance(self.plan(history=history, facts=self.released_facts())[0], reconcile.Review)
 
     def test_released_implementation_waits_for_current_evidence(self):

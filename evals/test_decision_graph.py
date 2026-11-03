@@ -428,6 +428,43 @@ class DecisionGraphStoreAndAdapterTest(unittest.TestCase):
             self.assertEqual([leaf["id"] for leaf in view["leaves"]], [d4.id])
             self.assertEqual([a["id"] for a in view["ancestors"]], [d2.id, d3.id, d1.id])
 
+    def test_manual_verdict_caps_depth_at_request_justification_and_verdict(self) -> None:
+        d1, d2, d3, d4 = self._seed_diamond_graph()
+        for requested, named, approved, expected in (
+            (10, "", None, 1), (10, "", 10, 1),
+            (10, "two hops", None, 2), (1, "two hops", 10, 1),
+            (10, "two hops", 1, 1),
+        ):
+            with self.subTest(requested=requested, named=named, approved=approved):
+                request = self.store.submit_history_request(self.dh.HistoryRequest(
+                    kind="ancestors", leaf_id=d4.id, requested_depth=requested,
+                    justification=f"Decision mismatches scripts/store.py; inspect its parents {named}.",
+                ))
+                verdict = self.store.decide_history_request(
+                    request.id, approved=True, reason="The cited mismatch needs history.",
+                    approved_depth=approved,
+                )
+                self.assertEqual(verdict.approved_depth, expected)
+                payload = self.store.fulfill_history_request(request.id)
+                self.assertEqual([a["id"] for a in payload["ancestors"]],
+                                 [d2.id, d3.id] + ([d1.id] if expected == 2 else []))
+                self.assertEqual(self.store.history_grants()[-1].approved_depth, expected)
+
+    def test_legacy_overbroad_verdict_is_capped_before_returning_history(self) -> None:
+        d1, d2, d3, d4 = self._seed_diamond_graph()
+        request = self.store.submit_history_request(self.dh.HistoryRequest(
+            kind="ancestors", leaf_id=d4.id, requested_depth=10,
+            justification="Decision mismatches scripts/store.py; inspect the immediate parents.",
+        ))
+        # Simulate a manual approval stored by a release before the cap was enforced.
+        with self.store.session() as session:
+            row = session.get(self.store_mod.DecisionHistoryRequest, request.id)
+            row.status, row.approved_depth = "approved", 10
+        payload = self.store.fulfill_history_request(request.id)
+        self.assertEqual(payload["approved_depth"], 1)
+        self.assertEqual([a["id"] for a in payload["ancestors"]], [d2.id, d3.id])
+        self.assertEqual(self.store.history_grants()[-1].approved_depth, 1)
+
     def test_approved_ancestors_grant_bounds_depth_logs_grant_and_reports_code_mismatch_to_architect(self) -> None:
         d1, d2, d3, d4 = self._seed_diamond_graph()
 

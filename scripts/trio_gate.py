@@ -12,7 +12,7 @@ from decision_escalation import (DecisionUpdate, is_gate, exhaust_retry, identit
 from model_port import Failure, Model, Reply, Request, draw
 from policy import Persona, Policy, PolicyError
 
-TIMEOUT_S = 300  # #928: Cursor composer took 222s on a one-line decision (Zach 2026-10-19: "we need to bump timeout")
+TIMEOUT_S = 300  # #928: Cursor composer took 222s on a one-line decision (the owner 2026-10-19: "we need to bump timeout")
 
 
 @dataclass(frozen=True)
@@ -189,12 +189,12 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
     hold = unanimous and recommendation == "hold" and decision.gate
     update = preserve_ask_link(store.decisions(decision.issue_key), DecisionUpdate(
         decision.topic, decision.question, recommendation if not hold else None,
-        "trio" if unanimous and not hold else "zach",
+        "trio" if unanimous and not hold else "owner",
         {"decision": described, "verdicts": verdicts, "recommendation": recommendation, "unanimous": unanimous,
          **({"diverse": diverse} if diverse is not None else {})}))
     if exhausted and retryable_failure(update.record):
         # Every entry a member could move to stopped on quota: the owner decides, as for an exhausted retry (§6).
-        update = DecisionUpdate(update.topic, update.question, None, "zach", {
+        update = DecisionUpdate(update.topic, update.question, None, "owner", {
             **update.record, "retry_exhausted": failures + 1,
             "error": f"trio unavailable: every [models.trio] entry stopped on quota: {decision.question}"})
     elif retryable_failure(update.record):
@@ -246,7 +246,7 @@ def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas:
     except (PolicyError, ValueError) as exc:
         described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
         update = preserve_ask_link(earlier, DecisionUpdate(
-            decision.topic, decision.question, None, "zach",
+            decision.topic, decision.question, None, "owner",
             {"decision": described, "error": f"{decision.question}: {exc}", "unanimous": False}))
         prior = next((row for row in reversed(earlier) if identity(row) == identity(update)), None)
         if prior is None or prior.record != _with_default(update).record:

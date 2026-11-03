@@ -61,7 +61,7 @@ class InitWorkspaceTest(unittest.TestCase):
         return self.git("rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip()
 
     def test_in_a_repository_init_ignores_its_files_and_the_engines(self):
-        # #870, Zach 2026-10-18: "the init files should be gitignored in any repo".
+        # #870, the owner 2026-10-18: "the init files should be gitignored in any repo".
         self.git("init", "-q")
         (self.root / "README.md").write_text("mine\n")
         code, out, err = self.run_init()

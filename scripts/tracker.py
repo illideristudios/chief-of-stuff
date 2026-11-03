@@ -117,7 +117,7 @@ SESSION_STATES = ("planning", "working", "waiting", "idle")
 TASK_STATE = re.compile(
     r"(?i)^(?:open|waiting|orphaned|running\s+\d{1,2}:\d{2}"
     r"|done(?:\s+\d{1,2}:\d{2}(?:[\u2013-]\d{1,2}:\d{2})?)?(?:\s+[0-9a-f]{7,40})?)$")
-# A standing session's row is not a task (Zach, 2026-09-22 19:28: "we don't finish LANES, we finish TASKS").
+# A standing session's row is not a task (the owner, 2026-09-22 19:28: "we don't finish LANES, we finish TASKS").
 STANDING_ITEM = re.compile(r"(?i)^([\w.-]+):\s+standing\b")
 STANDING_NAME = re.compile(r"(?i)^([\w.-]+)\s+[\u2014\u2013-]\s+standing\b")
 READY = re.compile(r"(?i)\bready for decommissioning\b")
@@ -142,7 +142,7 @@ def _disputes_itself(state: str, item: str) -> str:
     return f"state {state.strip()!r} but the item says {said.group(0)}" if said else ""
 
 
-# `Zach — A2, A3, B`: the target, then why. An em dash, an en dash or a hyphen, because three
+# `the owner — A2, A3, B`: the target, then why. An em dash, an en dash or a hyphen, because three
 # different sessions have written this cell and they did not agree.
 WAITS = re.compile(r"\s+[—–-]\s+|,\s+")
 # `nothing; the stack-default fix landed` is what a live row says when a session waits on no one.

@@ -22,8 +22,7 @@ import decision_page
 import module_graph
 from task_forge import PageData, change_issue_keys, lookup_keys, tracker_issue_tasks
 from fragment import external_url, href, issue_href, issue_page_name, tab_bar
-from decision_page import HEAD
-from page_common import drop_html_comments, markdown_blocks
+from page_common import HEAD, drop_html_comments, markdown_blocks
 from issue_page import _paths, _shared, anchor, inputs, put
 from tracker import TRAILING_NUMBER, parse_tracker
 from settings import Graph
