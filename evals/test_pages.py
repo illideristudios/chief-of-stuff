@@ -898,8 +898,8 @@ class RenderOnRequestTest(unittest.TestCase):
         try:
             now_iso = datetime.now(ZoneInfo(ZONE)).isoformat(timespec="seconds")
             db.upsert_item("github:example/repo#42", title="Engine task", stage="implement", forge_state="open")
-            db.add_decision("github:example/repo#42", "scope", "First store ask", asked_at=now_iso)
-            db.add_decision("github:example/repo#42", "design", "Second store ask", asked_at=now_iso)
+            db.add_decision("github:example/repo#42", "scope", "First store ask", None, "owner", asked_at=now_iso)
+            db.add_decision("github:example/repo#42", "design", "Second store ask", None, "owner", asked_at=now_iso)
             db.add_decision("github:example/repo#42", "permission", "Answered store ask",
                             answer="allow", decided_by="trio", asked_at=now_iso,
                             record={"status": "answered", "answered_at": now_iso})
@@ -927,7 +927,7 @@ class RenderOnRequestTest(unittest.TestCase):
         try:
             db.upsert_item("github:example/repo#42", title="Engine task", stage="implement", forge_state="open")
             db.upsert_item("github:example/repo#43", title="Needs a person", human_review=True)
-            db.add_decision("github:example/repo#43", "scope", "Store ask on the hold")
+            db.add_decision("github:example/repo#43", "scope", "Store ask on the hold", decided_by="owner")
         finally:
             db.engine.dispose()
         nav = re.compile(r'<nav class="tabs"[^>]*>.*?</nav>')
@@ -1255,6 +1255,8 @@ class LastLookedTest(unittest.TestCase):
                 response = get(self.port, route)
                 self.assertEqual(response.status, 200)
                 self.assertIn('title="1 need input">1', nav.search(response.body.decode()).group())
+                if route == "/workers":
+                    self.assertIn('<b>1</b><span class="cap">NEEDS INPUT</span>', response.body.decode())
         render_board.write(self.root, newer, target="board")
         self.assertNotIn('title="1 need input">1', nav.search(get(self.port, "/").body.decode()).group())
         for route in ("/decisions", "/decisions/cache-ttl", "/workers", "/issues/7", "/issues/7/source"):

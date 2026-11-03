@@ -537,7 +537,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     # (#200, #220) forge_ends is shared with the board, so both end a row at the same time
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
     today = [t for t in today_tasks if not t.standing]
-    holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs)
+    holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs, log)
     held = held_names(holds)
     completions = forge_ends(mine, sources, now.tzinfo)
     rows = store_rows if store_rows is not None else [
@@ -547,19 +547,29 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     ]
     log = [m for m in log if m.name.strip().casefold() in keys]
     latest = {k: t for t in mine for k in names(t)}  # later selected rows win
-    exhausted = db.exhaustion(item.issue_key) if item is not None and db is not None else None
-    if exhausted is not None:
-        status = EXHAUSTED_CHIP
-    elif any(t in holds for t in mine):
-        status = "needs input"
-    else:
-        status = rows[0][0] if rows else mine[-1].kind
     latest_mine = list({(t.name.strip() or t.item.strip()).casefold(): t for t in mine}.values())
     header_live = (any(s.issue_key == item.issue_key and s.ended_at is None for s in db.segments())
                    if item is not None and db is not None else any(t.kind == "running" for t in latest_mine))
     current_tasks = (latest_mine if item is not None else
                      list({(t.name.strip() or t.item.strip()).casefold(): t for t in known}.values()))
     header_live = header_live or bool(source_worker_tasks(sources, current_tasks).intersection(latest_mine))
+    # #886: done / a closed issue's forge word beat a hold chip. A merged change alone must not while the issue is
+    # still open — store human_review and tracker holds keep NEEDS INPUT (#936 engine health).
+    exhausted = db.exhaustion(item.issue_key) if item is not None and db is not None else None
+    forge_word = next((word for word in ("merged", "closed")
+                       if any(completions.get(t.name.strip(), (None, ""))[1] == word for t in mine)), None)
+    issue_closed = ((item is not None and item.forge_state == "closed")
+                    or (issue is not None and issue.state == "closed"))
+    if exhausted is not None:
+        status = EXHAUSTED_CHIP
+    elif all(t.kind == "done" for t in current_tasks):
+        status = "done"
+    elif issue_closed:
+        status = forge_word or "closed"
+    elif any(t in holds for t in mine):
+        status = "needs input"
+    else:
+        status = rows[0][0] if rows else mine[-1].kind
     name = rows[0][1].name if rows else (issue.title if issue else mine[0].label)
 
     order = {"open": 0, "merged": 1}

@@ -192,11 +192,13 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                   held: dict[Task, str] | None = None, loops: set[Task] | frozenset[Task] = frozenset(),
                   live_keys: frozenset[str] = frozenset(), live_tasks: set[Task] | frozenset[Task] = frozenset(),
                   ambiguous_numbers: set[int] | None = None,
-                  threads: dict[str, str] | None = None) -> list[columns.Column]:
-    """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
-    a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
+                  threads: dict[str, str] | None = None, moves: list | None = None,
+                  causes: dict[Task, str] | None = None) -> list[columns.Column]:
+    """The Build board: a card at the stage Flow keeps, with done cards only in main.
+    Task cards sort by issue number. Sources add each card's changes
+    and marks, and a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
-    held = hold_causes(tasks, kanban, sources, lanes, frozenset()) if held is None else held
+    held = hold_causes(tasks, kanban, sources, lanes, frozenset(), moves) if held is None else held
     gates = {g for lane in lanes.values() for g in lane.gates}
     ambiguous_numbers = ambiguous_issue_numbers(tasks, sources.home) if ambiguous_numbers is None else ambiguous_numbers
 
@@ -243,6 +245,8 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                  + ((columns.Mark("looping", "looping"),) if task in loops and not finished else ())
                  + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ()))
         owner = task.shown_owner
+        cause = (causes or {}).get(task)
+        flag = columns.Mark(f"NEEDS INPUT · {cause}" if cause else "NEEDS INPUT", "hold") if task in held else None
         live = task.issue in live_keys or task in live_tasks
         if live and task.kind == "done":
             marks += (columns.Mark("running", "running"),)
@@ -250,25 +254,32 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
             chip, kind = "running", "running"
         elif held.get(task) == EXHAUSTED_CHIP:
             chip, kind = EXHAUSTED_CHIP, "waiting"
-        elif task.kind == "waiting" and task in held:
-            chip, kind = "needs input", task.kind
+        elif task.kind == "waiting" and flag is not None:
+            chip, kind = flag.text.casefold(), task.kind
         else:
             chip, kind = task.state, task.kind
         return columns.Card(task.label, kind, refs, owner, chip, marks,
-                            flag=columns.Mark("NEEDS INPUT", "hold") if task in held else None,
+                            flag=flag,
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
 
-    # Done means done (#1153): a finished task leaves the stage columns; only `main` holds finished work.
-    laned = [t for t in tasks if t.lane.strip() and t.stage.strip()
-             and (t.kind != "done" or effective_stage(t, sources, lanes) == "main")]
-    at = {t: effective_stage(t, sources, lanes) for t in laned}
+    candidates = [t for t in tasks if t.lane.strip() and t.stage.strip()]
+    stages = {t: effective_stage(t, sources, lanes, moves, tasks) for t in candidates}
+    # Main's done-card rule (#1153/#1154), applied to the same stage Build and Flow display.
+    laned = [t for t in candidates if t.kind != "done" or stages[t] == "main"]
+    at = {t: stages[t] for t in laned}
     order = list(dict.fromkeys(stage_order(lanes) + list(at.values())))
     # No PR column: a card at `pr` draws in the stage after it, normally review.
     into = {"pr": order[order.index("pr") + 1]} if "pr" in order[:-1] else {}
     order = [s for s in order if s not in into]
-    cols = [columns.Column(stage, tuple(card(t, at[t]) for t in laned if into.get(at[t], at[t]) == stage),
-                           *(("gate", "gate") if stage in gates else ())) for stage in order]
+
+    def cards_at(stage: str) -> tuple[columns.Card, ...]:
+        # Numbered cards first, ascending; no number last; ties keep tracker order (#887).
+        group = [t for t in laned if into.get(at[t], at[t]) == stage]
+        group.sort(key=lambda t: ((n := issue_number(t.issue)) is None, n or 0))
+        return tuple(card(t, at[t]) for t in group)
+
+    cols = [columns.Column(stage, cards_at(stage), *(("gate", "gate") if stage in gates else ())) for stage in order]
     merged = merged_today(sources, now) if now else []
     if merged:
         cards = tuple(columns.Card(c.title, "merged today", tuple((i, page(i, issue_url(i))) for i in c.issues[:1]) + ((c.ref, change_href(c)),),
@@ -303,6 +314,75 @@ CARD_COLOURS = {**columns.PALETTE, "merged today": columns.PALETTE["done"],
                 "looping": ("var(--surface)", "var(--stage-fix)", "1px solid var(--stage-fix)")}
 
 
+MERGE_SHOWN = 5
+
+
+def merge_order_page(sources: board_sources.Sources) -> str:
+    """HTML for the `/merge-order` route (file merge-order.html): same `merge_order.report` text as the CLI (#75)."""
+    import html as html_lib
+    import merge_order as merge_order_cmd
+
+    github = isinstance(sources.home, board_sources.backlog.GitHubBacklog) if sources.home is not None else True
+    mark = "#" if github else "!"
+    changes = []
+    for c in sources.changes.values():
+        if c.state != "open" or c.draft:
+            continue
+        m = TRAILING_NUMBER.search(c.ref)
+        if not m:
+            continue
+        changes.append(merge_order_cmd.Change(int(m[1]), c.title, c.url, c.head or "", c.base or "main",
+                                              frozenset(c.files), complete=True))
+    # Board cache has no trial-merge results; overlapping pairs stay unverified so the shared
+    # order still prefers disjoint changes, matching a command run that could not trial.
+    text = merge_order_cmd.report(changes, {}, mark)
+    body = html_lib.escape(text) if text else "No open changes."
+    return (
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<title>Merge order</title></head>"
+        f"<body><h1>Merge order</h1><pre>{body}</pre>"
+        "<p>Same report as <code>chief-of-stuff merge-order</code>. "
+        "Trial merges run in the command; this page uses the board's cached changes.</p>"
+        "</body></html>\n"
+    )
+
+
+def write_merge_order(root: Path, pages_dir: Path) -> Path:
+    """Render `merge-order.html`; the page server calls this for `/merge-order` (#75)."""
+    cfg = read_config(root)
+    sources = board_sources.for_home(board_sources.load(pages_dir), cfg.backlog)
+    out = pages_dir / "merge-order.html"
+    write_if_changed(out, merge_order_page(sources))
+    return out
+
+
+def merge_order(sources: board_sources.Sources) -> panels.Panel:
+    """Open changes in the order to merge them: approved first, then in review; within each, a passed pipeline
+    first, then those sharing no file with another open change (#75's least-conflict order, by file overlap)."""
+    # `chief-of-stuff merge-order` offers pairwise trial merges; this panel keeps its filename-overlap ranking.
+    open_ = [c for c in sources.changes.values() if c.state == "open"]
+    shared = {c.ref: sorted({o.ref for o in open_ if o is not c and set(o.files) & set(c.files)}) for c in open_}
+    overlap = {c.ref: len({f for o in open_ if o is not c for f in set(o.files) & set(c.files)}) for c in open_}
+
+    def number(c: board_sources.Change) -> int:
+        m = TRAILING_NUMBER.search(c.ref)
+        return int(m[1]) if m else 0
+
+    ready = sorted((c for c in open_ if not c.draft),
+                   key=lambda c: (not c.approved, c.pipeline != "passed", bool(shared[c.ref]), number(c)))
+    rows = tuple(panels.Row(c.title, " · ".join([
+        "approved" if c.approved else "in review",
+        *([f"pipeline {c.pipeline}"] if c.pipeline else []),
+        *([f"base {c.base}"] if c.base else []),
+        f"shares {_plural(overlap[c.ref], 'file')} with {', '.join(shared[c.ref])}" if shared[c.ref] else "no shared files",
+    ]), num=str(i), ref=c.ref, href=c.url) for i, c in enumerate(ready, 1))
+    approved = sum(c.approved for c in ready)
+    rest = len(rows) - MERGE_SHOWN
+    return panels.Panel("merge", "MERGE ORDER", "merge", len(rows), rows[:MERGE_SHOWN],
+                        f"{approved} approved · {len(rows) - approved} in review",
+                        foot=f"+ {rest} more" if rest > 0 else "", href="/merge-order")
+
+
 def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: int, drift: int, orphaned: int,
                *, actual_running: int | None = None) -> list[panels.Tile]:
     """Six counts in the artboard's order and words, each linking to where its items are listed. ALL counts every
@@ -331,8 +411,9 @@ def _tasks_from_store(db: PageData, cfg: Config, lanes: dict | None, kanban: Kan
     for item in store_items:
         lane_name = item.workflow or default_lane
         lane_obj = (lanes or {}).get(lane_name)
-        stage_name = item.stage or (lane_obj.stages[0] if lane_obj and lane_obj.stages else "implement")
         item_segs = segs_by_key.get(item.issue_key, [])
+        stage_name = item.stage or (item_segs[-1].stage if item_segs else
+                                   lane_obj.stages[0] if lane_obj and lane_obj.stages else "implement")
         open_seg = next((s for s in reversed(item_segs) if s.ended_at is None), None)
         open_decs = [d for d in store_decisions if d.issue_key == item.issue_key and state_of(d).status in ("open", "blocked")]
         exhausted = retry_exhaustion(db.resume(item.issue_key), item_segs, db.log(item.issue_key))
@@ -401,16 +482,6 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
 
     issues = sum(1 for t in tasks if t.issue.strip() and not t.workflow)
     changes = sum(1 for c in sources.changes.values() if c.state == "open")
-    # A task's stage for drift, computed once, keyed by the task: every nameless task shares the blank name.
-    stages = {t: effective_stage(t, sources, lanes or {}) for t in tasks}
-    # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
-    pending_refs = dict(pending_refs or {})
-    for d in store_decisions:
-        if state_of(d).status in ("open", "blocked"):
-            pending_refs.setdefault(d.issue_key, None)
-            pending_refs.setdefault(source_key(d.issue_key, sources.home), None)
-    held = {**hold_causes(tasks, kanban, sources, lanes or {}, pending_refs), **store_held}
-    held = {t: why for t, why in held.items() if t.kind != "done"}
     # Each snapshot is parsed once even when Flow, holds and loop marks all need it.
     flow_log = [*(stage_log or []), (tracker_day or today, tracker_text)]
     all_log = dict([*(loop_log if loop_log is not None else look_log or []), *(look_log or []), *flow_log])
@@ -418,13 +489,41 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     moves = {d: tracker_log.moves(text, d, zone) for d, text in all_log.items()}
     flow_moves = [m for day, _ in flow_log for m in moves[day]]
     earlier = list(rows.items())
+    # A task's stage for drift, computed once, keyed by the task: every nameless task shares the blank name.
+    stages = {t: effective_stage(t, sources, lanes or {}, flow_moves, tasks) for t in tasks}
+    # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
+    pending_refs = dict(pending_refs or {})
+    for d in store_decisions:
+        if state_of(d).status in ("open", "blocked"):
+            pending_refs.setdefault(d.issue_key, None)
+            pending_refs.setdefault(source_key(d.issue_key, sources.home), None)
+    held = {**hold_causes(tasks, kanban, sources, lanes or {}, pending_refs, flow_moves), **store_held}
+    held = {t: why for t, why in held.items() if t.kind != "done"}
     loops = looping(tasks, [m for ms in moves.values() for m in ms], lanes or {}, sources.home, earlier) | store_loops
     live_keys = frozenset(s.issue_key for s in db.segments() if s.ended_at is None) if db is not None else frozenset()
     known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
     ambiguous_numbers = ambiguous_issue_numbers(known, sources.home)
     threads = _worker_threads(db) if db is not None else {}
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    by_issue = {issue_key(t.issue, sources.home): t for t in tasks if t.issue.strip() and not t.workflow}
+    resolved = []
+    for t in known:
+        has_issue = bool(t.issue.strip() and not t.workflow)
+        key = issue_key(t.issue, sources.home) if has_issue else ""
+        target = t if t in tasks else (by_issue.get(key) if has_issue else None)
+        if target is None and t.name.strip():
+            named = by_name.get(t.name.strip().casefold())
+            if named is not None and not (has_issue and named.issue.strip() and not named.workflow
+                                          and issue_key(named.issue, sources.home) != key):
+                target = named
+        if target is not None:
+            resolved.append((t, target))
+    find = {**{t.item.strip().casefold(): target for t, target in resolved if t.item.strip()},
+            **{t.name.strip().casefold(): target for t, target in resolved if t.name.strip()}}
+    causes = tracker_log.review_causes(flow_moves, lambda name: find.get(name.strip().casefold()))
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops, live_keys,
-                               source_worker_tasks(sources, tasks), ambiguous_numbers, threads)
+                               source_worker_tasks(sources, tasks), ambiguous_numbers, threads, moves=flow_moves,
+                               causes=causes)
     inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols, inline=inline, linked_inline=lambda text: markdown_inline(text, links=False))}'
@@ -537,9 +636,11 @@ figure{{margin:0;padding:0;background:none;border:0}}
   function hms(d){{return new Intl.DateTimeFormat('en-GB',{{timeZone:tz,hour:'2-digit',minute:'2-digit',second:'2-digit'}}).format(d);}}
   function pad(n){{return (n<10?'0':'')+n;}}
   function tick(){{
-    var now=new Date(),ms=dl-now,sign=ms<0?'-':'',s=Math.floor(Math.abs(ms)/1000);
+    var now=new Date(),ms=dl-now,s=Math.floor(Math.abs(ms)/1000),expired=ms<0;
+    var dur=Math.floor(s/3600)+'h'+pad(Math.floor(s/60)%60)+'m'+pad(s%60)+'s';
     root.querySelector('.panels-now').textContent=hms(now);
-    root.querySelector('.panels-left').textContent=sign+Math.floor(s/3600)+'h'+pad(Math.floor(s/60)%60)+'m'+pad(s%60)+'s';
+    root.querySelector('.panels-due .panels-clock-name').textContent=root.dataset.deadlineName+(expired?' passed':' in');
+    root.querySelector('.panels-left').textContent=expired?dur+' ago':dur;
   }}
   tick();setInterval(tick,1000);
 }})();
@@ -632,6 +733,8 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
                   looked=looked, look_log=look_log, loop_log=sorted(loop_log), db=db,
                   engine_status=read_engine_status(root))
     write_if_changed(out, page)
+    # #75: automatic merge-order page beside the board; served only as `/merge-order`.
+    write_merge_order(root, out.parent)
     return out, cfg, now, tracker_text, req_texts
 
 

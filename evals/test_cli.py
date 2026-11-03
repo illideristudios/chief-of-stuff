@@ -1,6 +1,7 @@
 """The one installed command routes fixed operations and preserves release pinning."""
 
 import io
+import json
 import os
 import re
 import shlex
@@ -17,8 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
+import claude_adapter  # noqa: E402
 import performance_report  # noqa: E402
 import probe_health  # noqa: E402
+import limits_cli  # noqa: E402
 import shell_setup  # noqa: E402
 import supervisor  # noqa: E402
 
@@ -34,7 +37,7 @@ def _help_sections(help_text: str) -> dict[str, str]:
 
 
 # A per-command help issue opts in here after bringing its parser up to the standard.
-ENFORCED = frozenset({"docs", "health", "performance"})
+ENFORCED = frozenset({"docs", "health", "init", "limits", "pages", "performance"})
 
 
 def missing_sections(help_text: str, name: str) -> list[str]:
@@ -88,8 +91,8 @@ class CommandHelpTest(unittest.TestCase):
     def test_every_routed_command_is_grouped_or_hidden_and_store_backed_ones_exist(self):
         visible = {name for name, (_, group) in cli.COMMAND_REGISTRY.items() if group}
         self.assertEqual(visible, {"init", "work", "engine", "supervisor", "worktree", "backlog", "kanban",
-                                   "pipeline", "health", "pages", "decisions", "performance", "limits",
-                                   "architect-signals", "docs"})
+                               "pipeline", "merge-order", "health", "pages", "decisions", "performance", "limits",
+                               "architect-signals", "docs"})
         self.assertLessEqual(cli.STORE_BACKED, set(cli.COMMANDS))
 
     def test_retiring_commands_are_routable_but_not_discoverable(self):
@@ -180,6 +183,31 @@ class CommandHelpTest(unittest.TestCase):
                 self.assertEqual(help_text.split("\n\n")[1].splitlines()[0], purpose)
 
 
+class PagesCommandTest(unittest.TestCase):
+    def pages(self, *args):
+        return subprocess.run([sys.executable, str(ROOT / "chief_of_stuff.py"), "pages", *args],
+                              capture_output=True, text=True)
+
+    def test_help_is_the_agent_command_reference(self):
+        done = self.pages("--help")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(missing_sections(done.stdout, "pages"), [], done.stdout)
+        for text in ("--ensure", "/workers", "re-render", "nothing here ever opens it", "supervise", "install",
+                     "uninstall", "status", "--board", "/decisions/<id>", "POST / ", "pages.log"):
+            self.assertIn(text, done.stdout)
+        self.assertNotIn("pages: started", done.stdout.splitlines())
+
+    def test_serve_requires_directory_and_port(self):
+        for args in (("serve",), ("serve", "--dir", "."), ("serve", "--port", "8787")):
+            with self.subTest(args=args):
+                done = self.pages(*args)
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertEqual(done.stdout, "")
+                self.assertIn("usage:", done.stderr)
+                self.assertNotIn("Traceback", done.stderr)
+
+
 class InstallTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -188,12 +216,24 @@ class InstallTest(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.share = self.root / "share"
+        # No test runs the real claude: the install's plugin step answers from here.
+        patcher = mock.patch.object(claude_adapter, "update_plugin", return_value={"plugin": "reported"})
+        self.plugin = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def install(self, **kwargs):
         return cli.install(source=ROOT, install_dir=self.share, bin_dir=self.bin, **kwargs)
 
+    def test_an_install_brings_the_plugin_to_the_release_and_reports_it(self):
+        # §14: I → Pl ∨ F. The plugin step reports where the plugin stands; the install passes that on.
+        result = self.install()
+        version = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())["version"]
+        self.plugin.assert_called_once_with(self.share / "current", version)
+        self.assertEqual(result["plugin"], "reported")
+
     def test_dry_run_does_not_write(self):
         result = self.install(dry_run=True)
+        self.plugin.assert_not_called()
         self.assertFalse(result["installed"])
         self.assertTrue(result["wrapper_write"])
         self.assertFalse(self.share.exists())
@@ -353,6 +393,18 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                     self.assertEqual(code, 0)
                     self.assertTrue(out.getvalue().startswith("usage:"), out.getvalue())
 
+    def test_bad_arguments_of_store_backed_commands_exit_2_without_bootstrapping(self):
+        bad = {"pages": ["serve"], "performance": [], "limits": ["--root"], "work": [],
+               "engine": ["--interval", "soon"], "decision": [], "adopt": ["--bogus"]}
+        self.assertLessEqual(set(bad), cli.STORE_BACKED)
+        for name, argv in bad.items():
+            with self.subTest(command=name), \
+                 mock.patch.object(supervisor, "lock", side_effect=AssertionError("bootstrap")), \
+                 mock.patch.object(supervisor, "ensure_venv", side_effect=AssertionError("bootstrap")), \
+                 mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                self.assertEqual(cli.main([name, *argv]), 2)
+                self.assertIn("usage:", err.getvalue())
+
     def test_help_bootstraps_only_when_this_interpreter_lacks_the_dependencies(self):
         missing = subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: No module named 'sqlalchemy'")
         with mock.patch.object(cli.subprocess, "run", return_value=missing), \
@@ -450,7 +502,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                                side_effect=supervisor.ServiceError("no python3 on the login shell's PATH")), \
              mock.patch.object(cli.os, "execv") as execv, \
              mock.patch.object(sys, "stderr", buf):
-            code = cli.main(["performance"])
+            code = cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(code, 1)
         self.assertIn("refused:", buf.getvalue())
         self.assertIn("no python3", buf.getvalue())
@@ -463,7 +515,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                                side_effect=shell_setup.ShellError("configured login shell '/missing' is not executable")), \
              mock.patch.object(cli.os, "execv") as execv, \
              mock.patch.object(sys, "stderr", buf):
-            code = cli.main(["performance"])
+            code = cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(code, 1)
         self.assertIn("refused:", buf.getvalue())
         self.assertIn("not executable", buf.getvalue())
@@ -475,7 +527,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
              mock.patch.object(supervisor, "ensure_venv", side_effect=OSError("permission denied")), \
              mock.patch.object(cli.os, "execv") as execv, \
              mock.patch.object(sys, "stderr", buf):
-            code = cli.main(["performance"])
+            code = cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(code, 1)
         self.assertIn("refused:", buf.getvalue())
         self.assertIn("permission denied", buf.getvalue())
@@ -500,7 +552,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
              mock.patch.object(supervisor, "data_dir", return_value=data), \
              mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)):
             with self.assertRaises(SystemExit):
-                cli.main(["performance"])
+                cli.main(["performance", "--since", "2026-10-01"])
         self.assertEqual(order, [
             ("lock", data / "supervisor.lock", True),
             ("ensure", data),
@@ -514,6 +566,114 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                     if target.startswith("scripts/") and target.count("/") == 1
                     and forbidden_reach(scripts, Path(target).stem, set(), frozenset({"sqlalchemy", "alembic"}))}
         self.assertEqual(reaching, set(cli.STORE_BACKED))
+
+
+def _help_section(help_text: str, heading: str) -> str:
+    body = re.split(rf"(?m)^{re.escape(heading)}:\n", help_text, maxsplit=1)[1]
+    return re.split(r"(?m)^[A-Z][\w ]*:$", body, maxsplit=1)[0]
+
+
+class InitHelpTest(unittest.TestCase):
+    """#839: `chief-of-stuff init --help` is the reference an agent discovers."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+
+    def init(self, *args):
+        return subprocess.run([sys.executable, str(ROOT / "chief_of_stuff.py"), "init", *args],
+                              cwd=self.cwd, capture_output=True, text=True)
+
+    def test_public_help_meets_the_shared_standard_and_writes_nothing(self):
+        self.assertIn("init", ENFORCED)
+        done = self.init("--help")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(list(self.cwd.iterdir()), [])
+        self.assertEqual(missing_sections(done.stdout, "init"), [], done.stdout)
+        self.assertNotIn("init_workspace.py", done.stdout.splitlines()[0])
+        text = done.stdout
+        options = " ".join(text.split("When not to use", 1)[0].split())
+        for flag in ("-h, --help", "--root", "--user", "--timezone", "--daily-dir", "--worktrees", "--agent",
+                     "--launcher", "--worker-mode", "--board-port", "--github-repo", "--gitlab-host",
+                     "--gitlab-project", "--gitlab-token-env", "--dry-run"):
+            self.assertIn(flag, options, flag)
+        for fact in ("default false", "required, no default", "default daily/", "default worktrees/",
+                     "default ghostty", "default interactive", "default unset",
+                     "default CHIEF_OF_STUFF_GITLAB_TOKEN", "1-65535", "mutually exclusive",
+                     "NAME:task or NAME:standing"):
+            self.assertIn(fact, options, fact)
+        avoided = " ".join(_help_section(text, "When not to use").split())
+        self.assertIn("chief-of-stuff models --root PATH", avoided)
+        self.assertIn("not an update", avoided)
+        self.assertIn("#825", avoided)
+        self.assertIn("not implemented", avoided)
+        self.assertIn("[workspaces]", avoided)
+        output = " ".join(_help_section(text, "Output").split())
+        for fact in ("Not TOON and not JSON", "stdout", "stderr", "configured ROOT", "would append to",
+                     "would create", "would keep existing", "label not created"):
+            self.assertIn(fact, output, fact)
+        codes = " ".join(_help_section(text, "Exit codes").split())
+        for fact in ("0", "1", "2", "usage fault", "still exit 0"):
+            self.assertIn(fact, codes, fact)
+        effects = " ".join(_help_section(text, "Side effects").split())
+        for fact in ("Appends one ## Coordinator block", "never replaced", "only when absent",
+                     "needs human", "--dry-run", "no --commit", "immediately", "gh", "token value is never written",
+                     "does not create a store", "no rollback"):
+            self.assertIn(fact, effects, fact)
+        examples = [line.strip() for line in _help_section(text, "Examples").splitlines()
+                    if line.strip().startswith("chief-of-stuff init")]
+        self.assertEqual(len(examples), 3, examples)
+        self.assertIn("Robin", examples[0])
+        self.assertIn("/tmp/alder", examples[0])
+        self.assertIn("--dry-run", examples[0])
+        self.assertIn("America/Chicago", examples[0])
+        self.assertIn("Morgan", examples[1])
+        self.assertIn("/tmp/birch", examples[1])
+        self.assertIn("example-team/birch", examples[1])
+        self.assertIn("implementer:task", examples[1])
+        self.assertIn("--launcher tmux", examples[1])
+        self.assertIn("Casey", examples[2])
+        self.assertIn("/tmp/cedar", examples[2])
+        self.assertIn("https://gitlab.example.test", examples[2])
+        self.assertIn("example-team/cedar", examples[2])
+        self.assertIn("CEDAR_GITLAB_TOKEN", examples[2])
+        roots = ("/tmp/alder", "/tmp/birch", "/tmp/cedar")
+        for example, root in zip(examples, roots):
+            self.assertIn(root, example)
+            self.assertIn("chief-of-stuff init", example)
+            for other in roots:
+                if other != root:
+                    self.assertNotIn(other, example)
+
+    def test_usage_faults_exit_2_and_write_nothing(self):
+        missing = self.init()
+        self.assertEqual(missing.returncode, 2, missing.stderr)
+        self.assertIn("usage:", missing.stderr)
+        self.assertEqual(list(self.cwd.iterdir()), [])
+        workspace = self.cwd / "workspace"
+        workspace.mkdir()
+        clash = self.init("--root", str(workspace), "--user", "Morgan", "--timezone", "America/Chicago",
+                          "--github-repo", "example-team/birch", "--gitlab-host", "https://gitlab.example.test")
+        self.assertEqual(clash.returncode, 2, clash.stderr)
+        self.assertIn("not allowed with", clash.stderr)
+        self.assertEqual(list(workspace.iterdir()), [])
+
+    def test_unpaired_gitlab_flags_exit_1_and_dry_run_writes_nothing(self):
+        workspace = self.cwd / "cedar"
+        workspace.mkdir()
+        unpaired = self.init("--root", str(workspace), "--user", "Casey", "--timezone", "America/Chicago",
+                             "--gitlab-host", "https://gitlab.example.test")
+        self.assertEqual(unpaired.returncode, 1, unpaired.stderr)
+        self.assertIn("refused:", unpaired.stderr)
+        self.assertIn("requires --gitlab-project", unpaired.stderr)
+        self.assertEqual(list(workspace.iterdir()), [])
+        preview = self.init("--dry-run", "--root", str(workspace), "--user", "Robin",
+                            "--timezone", "America/Chicago", "--github-repo", "example-team/alder")
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertIn("would create", preview.stdout)
+        self.assertEqual(list(workspace.iterdir()), [])
 
 
 class PerformanceHelpTest(unittest.TestCase):
@@ -750,6 +910,134 @@ class HealthHelpTest(unittest.TestCase):
             tokens = shlex.split(example)
             self.assertEqual(tokens[:2], ["chief-of-stuff", "health"])
             parser.parse_args(tokens[2:])
+
+
+class LimitsHelpTest(unittest.TestCase):
+    """#849: `chief-of-stuff limits --help` is the reference an agent discovers and trusts."""
+
+    def run_limits(self, *args):
+        env = dict(os.environ, COLUMNS="100", NO_COLOR="1", PYTHON_COLORS="0", PYTHONHASHSEED="0")
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "limits", *args],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_limits_help_meets_shared_standard_and_covers_limits_contract(self):
+        self.assertIn("limits", ENFORCED)
+        done = self.run_limits("--help")
+        short = self.run_limits("-h")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual((short.returncode, short.stdout, short.stderr), (0, done.stdout, ""))
+        self.assertEqual(missing_sections(done.stdout, "limits"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = limits_cli.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = limits_cli.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            if action.option_strings:
+                self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        help_text = " ".join(done.stdout.split())
+        for phrase in (
+            "chief-of-stuff health",
+            "not TOON",
+            "not JSON",
+            "unknown:",
+            "read in 1.1",
+            "warn_at",
+            "0.8",
+            "XDG_STATE_HOME",
+            ".local/state/chief-of-stuff/limits.sqlite",
+            "claude_as_profile",
+            "No preview",
+            "--commit gate",
+            "cedar-workspace",
+            "CLAUDE_CONFIG_DIR",
+            "claude-profiles",
+            "issue store",
+            "header row",
+            "Columns (space-separated)",
+        ):
+            self.assertIn(phrase, help_text, phrase)
+
+        examples = [line.strip() for line in sections["examples"].splitlines()
+                    if line.strip().startswith("chief-of-stuff limits")]
+        self.assertEqual(len(examples), 3, examples)
+        for example in examples:
+            tokens = shlex.split(example)
+            self.assertEqual(tokens[:2], ["chief-of-stuff", "limits"])
+            if tokens[2:] == ["--help"]:  # argparse exits 0 on help; the other examples must parse
+                with self.assertRaises(SystemExit) as raised, redirect_stdout(io.StringIO()):
+                    parser.parse_args(tokens[2:])
+                self.assertEqual(raised.exception.code, 0)
+            else:
+                parser.parse_args(tokens[2:])
+
+    def test_help_does_not_collect_or_touch_history(self):
+        with mock.patch("limits_cli.load") as load, mock.patch("limits_cli.read_all") as read_all, \
+                mock.patch("limits_cli.LimitsHistory") as history:
+            with self.assertRaises(SystemExit) as raised:
+                limits_cli.main(["--help"])
+        self.assertEqual(raised.exception.code, 0)
+        load.assert_not_called()
+        read_all.assert_not_called()
+        history.assert_not_called()
+
+    def test_parser_fault_exits_two_without_collection(self):
+        with mock.patch("limits_cli.load") as load, mock.patch("limits_cli.read_all") as read_all, \
+                mock.patch("limits_cli.LimitsHistory") as history:
+            with self.assertRaises(SystemExit) as raised:
+                limits_cli.main(["--root"])
+        self.assertEqual(raised.exception.code, 2)
+        load.assert_not_called()
+        read_all.assert_not_called()
+        history.assert_not_called()
+
+
+class LimitsCommandTest(unittest.TestCase):
+    """#849: limits stdout/stderr and exit codes through the public CLI surface."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `settings.toml`\n")
+        (self.root / "settings.toml").write_text("[workers]\n")
+
+    def test_mixed_known_and_unknown_readings_print_six_fields_and_succeed(self):
+        from datetime import datetime, timezone
+        from limits import Reading
+
+        stamp = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        rows = [
+            Reading("claude", "default", "five_hour", 40, 100, "%", stamp, stamp, ""),
+            Reading("codex", "", "limits", None, None, "", None, stamp, "read in 1.1"),
+        ]
+        output = io.StringIO()
+        with mock.patch("limits_cli.read_all", return_value=rows), mock.patch("limits_cli.LimitsHistory") as history, \
+                redirect_stdout(output):
+            self.assertEqual(limits_cli.main(["--root", str(self.root)]), 0)
+        text = output.getvalue()
+        self.assertIn("runtime  account  limit  used/cap  reset  observed", text)
+        self.assertIn("40/100%", text)
+        self.assertIn("unknown: read in 1.1", text)
+        history.return_value.record.assert_called_once_with(rows)
+
+    def test_history_failure_exits_one_with_diagnostic_and_no_table(self):
+        errors = io.StringIO()
+        with mock.patch("limits_cli.LimitsHistory", side_effect=OSError("database unavailable")), \
+                redirect_stderr(errors), redirect_stdout(io.StringIO()):
+            self.assertEqual(limits_cli.main(["--root", str(self.root)]), 1)
+        self.assertIn("limits: database unavailable", errors.getvalue())
+        self.assertNotIn("runtime  account", errors.getvalue())
 
 
 if __name__ == "__main__":

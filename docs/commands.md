@@ -69,37 +69,131 @@ options:
 ### `init`
 
 ```text
-usage: init_workspace.py [-h] --root ROOT --user USER --timezone TIMEZONE [--daily-dir DAILY_DIR]
-                         [--worktrees WORKTREES] [--agent NAME:task|standing]
-                         [--launcher {ghostty,tmux}] [--worker-mode {interactive,one-shot}]
-                         [--board-port BOARD_PORT] [--github-repo GITHUB_REPO |
-                         --gitlab-host GITLAB_HOST] [--gitlab-project GITLAB_PROJECT]
-                         [--gitlab-token-env GITLAB_TOKEN_ENV] [--dry-run]
+usage: chief-of-stuff init [-h] --root PATH --user NAME --timezone ZONE [--daily-dir DIR]
+                           [--worktrees DIR] [--agent NAME:task|standing]
+                           [--launcher {ghostty,tmux}] [--worker-mode {interactive,one-shot}]
+                           [--board-port PORT] [--github-repo OWNER/NAME | --gitlab-host URL]
+                           [--gitlab-project GROUP/NAME] [--gitlab-token-env NAME] [--dry-run]
 
-Configure a workspace's forge, Coordinator block and engine settings.
+Bootstrap configuration inside an existing workspace that has no Coordinator block.
+
+Run it once on a directory that already exists and has no ## Coordinator block.
 
 options:
-  -h, --help            show this help message and exit
-  --root ROOT           existing workspace directory
-  --user USER           name to show as the workspace user
-  --timezone TIMEZONE   IANA timezone, e.g. America/Chicago
-  --daily-dir DAILY_DIR
-  --worktrees WORKTREES
+  -h, --help            Boolean, default false. Print this text on stdout and exit 0. Other
+                        arguments are not required.
+  --root PATH           Path, required, no default. An existing workspace directory. init does not
+                        create it.
+  --user NAME           String, required, no default. Coordinator user: one trimmed, nonempty
+                        printable line without backticks or pipes.
+  --timezone ZONE       IANA timezone string, required, no default. Must be a zone ZoneInfo
+                        recognizes, for example America/Chicago.
+  --daily-dir DIR       Relative directory string, default daily/. Daily log and tracker paths,
+                        kept inside the workspace with a trailing slash. The directory is not
+                        created.
+  --worktrees DIR       Relative directory string, default worktrees/. Coordinator worktree
+                        location, with the same path rules. Worktrees are not created.
   --agent NAME:task|standing
-                        worker type and lifetime; repeat for multiple types
+                        Repeatable string, default none. Append one Agent line. The form is
+                        NAME:task or NAME:standing; NAME matches [A-Za-z0-9][A-Za-z0-9._-]{0,63}.
   --launcher {ghostty,tmux}
+                        Choice ghostty or tmux, default ghostty. Sets [workers].launcher only in
+                        settings this run creates. Starts no terminal.
   --worker-mode {interactive,one-shot}
-                        default dispatch mode written to [workers] in the workspace TOML
-  --board-port BOARD_PORT
-                        configure local board serving on this fixed port
-  --github-repo GITHUB_REPO
-                        GitHub owner/repository
-  --gitlab-host GITLAB_HOST
-                        GitLab https URL; also pass --gitlab-project
-  --gitlab-project GITLAB_PROJECT
-                        GitLab group/repository
-  --gitlab-token-env GITLAB_TOKEN_ENV
-  --dry-run             print the new block and settings without writing
+                        Choice interactive or one-shot, default interactive. Sets [workers].mode
+                        only in settings this run creates. Dispatches no worker.
+  --board-port PORT     Integer, default unset. Record a Pages board at http://127.0.0.1:PORT/
+                        with directory pages/. Valid range 1-65535. Nothing is served or opened.
+  --github-repo OWNER/NAME
+                        owner/repository string, default unset. Select a GitHub backlog, mutually
+                        exclusive with --gitlab-host. GitHub calls use gh. Required unless
+                        --gitlab-host is set.
+  --gitlab-host URL     HTTP or HTTPS URL string, default unset. Select a GitLab backlog, mutually
+                        exclusive with --github-repo. Requires --gitlab-project. Required unless
+                        --github-repo is set.
+  --gitlab-project GROUP/NAME
+                        Group/project string, default unset. GitLab project path. Requires
+                        --gitlab-host, and is refused without it even when --github-repo is set.
+  --gitlab-token-env NAME
+                        Environment-variable name, default CHIEF_OF_STUFF_GITLAB_TOKEN. Recorded
+                        on a GitLab Backlog line and used for GitLab calls. The token value is
+                        never written. Checked even for a GitHub backlog.
+  --dry-run             Boolean, default false. Validate and print the intended file changes and
+                        label intent. No file writes and no forge calls.
+
+When not to use:
+  A workspace that already has a ## Coordinator block is refused. To install or
+  keep model guidance on a workspace that is already configured, use
+  chief-of-stuff models --root PATH. Init is not an update and not a reset.
+  Parent [workspaces] setup (architecture section 12, issue #825) is not
+  implemented: init does not read or write that table, register child
+  workspaces, or start an engine.
+
+Output:
+  Human-readable text. Not TOON and not JSON, and there are no structured
+  fields. --help writes this text on stdout and leaves stderr empty.
+  A successful write prints, on stdout, an optional "ignored in EXCLUDE" line,
+  then optional "hold label" and "stage label" lines for labels the forge
+  created, then "configured ROOT; settings in SETTINGS; model guidance in
+  GUIDANCE". ROOT, SETTINGS and GUIDANCE are the workspace path and the two
+  destination paths.
+  --dry-run prints "would append to" or "would create" for the Coordinator
+  file and prints the proposed block; "would keep existing" or "would create"
+  for settings, and prints new settings only when the file is absent; the same
+  keep-or-create line for model guidance, without its contents; and optional
+  "would create the hold label" or "would create the stage label" lines, or a
+  "would check GitHub Project" line when existing settings name a project.
+  A forge that refuses a label prints "hold label not created" or "stage label
+  not created" on stderr, and initialization still continues. Configuration and I/O refusals print
+  "refused:" on stderr. Usage faults print usage and an error on stderr.
+
+Exit codes:
+  0  initialization, --dry-run, or --help succeeded. A label warning on stderr
+     is still exit 0.
+  1  refused configuration or I/O, including a missing GitLab partner flag, a
+     --board-port outside 1-65535, a bad user, timezone, directory, or token
+     variable, an existing Coordinator block, and invalid existing settings.
+  2  usage fault: a missing required argument, an unknown option, an invalid
+     choice, a non-integer --board-port, or both --github-repo and --gitlab-host.
+
+Side effects:
+  Reads the workspace directory, an existing Coordinator file, existing
+  settings (validated, not rewritten), the shipped model-guidance template
+  when guidance is created, and timezone data. Inside a git work tree it also
+  reads the exclude file. A real run with a forge reads that forge and may
+  create missing labels. --dry-run reads the same local files and does not
+  contact the forge.
+  Appends one ## Coordinator block to an existing file, keeping the text above
+  it and trimming trailing whitespace. Creates the file under a "# Workspace"
+  heading when it is absent. An existing Coordinator block is never replaced.
+  Creates the settings file only when absent: notifications off, the chosen
+  launcher and worker mode, a [kanban] map for the shipped workflow, hold label
+  "needs human", and commented examples. Existing valid settings are kept.
+  --launcher and --worker-mode change only settings this run creates.
+  Creates model guidance only when absent and keeps an existing file.
+  Inside a git work tree, appends ignore rules for the new files, the daily and
+  worktree directories, and engine state names (store.db and .chief-of-stuff/).
+  A Coordinator file is listed only when this run creates it. Other exclude
+  lines stay.
+  It does not create a store, issues, a repository, daily files, worktrees,
+  board files, or a running service, and it does not install or start an
+  engine or supervisor, launch a worker, or open a browser. --board-port only
+  records the board URL and pages/ directory.
+  A forge choice is required. GitHub calls use gh authentication. GitLab
+  records the token variable name and uses it for API calls; the token value
+  is never written. New settings cause the hold label and one stage label per
+  shipped workflow stage to be created when the forge lacks them. Existing
+  settings that name a GitHub Project are checked for those options instead of
+  creating stage labels; a missing hold label is still created. Those forge
+  writes happen immediately. There is no --commit flag. --dry-run only reports
+  them. There is no rollback: label provisioning runs before the local writes,
+  and a later I/O failure can leave a partial workspace.
+
+Examples:
+  The --root directory must already exist: run mkdir -p ROOT first.
+  chief-of-stuff init --dry-run --root /tmp/alder --user Robin --timezone America/Chicago --github-repo example-team/alder
+  chief-of-stuff init --root /tmp/birch --user Morgan --timezone America/Chicago --github-repo example-team/birch --agent implementer:task --launcher tmux
+  chief-of-stuff init --root /tmp/cedar --user Casey --timezone America/Chicago --gitlab-host https://gitlab.example.test --gitlab-project example-team/cedar --gitlab-token-env CEDAR_GITLAB_TOKEN
 ```
 
 ### `work`
@@ -193,6 +287,21 @@ options:
   --id ID      GitLab pipeline ID or GitHub Actions run ID
   --ref REF    branch head and CI: GitHub aggregates every workflow; ID and URL identify the
                newest run; GitLab reads the latest pipeline
+```
+
+### `merge-order`
+
+```text
+usage: merge_order.py [-h] --root ROOT [--repo REPO]
+
+Propose a least-conflict order for open changes using pairwise trial merges.
+
+options:
+  -h, --help   show this help message and exit
+  --root ROOT  workspace holding CLAUDE.md and the git checkout
+  --repo REPO  owner/name or group/name; default the backlog's
+
+Pairwise clean results do not guarantee a clean sequential merge.
 ```
 
 ## Observability
@@ -329,20 +438,105 @@ Examples:
 ### `pages`
 
 ```text
-usage: pages.py [-h] [--ensure] [--root ROOT] [--dir DIR] [--port PORT]
-                [{serve,supervise,install,uninstall,status}]
+usage: chief-of-stuff pages [-h] [--ensure] [--root ROOT] [--dir DIR] [--port PORT]
+                            [{serve,supervise,install,uninstall,status}]
 
 Serve the workspace's pages locally: the board and any page a session writes beside it.
 
+The pages are routes: `/` the board, `/workers` the running workers and today's ends, `/decisions` the list,
+`/decisions/<slug>` an authored decision page, `/decisions/<id>` (digits only) a store decision's page rendered
+from the store (#945), `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
+and diff, `/report` the heartbeat report, `/merge-order` the shared merge-order report (#75). `/workers/` and
+`/decisions/` are the same pages as the bare routes (#988); other directory URLs stay 404 (#340). A missing
+`/favicon.ico` answers 204 so the browser console stays clean; a real icon in the pages dir is served. Each is
+rendered into its file (`<day>-board.html`, `workers.html`, `report.html`, `merge-order.html`, `decisions.html`,
+`decision-<slug>.html`, `issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the
+file's own name is a 404.
+A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the settings TOML, the decision JSON,
+`.sources.json`) is newer than its last render, or differs in bytes from what that render read, and `/workers` on every GET (it reads the session logs too), and a thread refreshes `.sources.json` from the forge every minute. An open tab
+reloads itself when the file changes.
+
+    chief-of-stuff pages [--ensure] [--root R]            # start it unless it is already serving; print status only
+    chief-of-stuff pages serve --dir D --port P --root R  # what --ensure starts, detached
+    chief-of-stuff pages install|uninstall|status [--root R]  # the independent board LaunchAgent (#935)
+    chief-of-stuff pages supervise [--root R]             # what that LaunchAgent runs: ensure, every POLL seconds
+    chief-of-stuff pages --board [--date D] [--root R]    # what `chief-of-stuff board` runs: write the board file, no server
+
+A decision page posts the user's answer to `POST /decisions/<slug>` (`key` and/or `words`, form-encoded).
+The server saves it as the decision JSON's `answer` ({key, words, at}) for the coordinator's next pass, and
+redirects back to the page, which then shows the decision answered.
+
+The `## Coordinator` block's `Board:` line names both halves: `URL http://127.0.0.1:<port>/` and
+``dir `<pages dir>` ``. It listens on 127.0.0.1 only, and it answers only requests whose Host is
+127.0.0.1 or localhost. `/` is today's board once today's tracker exists, else the newest one; `/all` lists every other file a session
+wrote there. Binding to loopback does not stop a page elsewhere from rebinding its own
+name to 127.0.0.1, but that page still sends its own name as the Host.
+
 positional arguments:
   {serve,supervise,install,uninstall,status}
+                        string; default omitted (ensure); serve is the internal foreground server,
+                        supervise the LaunchAgent's loop, install|uninstall|status manage that
+                        LaunchAgent
 
 options:
   -h, --help            show this help message and exit
-  --ensure              start the server unless it is serving; print status only
-  --root ROOT           workspace root holding CLAUDE.md (default: the current directory)
-  --dir DIR
-  --port PORT
+  --ensure              flag; default off; ensure the server (also the bare command's behavior)
+  --root ROOT           path; default . when ensuring, none with serve; workspace holding
+                        CLAUDE.md
+  --dir DIR             path; default none; required with serve, ignored otherwise; pages
+                        directory
+  --port PORT           integer; default none; required with serve, ignored otherwise; listen port
+
+When not to use:
+  To open the board for the user, use a browser: nothing here ever opens it. To write the board file without a
+  server, use chief-of-stuff board. To write a decision page, use chief-of-stuff decision. Agents do not run
+  serve: --ensure starts it detached.
+
+Output:
+  Text, not TOON or JSON, except status (a TOON record). Ensuring prints exactly one stdout status line, never
+  the URL: pages: serving (the same or a newer version already answers), pages: started, or pages: restarted
+  (an older pages server was replaced). install and uninstall print one line saying what changed. status prints
+  the board and the engine separately: board state, port, pid, whether the LaunchAgent exists, whether a
+  supervisor holds the board. serve and supervise print no status line; a detached serve appends its stdout and
+  stderr to <root>/.chief-of-stuff/pages.log. Failures print pages: not served - <reason> (ensuring) or
+  pages: <reason> (install, uninstall, status) on stderr; usage faults print usage and an error on stderr.
+
+Exit codes:
+  0  serving, started or restarted; install, uninstall or status succeeded; help printed; serve and
+     supervise run until stopped (SIGTERM or SIGINT end supervise with 0).
+  1  ensuring failed: missing Board line or unreadable config, a foreign server owns the port, an older server
+     cannot be identified or stopped, the new server did not come up, or a connection was denied (often a sandbox).
+  2  usage fault (unknown argument, serve without --dir and --port, --port not an integer), or install,
+     uninstall or status failed (pages: <reason> on stderr).
+
+Side effects:
+  Ensuring reads the Board line, probes HEAD http://127.0.0.1:<port>/all and, for an older server, reads
+  <pages dir>/.pid and checks that process's command line. It creates the pages and log directories, appends
+  <root>/.chief-of-stuff/pages.log, writes .pid only after a new server answers, and may SIGTERM an older pages
+  serve on that port. It never switches to another port.
+  install needs macOS and a Board line; it writes the board LaunchAgent under the supervisor lock and loads it; uninstall removes the agent and
+  leaves a running page server serving until it stops or the Mac restarts; status writes nothing. supervise
+  checks the server every few seconds and restarts it (what the LaunchAgent runs).
+  The server binds only to 127.0.0.1 and accepts only a 127.0.0.1 or localhost Host. Routes: / is today's board
+  once today's tracker exists, else the newest board; /workers (and /workers/) the running workers and today's
+  ends; /decisions (and /decisions/) the list; /decisions/<slug> an authored decision; /decisions/<id> (digits)
+  a store decision rendered from the store; /issues/<n> and /issues/<n>/source; /all every other non-hidden
+  file a session wrote there. Rendered HTML files are served only through their routes, not their filenames.
+  A GET (and HEAD) re-renders a page when its sources change in time or bytes; /workers renders on every GET.
+  Rendering writes HTML into the pages directory, keeping unchanged files; an open tab reloads itself. A render
+  failure keeps the last good page with an error banner. A background thread reads forge and worker facts at
+  start and about every 60 seconds and writes <pages dir>/.sources.json.
+  POST /decisions/<slug> (form: key and/or words) writes that decision JSON's answer {key, words, at}. POST / (a
+  store decision's form) records an answer, reversal or re-route as an intent row that the engine alone
+  applies: the request never touches the forge or a card. POST /workers/sessions/<n>/messages records a message
+  for that worker session in the store (same-origin form only). Only this machine's own pages may post.
+  No forge writes and no --commit, preview or dry run: writes happen as the server runs.
+
+Examples:
+  chief-of-stuff pages --ensure --root ~/work/field-notes
+  chief-of-stuff pages status --root ~/work/field-notes
+  chief-of-stuff pages install --root ~/work/field-notes
+  chief-of-stuff pages --help
 ```
 
 ### `decisions`
@@ -501,13 +695,88 @@ Examples:
 ### `limits`
 
 ```text
-usage: limits_cli.py [-h] [--root ROOT]
+usage: chief-of-stuff limits [-h] [--root ROOT]
 
 Take and record one unbilled reading of every runtime's account limits.
 
+Use this to inspect locally observed quota before dispatch. These are readings from
+local session transcripts and logs, not a live provider query.
+
 options:
-  -h, --help   show this help message and exit
-  --root ROOT
+  -h, --help   flag, default: off. Print this help text on stdout and exit 0 without collecting or
+               recording.
+  --root ROOT  filesystem path, default: . (current working directory). Selects the workspace
+               whose CLAUDE.md and named Settings TOML determine the launch account and [limits]
+               warn_at.
+
+When not to use:
+  For workspace settings, runtime PATH, Health: target probes, and (advice) lines,
+  use chief-of-stuff health. limits is not a connectivity or configuration health
+  check and does not probe HTTP targets.
+
+Output:
+  Plain text on stdout (not TOON and not JSON). Normal completion leaves stderr
+  empty. Command failures print "limits: <reason>" on stderr. Argparse usage
+  faults print usage and errors on stderr. Help is text on stdout.
+
+  After a header row, the command prints one line per limit reading. One runtime
+  can yield multiple rows. Unknown readings keep exit code 0; the reason appears
+  inline in the used/cap column as "unknown: <reason>", never as zero usage.
+
+  Columns (space-separated):
+  - runtime: host identifier (claude, codex, cursor, or agy).
+  - account: profile or login name selected for that runtime; the internally empty
+    default login is printed as default.
+  - limit: window, model, or cap identifier from the local source, or limits when
+    unavailable.
+  - used/cap: numeric usage and cap with unit, e.g. 85/100%; or unknown: <reason>.
+  - reset: reset time in ISO 8601, or unknown when absent.
+  - observed: observation time in ISO 8601 (read_at). A known local event keeps its
+    event time, so rerunning does not make old evidence fresh.
+
+Exit codes:
+  0  Readings recorded and printed, including when some or all are unknown; also
+     successful -h/--help. Stderr is empty.
+  1  Command failure such as unreadable or invalid settings, or shared-history
+     creation, migration, or write failure; diagnosed on stderr as limits: <reason>.
+  2  Argparse usage fault (unknown option, missing --root value, etc.); usage on
+     stderr. Quota usage itself is never a nonzero status.
+
+Side effects:
+  No preview, dry run, or --commit gate: a normal invocation records immediately.
+  Help performs no collection and writes no history.
+
+  Reads: the workspace CLAUDE.md under --root; the Settings TOML named there when
+  present (missing configuration uses defaults); local session logs for the launch
+  account through session_logs.py. Claude reads structured events under
+  $CLAUDE_CONFIG_DIR or ~/.claude, or $CLAUDE_AS_PROFILES_DIR/<profile> or
+  ~/.claude-profiles/<profile> when [workers] claude_as_profile selects a profile.
+  Other runtimes use their default login. This pass reads each runtime once under
+  that account, not every account on the machine.
+
+  Writes: creates, migrates, and updates the account-wide SQLite history at
+  $XDG_STATE_HOME/chief-of-stuff/limits.sqlite (default
+  ~/.local/state/chief-of-stuff/limits.sqlite). --root chooses account and
+  configuration, not a workspace-local history file. The database is separate
+  from the issue store. Repeated identical observations and unchanged unknown
+  reasons may be deduplicated; recording does not promise a new row every time.
+
+  Does not touch the issue store or forge, launch runtimes, or make billed model
+  calls. The installed chief-of-stuff router may bootstrap its dependency venv
+  before execing this script; that is separate from collection.
+
+  [limits] warn_at in the Settings TOML is a finite fraction from 0 through 1,
+  default 0.8. Downstream near-cap judgments compare observed used/cap or
+  projected usage at reset with this threshold. This command validates settings,
+  records, and prints readings; it does not print a threshold verdict, enforce a
+  cap, or change exit status when usage is high. Unknown readings cannot
+  establish a near-cap warning. Currently codex, cursor, and agy report
+  unknown: read in 1.1 when no local numeric evidence exists.
+
+Examples:
+  chief-of-stuff limits --help
+  chief-of-stuff limits
+  chief-of-stuff limits --root /tmp/cedar-workspace
 ```
 
 ### `architect-signals`

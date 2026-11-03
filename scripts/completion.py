@@ -5,7 +5,7 @@ precede landing. Before landing, dirty files and commits absent from remote refs
 inherited, published PR commits do not. A verified landing of this tree's HEAD and a clean tree
 clear squash history even after branch deletion. Missing tree evidence requires a human hold without
 changing the reported outcome. Retryable and blocked runs keep their outcome and tree unless the tree is
-unreadable. Final completion also judges orphans.
+unreadable.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from model_port import RETRYABLE
-from orphans import Claim, judge
+from orphans import Claim
 from tree_state import TreeState, at_risk
 
 
@@ -24,6 +24,57 @@ class Verdict:
     reason: str
     human_review: bool = False
     suite_hold: bool = False
+
+
+@dataclass(frozen=True)
+class Candidate:
+    path: str
+    branch: str
+    head: str
+    readable: bool
+    quarantined: bool
+    merge_in_progress: bool
+
+
+@dataclass(frozen=True)
+class Recovery:
+    candidate: Candidate
+
+
+@dataclass(frozen=True)
+class Conflict:
+    candidates: tuple[Candidate, ...]
+
+
+def recovery(candidates: Sequence[Candidate]) -> Recovery | Conflict | None:
+    """Reuse one safe survivor; only multiple safe survivors need a decision."""
+    safe = tuple(c for c in candidates if c.readable and not c.quarantined and not c.merge_in_progress)
+    if len(safe) > 1:
+        return Conflict(safe)
+    return Recovery(safe[0]) if safe else None
+
+
+def _candidate_labels(candidates: Sequence[Candidate]) -> tuple[str, ...]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate.branch] = counts.get(candidate.branch, 0) + 1
+    return tuple(f"{c.branch}:{c.path or c.head}" if counts[c.branch] > 1 else c.branch for c in candidates)
+
+
+def conflict_options(conflict: Conflict) -> tuple[str, ...]:
+    """Actionable options for a recovery conflict: each safe survivor or abort, never an indefinite hold."""
+    return (*_candidate_labels(conflict.candidates), "abort")
+
+
+def selected_survivor(verdict: Recovery | Conflict | None, choice: str = "") -> Candidate | None:
+    """Resolve the survivor to reuse, or None when aborting or starting fresh."""
+    if isinstance(verdict, Recovery):
+        return verdict.candidate
+    if isinstance(verdict, Conflict):
+        for label, candidate in zip(_candidate_labels(verdict.candidates), verdict.candidates):
+            if choice and choice == label:
+                return candidate
+    return None
 
 
 def done_on_main(on_main: bool | None, suite_on_main: bool | None) -> str | None:
@@ -42,13 +93,6 @@ def unlanded(state: TreeState | None) -> str | None:
     return ", ".join(reasons) if reasons else None
 
 
-def orphan_reason(name: str, state: TreeState | None, claims: Sequence[Claim]) -> str | None:
-    if state is None or not name:
-        return None
-    found = judge(name, state, list(claims))
-    return None if found is None else str(found)
-
-
 def abandoned(worker_alive: bool | None, *, report: str | None = None,
               on_main: bool | None = None, suite_on_main: bool | None = None,
               tree: TreeState | None = None, tree_name: str = "",
@@ -62,6 +106,8 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None,
         return Verdict(outcome, "worker tree could not be read", True)
     if report in (*RETRYABLE, "blocked"):
         return Verdict(report, "")
+    if report != "done":
+        return Verdict(outcome, "worker gone")
     if not landing_required:
         left = []
         if tree is not None:
@@ -79,9 +125,6 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None,
     # Preserve explicit completion behind a hold; retrying could overwrite the delivered work.
     if report == "done" and not landed and (left or tree_landed is False):
         return Verdict("done", left or "tree HEAD is outside the verified landing", True)
-    orphaned = None if landed and report == "done" else orphan_reason(tree_name, tree, tree_claims)
-    if orphaned:
-        return Verdict("failed", orphaned, True)
     if report == "done":
         gate = done_on_main(on_main, suite_on_main)
         if gate:

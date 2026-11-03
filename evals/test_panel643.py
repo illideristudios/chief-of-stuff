@@ -211,7 +211,7 @@ class PanelTest(unittest.TestCase):
 
     def test_closed_holds_are_ignored(self):
         self.db.upsert_item(OTHER, title="Closed repository", forge_state="closed", human_review=True)
-        self.db.add_decision(OTHER, "design", "Closed question")
+        self.db.add_decision(OTHER, "design", "Closed question", decided_by="owner")
         cfg = fixtures.parse_coordinator(fixtures.CLAUDE_MD, today=NOW.date())
         _, holds, _, _ = render_board._tasks_from_store(self.db, cfg, {}, None, NOW.date())
         self.assertFalse(holds)
@@ -253,8 +253,12 @@ class PanelTest(unittest.TestCase):
 
     def test_store_navigation_counts_from_open_rows_only(self):
         self.db.record_segment(KEY, "review", 1, NOW.isoformat(), runner="running")
-        self.db.add_decision(KEY, "design", "Choose")
+        self.db.add_decision(KEY, "design", "Trio retry")
+        counts = pages._navigation(self.root, self.root / "pages", task_forge.page_data(self.db))
+        self.assertEqual(counts["decisions"], 0)
+        self.db.add_decision(KEY, "design", "Choose", decided_by="owner")
         self.db.upsert_item(OTHER, forge_state="closed", human_review=True)
+        self.db.add_decision(OTHER, "design", "Closed issue choice", decided_by="owner")
         counts = pages._navigation(self.root, self.root / "pages", task_forge.page_data(self.db))
         self.assertEqual(counts["workers"], 0)
         self.assertEqual(counts["dispatch"], 0)
@@ -264,6 +268,9 @@ class PanelTest(unittest.TestCase):
         self.db.upsert_item("github:example/repo#14", title="Human hold", human_review=True)
         counts = pages._navigation(self.root, self.root / "pages", task_forge.page_data(self.db))
         self.assertEqual((counts["workers"], counts["dispatch"], counts["decisions"]), (1, 1, 1))
+        self.db.add_decision(KEY, "design", "Choose", answer="Keep", decided_by="user")
+        counts = pages._navigation(self.root, self.root / "pages", task_forge.page_data(self.db))
+        self.assertEqual((counts["workers"], counts["dispatch"], counts["decisions"]), (1, 1, 0))
 
 
 
