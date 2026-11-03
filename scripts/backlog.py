@@ -633,26 +633,142 @@ def issue_line(one: Issue) -> str:
     return f"#{one.iid} {one.title}{labels}"
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Read the GitLab or GitHub backlog named in a ## Coordinator block.")
-    parser.add_argument("--config", default="CLAUDE.md", help="workspace CLAUDE.md holding the block")
-    parser.add_argument("--list", action="store_true", help="one line per issue instead of a count")
-    parser.add_argument("--state", default=OPEN, choices=(OPEN, CLOSED, "all"), help="which issues")
-    parser.add_argument("--labels", default="", help="comma-separated labels to narrow the ask")
-    parser.add_argument("--timeout", type=float, default=TIMEOUT, help="seconds per request")
-    parser.add_argument("--create", metavar="TITLE", help="file one issue")
-    parser.add_argument("--body", default="", help="the issue body, or the comment's text")
-    parser.add_argument("--parent", type=int, help="GitHub parent issue number for --create")
+EPILOG = """\
+When not to use:
+  To start engine work under a new or existing issue and record its store row,
+  use chief-of-stuff work.
+  To preview or sync a tracked issue's Kanban stage or Project status, use
+  chief-of-stuff kanban.
+  To read forge pipeline status or branch CI, use chief-of-stuff pipeline.
+  To read or write daily tracker rows, use chief-of-stuff tracker or
+  chief-of-stuff log.
+  To render or serve the HTML workspace board, use chief-of-stuff board or
+  chief-of-stuff pages.
+
+Output:
+  Plain text only (not TOON and not JSON); there are no structured record fields.
+  - Default count mode (no --list, --view, or write flags) prints one line on
+    stdout: "backlog: OPEN open, CLOSED closed" when both counts succeed, or
+    "backlog: unknown — REASON" on stdout when a count fails.
+  - --list prints one "#IID TITLE [LABEL, ...]" line per matching issue on
+    stdout (the bracketed label list is omitted when an issue has no labels).
+    A failed or truncated list prints "backlog: unknown — REASON" on stderr
+    and leaves stdout empty.
+  - --view N prints "#N TITLE [LABEL, ...]", then "state: opened|closed", then
+    the issue body on stdout. With --comments, each non-system comment follows
+    in chronological order as "CREATED_AT AUTHOR: BODY". A failed view or
+    comment read prints "backlog: unknown — REASON" on stderr and leaves stdout
+    empty.
+  - Write flags (--create, --close, --comment) print one line per write on
+    stdout: "would create: TITLE", "would close: #IID", or
+    "would comment: #IID" in preview mode; "created #IID: TITLE",
+    "closed #IID", or "commented on #IID" when --commit succeeds; or
+    "ACTION failed: TARGET — REASON" when a write fails. When --commit is
+    omitted, stderr also prints
+    "nothing was written: add --commit to make these real".
+  - An unknown result is never an empty backlog and never prints "0 open".
+  - Usage and configuration faults print to stderr and leave stdout empty.
+
+Exit codes:
+  0  Read succeeded, write preview succeeded (without --commit), or committed
+     write (--commit) succeeded.
+  1  Forge read or write failed, including a missing gh binary or GitLab token,
+     HTTP or network failure, non-JSON response, truncated backlog or comment
+     list (5000 or more GitHub issues, or more than 50 GitLab pages of 100
+     items), or --parent / --blocked-by used against a GitLab backlog.
+  2  usage fault or configuration fault, including an invalid CLI flag or
+     argument type, a missing --config file, an absent or malformed Backlog:
+     line in ## Coordinator, or --close / --view naming an issue outside the
+     configured backlog.
+
+Side effects:
+  - Reads the markdown file at --config (default CLAUDE.md) and parses the
+    Backlog: line in its ## Coordinator section:
+    - GitHub: "- Backlog: GitHub issues; repo acme-co/ledger-demo" (or a full
+      https://github.com/acme-co/ledger-demo URL). Invokes gh (or the absolute
+      executable path in $CHIEF_OF_STUFF_GH) using gh authentication.
+    - GitLab: "- Backlog: GitLab; host https://gitlab.example.test; project
+      acme-co/ledger-demo; token env CHIEF_OF_STUFF_GITLAB_TOKEN". Reads the
+      token from the named environment variable (default
+      CHIEF_OF_STUFF_GITLAB_TOKEN), then macOS Keychain (account
+      "chief-of-stuff", service "gitlab-HOST"), then "glab config get token
+      --host HOST". Never accepts a token flag or a literal token in CLAUDE.md.
+  - Preview by default: --create, --close, and --comment are dry-run previews
+    unless --commit is passed. Without --commit, no issue, comment, state
+    change, or label is written on the forge. A GitHub preview makes no gh
+    call (so it does not check labels, --parent, or --blocked-by, and the
+    preview line does not echo --parent or --blocked-by). A GitLab --create
+    preview checks for a token and, when --labels is set, reads existing
+    project labels without creating any.
+  - With --commit, writes go to the forge only:
+    - --create on GitLab creates any missing labels from --labels first (POST
+      /api/v4/projects/PROJECT/labels, color #428bca) before creating the
+      issue. On GitHub, --create passes --label, --parent, and --blocked-by to
+      "gh issue create" (missing labels fail in gh).
+    - --parent and --blocked-by attach native GitHub issue relationships on
+      --create; GitLab refuses them with exit 1 in both preview and --commit
+      modes.
+    - --close closes the issue on the forge; --comment posts a note on the
+      issue.
+  - Writes no local files, never opens or modifies store.db or daily trackers,
+    and starts or stops no services or workers.
+
+Examples:
+  chief-of-stuff backlog --list --state all --labels defect,export
+  chief-of-stuff backlog --create "Add retry to the invoice export" --parent 12 --blocked-by 7
+  chief-of-stuff backlog --create "Add retry to the invoice export" --body "Retry once on HTTP 502." --labels defect --parent 12 --blocked-by 7 --commit
+"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="chief-of-stuff backlog",
+        description=(
+            "Read and write the configured GitHub or GitLab backlog.\n\n"
+            "Use it to count, list, view, create, comment on, or close issues in the forge named by the\n"
+            "Backlog: line of a workspace's ## Coordinator block."
+        ),
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+    )
+    parser.add_argument("-h", "--help", action="help",
+                        help="flag, default: off. Print this help text on stdout and exit 0.")
+    parser.add_argument("--config", default="CLAUDE.md",
+                        help="path, default: CLAUDE.md. Workspace markdown file holding the ## Coordinator block.")
+    parser.add_argument("--list", action="store_true",
+                        help="flag, default: off. Print one line per issue instead of open and closed counts.")
+    parser.add_argument("--state", default=OPEN, choices=(OPEN, CLOSED, "all"),
+                        help="choice (opened, closed, all), default: opened. Which issues --list returns; ignored by counts and writes.")
+    parser.add_argument("--labels", default="",
+                        help='comma-separated string, default: "" (none). Narrow --list to issues with every label, or attach labels on --create.')
+    parser.add_argument("--timeout", type=float, default=TIMEOUT,
+                        help=f"float seconds, default: {TIMEOUT}. Per-request timeout for GitLab API calls (GitHub gh calls use 60s).")
+    parser.add_argument("--create", metavar="TITLE",
+                        help="string TITLE, default: none. File one issue with TITLE (and --body, --labels, --parent, --blocked-by). Previews unless --commit.")
+    parser.add_argument("--body", default="",
+                        help='string, default: "". Issue description for --create or note text for --comment.')
+    parser.add_argument("--parent", type=int,
+                        help="int issue number, default: none. GitHub parent issue number for --create; refused on GitLab (exit 1).")
     parser.add_argument("--blocked-by", type=int, action="append", default=[], metavar="IID",
-                        help="GitHub blocker issue number for --create; repeat for multiple blockers")
-    parser.add_argument("--close", metavar="ISSUE", help="close one issue: N, #N, or a reference in the Backlog")
-    parser.add_argument("--comment", type=int, metavar="IID", help="comment on one issue")
-    parser.add_argument("--view", type=int, metavar="N", help="print one issue's title, state, body and labels (#63)")
-    parser.add_argument("--comments", action="store_true", help="with --view, add the issue's comments in order")
+                        help="repeatable int IID, default: [] (none). GitHub blocker issue number for --create; repeat for multiple blockers; refused on GitLab (exit 1).")
+    parser.add_argument("--close", metavar="ISSUE",
+                        help="issue reference (N, #N, owner/repo#N, or URL in this backlog), default: none. Close one issue; previews unless --commit.")
+    parser.add_argument("--comment", type=int, metavar="IID",
+                        help="int IID, default: none. Post --body as a comment on issue IID (positive integer); previews unless --commit.")
+    parser.add_argument("--view", type=int, metavar="N",
+                        help="int N, default: none. Print issue N's title, state, body, and labels (#63). Do not combine with write flags.")
+    parser.add_argument("--comments", action="store_true",
+                        help="flag, default: off. With --view, append the issue's non-system comments in chronological order.")
     # No `--token`: argv is readable by `ps`, so the token comes from the environment or the
     # Keychain and from nowhere a shell history can keep it.
     parser.add_argument("--commit", action="store_true",
-                        help="actually write. Without it every write is printed and not made.")
+                        help="flag, default: off. Execute the write on the forge; without it every write is previewed and not made.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     config = Path(args.config)
