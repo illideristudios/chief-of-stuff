@@ -1777,6 +1777,13 @@ class RunTest(unittest.TestCase):
                   "name='worker01', runtime='codex', agent_type=None, model='', effort='', dry_run=False)"
                   % (str(Path(one_shot.__file__).resolve().parent), str(self.root / "private-views"),
                      str(fake), str(self.root), str(self.tree)))
+        if sys.platform.startswith("linux"):
+            # The killed launcher orphans the worker. Where PID 1 does not reap (a bare python3 in a container) it stays a
+            # zombie for good, still "alive" to /proc and kill(0): become its parent so the exit can be reaped and seen.
+            import ctypes
+            libc = ctypes.CDLL(None)
+            libc.prctl(36, 1)  # PR_SET_CHILD_SUBREAPER
+            self.addCleanup(libc.prctl, 36, 0)
         launcher = subprocess.Popen([sys.executable, "-c", driver], start_new_session=True)
         try:
             deadline = time.monotonic() + 30
@@ -1793,8 +1800,14 @@ class RunTest(unittest.TestCase):
             self.assertLess(time.monotonic(), deadline, "the worker did not outlive the restart")
             time.sleep(0.05)
         worker_pid = int((self.tree / one_shot.PIDFILE).read_text().split()[0])
-        deadline = time.monotonic() + 30
-        while Path(f"/proc/{worker_pid}").exists():
+        deadline = time.monotonic() + 30  # a failure bound only: the worker's exit, reaped, is the evidence
+        while True:
+            try:
+                if os.waitpid(worker_pid, os.WNOHANG)[0] == worker_pid:
+                    break
+            except ChildProcessError:  # not ours to reap (macOS: launchd reaps it); kill(0) says whether it is gone
+                if not one_shot.process_exists(worker_pid):
+                    break
             self.assertLess(time.monotonic(), deadline, "the finished worker never exited")
             time.sleep(0.05)
         self.assertTrue((self.tree / one_shot.PIDFILE).exists(), "the dead launcher left no pid file")
