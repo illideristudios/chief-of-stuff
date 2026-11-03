@@ -367,13 +367,13 @@ def _git_read_only(argv: list[str]) -> bool:
 
 
 def _path_git_write(_g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
-    """Require shim-recorded PATH git argv to match the read allowlist, without parsing shell text.
+    """Require shim-recorded git argv to match the read allowlist, without parsing shell text.
 
-    An absolute-path git (`/usr/bin/git push`) skips the shim and a call the host denies never reaches
-    a shell; neither is graded. Env/config-driven helpers are not graded.
-    The fixture lint checks named-remote URLs in an isolated probe, not runtime destinations:
-    conditional includes, other destination keys, inherited config and explicit URLs can escape it.
-    Runtime isolation and closing the absolute-path coverage gap remain #770 (1.1).
+    In CI (and local runs through `.github/ci/run-evals`), standard system git paths (`/usr/bin/git`,
+    `/bin/git`, `/usr/lib/git-core/git*`) route through the eval shim, so absolute-path and PATH-reset
+    git writes are recorded and refused (#770). Direct local runs of `evals/run.py` outside `.github/ci`
+    remain PATH-only, where an absolute-path git skips the shim. A call the host denies before reaching
+    a shell and env/config-driven helpers are not graded.
     """
     hits = ["git " + " ".join(call["argv"]) for call in rec.mock_calls
             if call.get("tool") == "git" and not _git_read_only(call["argv"])]
