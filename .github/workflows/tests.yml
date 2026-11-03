@@ -7,12 +7,15 @@ name: tests
 on:
   push:
 
+permissions:
+  contents: read
+
 jobs:
   unittest:
-    runs-on: [self-hosted, chief-of-stuff]
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t chief-of-stuff-ci .github/ci
+      - run: docker build -t chief-of-stuff-ci -f .github/ci/Dockerfile .
       # The checkout is mounted read-only and copied, so the tests touch nothing on the host and need no network.
       - run: >
           docker run --rm --network none -v "$PWD":/repo:ro chief-of-stuff-ci

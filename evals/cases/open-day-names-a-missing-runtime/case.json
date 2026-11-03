@@ -1,6 +1,6 @@
 {
   "tz": "America/Chicago",
-  "description": "open-the-day in a workspace as `chief-of-stuff init` leaves it: a `Settings:` line and no `Health:` line. The settings file is valid and its `[models.implement]` rotation names claude and codex; `runtimes_present` makes claude the only runtime the login shell finds. #48's acceptance: \"A red eval case where settings enable a runtime that isn't on PATH: `health` names it as missing.\" So opening the day runs `health`, and the reply says codex is missing. The reply grader wants `codex` and a word for missing in one clause of one line, with no other runtime's name between them: `codex ok, claude missing` is not a reply that names codex. Not covered: which line of health's output the reply quotes, and health's exit code.",
+  "description": "Opening the day runs health and reports missing Claude through the adapter (ledger D11, #635). The rotation names Claude and Codex, but only Codex is present in the fixture. Preflight checks Claude only; the reply must name Claude as missing.",
   "prompt": "Good morning.",
   "graders": [
     {
@@ -11,15 +11,15 @@
       "min": 1
     },
     {
-      "name": "reply names codex as missing",
+      "name": "reply names claude as missing",
       "type": "regex",
-      "pattern": "(?im)codex(?:(?!claude|cursor|agy|[.;]\\s)[^\\n]){0,60}?(?:(?<!not )(?<!n['’]t )missing|unavailable|not found|(?:not|isn['’]t) (?:installed|available))|^(?:(?!claude|cursor|agy|[.;]\\s)[^\\n])*?(?:(?<!not )(?<!n['’]t )missing|unavailable|not found|(?:not|isn['’]t) (?:installed|available))(?:(?!claude|cursor|agy|[.;]\\s)[^\\n]){0,40}?codex"
+      "pattern": "(?im)claude(?:(?!codex|cursor|agy|[.;]\\s)[^\\n]){0,60}?(?:(?<!not )(?<!n['\u2019]t )missing|unavailable|not found|(?:not|isn['\u2019]t) (?:installed|available))|^(?:(?!codex|cursor|agy|[.;]\\s)[^\\n])*?(?:(?<!not )(?<!n['\u2019]t )missing|unavailable|not found|(?:not|isn['\u2019]t) (?:installed|available))(?:(?!codex|cursor|agy|[.;]\\s)[^\\n]){0,40}?claude"
     }
   ],
   "max_turns": 20,
   "timeout_seconds": 300,
   "calendar": "calendar.json",
   "runtimes_present": [
-    "claude"
+    "codex"
   ]
 }

@@ -10,4 +10,4 @@
 - Calendars: none
 - Deadlines: none
 - Sessions: list `mcp__peers__list_sessions`; send `mcp__peers__send`
-- Human-only actions: dashboard or console changes; `railway` commands; git commit, add, or push; spending money
+- Human-only actions: dashboard or console changes; git commit, add, or push; spending money

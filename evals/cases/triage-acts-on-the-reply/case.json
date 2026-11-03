@@ -153,5 +153,6 @@
     }
   ],
   "max_turns": 20,
-  "timeout_seconds": 600
+  "timeout_seconds": 600,
+  "superseded_by": "autonomy-review-fixes"
 }

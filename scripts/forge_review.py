@@ -1,14 +1,15 @@
 """How a forge's review state reads: whether the approver approved a pull or merge request's head, and how its
 pipeline stands, and the request that reading yields. merge_approved.py merges on it, merge_ready.py prints its
-verdict, review_threads.py replies on it, and board_sources.py caches it for the pages.
+verdict, review_threads.py replies on it, board_sources.py caches it, and forge.py reuses its pipeline status mapping.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import backlog
 import backlog_ref
@@ -17,6 +18,74 @@ from workspace import ConfigError, read_config
 
 PASSED = {"SUCCESS", "NEUTRAL", "SKIPPED"}  # a completed check that concluded anything else (STALE, "") is not a pass
 GITLAB_PIPELINE = {"success": "passed", "failed": "failed", "canceled": "failed"}
+# Not-ready forge statuses keep their own word so the line can name them (#425); anything else unknown is running.
+# skipped ran no jobs: nothing passed, nothing failed.
+GITLAB_WAITING = frozenset({"skipped", "pending", "created", "waiting_for_resource", "waiting_for_callback", "preparing",
+                            "scheduled", "manual", "draft", "canceling"})
+# Forge mergeability still being computed — not a settled blocker (#430).
+SETTLING = frozenset({"checking", "unchecked", "ci_still_running", "unknown", "approvals_syncing", "preparing"})
+REQUEST_LIMIT = backlog.PER_PAGE  # one page; readers page until short, and refuse a full MAX_PAGES read as whole
+# `Closes: #3`, `owner/repo#3` and `https://github.com/owner/repo/issues/3` (GitHub); `Closes #3, #4 and #5` (GitLab).
+# Body parsing remains a fallback alongside GitHub's links. Foreign refs are kept so selection can fail closed on them.
+_GITHUB_REF = r"https://github\.com/[\w.-]+/[\w.-]+/issues/\d+|[\w.-]+/[\w.-]+#\d+|#\d+"
+_GITLAB_REF = r"https?://[^\s,<>]+?/-/issues/\d+|[\w.-]+(?:/[\w.-]+)+#\d+|#\d+"
+
+
+def _closing(keywords: str, ref: str) -> re.Pattern:
+    return re.compile(r"(?i)\b(?:" + keywords + r"):?\s+(?:issues?\s+)?((?:" + ref + r")(?:(?:\s*,\s*|\s*,?\s+and\s+)(?:"
+                      + ref + r"))*)")
+
+
+CLOSES = _closing(r"close[sd]?|fix(?:e[sd])?|resolve[sd]?", _GITHUB_REF)
+# GitLab's default closing pattern adds the -ing forms and implement; GitHub does not close on them.
+GITLAB_CLOSES = _closing(r"clos(?:e[sd]?|ing)|fix(?:e[sd]|ing)?|resolv(?:e[sd]?|ing)|implement(?:s|ed|ing)?", _GITLAB_REF)
+
+
+def gitlab_pipeline_status(status: str | None) -> str:
+    if status is None:
+        return "none"
+    if status in GITLAB_PIPELINE:
+        return GITLAB_PIPELINE[status]
+    return status if status in GITLAB_WAITING else "running"
+
+
+def scrub(text: str) -> str:
+    """Forge-supplied text with control characters removed so a hostile value cannot forge a printed line (#426)."""
+    return "".join(c for c in text if c.isprintable())
+
+
+def closes(body: str | None, gitlab: bool = False, *, project: str = "", host: str = "", repo: str = "") -> tuple[str, ...]:
+    """The issue refs a request's body closes, in order, once each: `#N` for this repository (`project` on GitLab, or
+    `repo` on GitHub when given), any other ref verbatim, as `owner/repo#N` where the URL names one."""
+    found = []
+    for refs in (GITLAB_CLOSES if gitlab else CLOSES).findall(body or ""):
+        for ref in re.findall(_GITLAB_REF if gitlab else _GITHUB_REF, refs, re.IGNORECASE):
+            if "://" in ref:
+                url = urlsplit(ref)
+                if not gitlab:
+                    ref = url.path[1:].replace("/issues/", "#")
+                else:
+                    configured = urlsplit(host)
+                    prefix = configured.path.rstrip("/") + "/"
+                    if not (host and url.scheme.casefold() == configured.scheme.casefold()
+                            and url.netloc.casefold() == configured.netloc.casefold() and url.path.startswith(prefix)):
+                        found.append(ref)  # another host: kept whole so selection refuses it
+                        continue
+                    ref = url.path[len(prefix):].replace("/-/issues/", "#")
+            path, _, number = ref.rpartition("#")
+            local = project if gitlab else repo
+            found.append(f"#{number}" if not path or (local and path.casefold() == local.casefold()) else ref)
+    return tuple(dict.fromkeys(found))
+
+
+def github_closes(pr: dict, repo: str) -> tuple[str, ...]:
+    """Union body closing keywords with Development links; a link to another repository stays qualified."""
+    found = list(closes(pr.get("body"), repo=repo))
+    for issue in pr.get("closingIssuesReferences") or []:
+        repository = issue.get("repository") or {}
+        qualified = f"{(repository.get('owner') or {}).get('login', '')}/{repository.get('name', '')}"
+        found.append(f"#{issue['number']}" if qualified.casefold() == repo.casefold() else f"{qualified}#{issue['number']}")
+    return tuple(dict.fromkeys(found))
 
 
 def github_approval(reviews: list[dict], approver: str, head: str) -> str:
@@ -25,7 +94,7 @@ def github_approval(reviews: list[dict], approver: str, head: str) -> str:
                    and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")),
                   key=lambda r: r.get("submittedAt") or "")
     if not mine or mine[-1]["state"] != "APPROVED":
-        return "none"
+        return "changes_requested" if mine and mine[-1]["state"] == "CHANGES_REQUESTED" else "none"
     return "approved" if (mine[-1].get("commit") or {}).get("oid") == head else "stale"
 
 
@@ -59,7 +128,7 @@ class Request:
     title: str
     url: str
     head: str
-    approval: str   # approved | stale | none
+    approval: str   # approved | stale | changes_requested | none
     pipeline: str   # passed | failed | running | none
     mergeable: str  # yes | conflict | the forge's own word
     approver: str = ""
@@ -69,6 +138,9 @@ class Request:
     threads_cut_at: int = 0          # the count read when more threads lay behind it (a cut-off read is not a whole one)
     draft: bool = False
     merge_state: str = ""            # GitHub's mergeStateStatus; "" (GitLab) has none
+    closes: tuple[str, ...] = ()     # the local issue refs the request closes, e.g. ("#3",)
+    pipeline_head: str | None = None  # source head covered by a merged-results pipeline; None compares pipeline_sha
+    branch: str = ""                # the request's source/head branch for review worktrees
 
     @property
     def unverified(self) -> str:
@@ -82,35 +154,51 @@ class Request:
     @property
     def verdict(self) -> str:
         """The one place that decides ready (#419), from the head pipeline and never the forge's own merge word.
-        Precedence: conflicts > draft > red > stale pipeline > running > no pipeline > unverified > blocked > findings > ready."""
+        Precedence: conflicts > draft > red > stale pipeline > running > no pipeline > unverified > findings > blocked > ready."""
         if self.mergeable == "conflict":
             return "conflicts"
         if self.draft:
             return "draft"
         if self.pipeline == "failed":
             return "red"
-        if self.pipeline != "none" and self.pipeline_sha is not None and self.pipeline_sha != self.head:
+        pipeline_head = self.pipeline_sha if self.pipeline_head is None else self.pipeline_head
+        if self.pipeline != "none" and self.pipeline_sha is not None and pipeline_head != self.head:
             return "stale pipeline"
-        if self.pipeline == "running" or self.mergeable != "yes":
+        if self.pipeline not in ("passed", "none"):
+            return "running"
+        if self.mergeable in SETTLING:
             return "running"
         if self.pipeline == "none":
             return NO_PIPELINE
         if self.unverified:
             return "unverified"
+        if self.threads:
+            return "findings open"
         if self.merge_state not in ("", "CLEAN"):
             return "blocked"
-        return "findings open" if self.threads else "ready"
+        if self.mergeable != "yes":
+            return "blocked"
+        return "ready"
 
     @property
     def why(self) -> str:
-        """The one clause the line adds to `unverified` and `blocked`."""
-        return {"unverified": self.unverified, "blocked": self.merge_state}.get(self.verdict, "")
+        """The one clause the line adds to `unverified`, `blocked`, and named waiting pipelines."""
+        if self.verdict == "unverified":
+            return self.unverified
+        if self.verdict == "blocked":
+            return self.merge_state if self.merge_state not in ("", "CLEAN") else self.mergeable
+        if self.verdict == "running" and self.pipeline not in ("running", "passed", "failed", "none"):
+            return self.pipeline
+        if self.verdict == "running" and self.mergeable in SETTLING:
+            return self.mergeable
+        return ""
 
     @property
     def blockers(self) -> list[str]:
         out = {"none": [f"no approval from {self.approver}"],
+               "changes_requested": [f"no approval from {self.approver}"],
                "stale": [f"{self.approver} approved an earlier commit"]}.get(self.approval, [])
-        if self.pipeline in ("failed", "running"):
+        if self.pipeline not in ("passed", "none"):
             out.append(f"pipeline {self.pipeline}")
         if self.mergeable != "yes":
             out.append("conflict" if self.mergeable == "conflict" else f"not mergeable: {self.mergeable}")
@@ -126,25 +214,38 @@ class Request:
 
 
 def github_requests(repo: str, approver: str, gh=backlog.run_gh) -> list[Request]:
-    code, out, err = gh(["pr", "list", "-R", repo, "--state", "open", "--limit", "100", "--json",
-                         "number,title,url,headRefOid,reviews,statusCheckRollup,mergeable,isDraft,mergeStateStatus"])
+    # gh paginates under --limit; refuse a full GH_LIMIT answer as a partial list (#425).
+    code, out, err = gh(["pr", "list", "-R", repo, "--state", "open", "--limit", str(backlog.GH_LIMIT), "--json",
+                         "number,title,url,headRefOid,headRefName,reviews,statusCheckRollup,mergeable,isDraft,mergeStateStatus,body,closingIssuesReferences"])
     if code != 0:
         raise RuntimeError(f"gh pr list: {err.strip() or code}")
+    rows = json.loads(out)
+    if len(rows) >= backlog.GH_LIMIT:
+        raise RuntimeError(f"{backlog.GH_LIMIT} open or more; refusing to read a partial list as whole")
     return [Request(p["number"], p["title"], p["url"], p["headRefOid"],
                     github_approval(p.get("reviews") or [], approver, p["headRefOid"]),
                     github_pipeline(p.get("statusCheckRollup") or []),
                     {"MERGEABLE": "yes", "CONFLICTING": "conflict"}.get(p.get("mergeable"), "unknown"), approver,
-                    draft=bool(p.get("isDraft")), merge_state=p.get("mergeStateStatus") or "UNKNOWN")
-            for p in json.loads(out)]
+                    draft=bool(p.get("isDraft")), merge_state=p.get("mergeStateStatus") or "UNKNOWN",
+                    closes=github_closes(p, repo), branch=p.get("headRefName") or "")
+            for p in rows]
 
 
 def gitlab_requests(home: backlog.Backlog, project: str, approver: str, token: str, call=backlog._call) -> list[Request]:
     # ponytail: GitLab's approvals API names no commit, so an approval counts for the head only when the
     # project resets approvals on push. Check that project setting once; a per-note sha check if it is off.
     base = home.api(project)
-    listed, _, err = call("GET", f"{base}/merge_requests?" + urlencode({"state": "opened", "per_page": 100}), token, backlog.TIMEOUT)
-    if err:
-        raise RuntimeError(f"merge requests: {err}")
+    listed: list[dict] = []
+    for page in range(1, backlog.MAX_PAGES + 1):
+        batch, _, err = call("GET", f"{base}/merge_requests?" + urlencode(
+            {"state": "opened", "per_page": backlog.PER_PAGE, "page": page}), token, backlog.TIMEOUT)
+        if err:
+            raise RuntimeError(f"merge requests: {err}")
+        listed.extend(batch)
+        if len(batch) < backlog.PER_PAGE:
+            break
+    else:
+        raise RuntimeError(f"more than {backlog.MAX_PAGES} pages of merge requests; refusing to read a partial list as whole")
     out = []
     for row in listed:
         iid = int(row["iid"])
@@ -154,12 +255,20 @@ def gitlab_requests(home: backlog.Backlog, project: str, approver: str, token: s
             raise RuntimeError(f"!{iid}: {err or err2}")
         names = {(a.get("user") or {}).get("username") for a in approvals.get("approved_by") or []}
         head = mr.get("head_pipeline") or {}
-        pipeline = head.get("status")
         status = mr.get("detailed_merge_status") or ""
-        out.append(Request(iid, mr.get("title", ""), mr.get("web_url", ""), mr.get("sha", ""),
+        head_sha = mr.get("sha", "")
+        # Merged-results pipelines run on a temporary merge ref; opened MRs have no merge_commit_sha (#430).
+        pipe_sha = (head.get("sha") or None) if head else ""
+        pipe_head = None
+        if pipe_sha and head.get("ref") == f"refs/merge-requests/{iid}/merge":
+            # The MR's head_pipeline covers this source head, but its SHA names the synthetic commit that ran.
+            pipe_head = head_sha
+        out.append(Request(iid, mr.get("title", ""), mr.get("web_url", ""), head_sha,
                            "approved" if approver in names else "none",
-                           "none" if pipeline is None else GITLAB_PIPELINE.get(pipeline, "running"),
+                           gitlab_pipeline_status(None if not head else head.get("status")),
                            "conflict" if mr.get("has_conflicts") else ("yes" if status == "mergeable" else status),
-                           approver, str(head.get("id") or ""), (head.get("sha") or None) if head else "",
-                           draft=bool(mr.get("draft"))))
+                           approver, str(head.get("id") or ""), pipe_sha,
+                           draft=bool(mr.get("draft")),
+                           closes=closes(mr.get("description"), gitlab=True, project=project, host=home.host),
+                           pipeline_head=pipe_head, branch=mr.get("source_branch") or ""))
     return out

@@ -49,7 +49,7 @@
     {
       "name": "no dispatch proposal",
       "type": "regex",
-      "pattern": "(?s)```[^`]*Owns:",
+      "pattern": "(?s)```[^`]*\\bTask:[^`]*\\bReport:",
       "match": "absent"
     },
     {

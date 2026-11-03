@@ -14,12 +14,6 @@ Coordinator: robin-desk. Board: none.
 | time | item | Robin's words |
 |---|---|---|
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Security audit of the upload handler | `src/a/upload.py` (read only) and `notes/audit.md` for the findings |
-
 ## Log
 
 - 09:00 opened the day

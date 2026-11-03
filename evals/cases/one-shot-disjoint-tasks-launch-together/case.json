@@ -16,7 +16,7 @@
       "tests/c/.keep": ""
     }
   },
-  "description": "Four tracker rows. Fix upload handler is running (a live launcher pid in its tree) and owns `src/a/`. Add upload limits is ready and owns `src/a/upload.py`, inside the running row's paths. Fix report writer and Fix export header are ready and own `src/b/` and `src/c/`. The coordinator starts the two disjoint tasks, each as its own launcher call and each in the background, does not start the running task again, and leaves the one that overlaps it to the launcher. The launcher owns overlap: it refuses Add upload limits (scripts/dispatch_prompt.py refuse_overlap, called from compose), dry runs included, so nothing starts and the row stays open whatever the coordinator tries. No grader judges that task. The forced --dry-run returns before the launcher writes any row, so the tracker cannot tell a coordinator that checked overlap from one that tried the launch and was refused; a refused attempt passes and leaves no trace to grade. What it sees: the harness records every tool call's whole input, so `run_in_background: true` is graded. A coordinator that launches in the foreground, or chains launches in one command, cannot show this behaviour: origin/main's agent file says 'Run tasks sequentially in the foreground' and goes red on the background graders. What it cannot see: two calls in one assistant message look like two in consecutive ones (background calls return at once, so the difference does not matter), a dry run returns at once, and a loop over a shell variable launching several tasks in one command. `worker --check` starts nothing and is never counted as a launch.",
+  "description": "Four tracker rows. Fix upload handler is running (a live launcher pid in its tree). Add upload limits changes the same handler file, and Fix report writer and Fix export header are ready too. Tasks own no paths (#1039), so the coordinator starts all three ready tasks, each as its own launcher call and each in the background, and does not start the running task again; Add upload limits sharing a file with the running task is no reason to hold it. What it sees: the harness records every tool call's whole input, so `run_in_background: true` is graded. A coordinator that launches in the foreground, or chains launches in one command, cannot show this behaviour. What it cannot see: two calls in one assistant message look like two in consecutive ones (background calls return at once, so the difference does not matter), a dry run returns at once, and a loop over a shell variable launching several tasks in one command. `worker --check` starts nothing and is never counted as a launch.",
   "prompt": "Start the ready tasks. For this isolated test, use --dry-run for every worker launch and do not start a real worker process.",
   "graders": [
     {
@@ -45,6 +45,14 @@
       "min": 1
     },
     {
+      "name": "Add upload limits launched in the background",
+      "rule": "Give each launch its own Bash call with `run_in_background: true`; never chain launches with `;` or `&&`, never pipe a launch, and never start one without the flag. Add no `| head`, `| tail` or `| cut` to a launch: its whole output is read from the notification's output file.",
+      "type": "tool_used",
+      "tool": "Bash",
+      "input_match": "\\A(?=.*\"run_in_background\": true).*?\"command\": \"(?:[^\"\\\\]|\\\\.)*?(?:spawn_session\\.py|chief[-_]of[-_]stuff(?:\\.py)?\\s+worker)\\b(?!(?:(?![;|]|&(?!\\d)|\\\\n)(?:[^\"\\\\]|\\\\.))*--check)(?=(?:(?![;|]|&(?!\\d)|\\\\n)(?:[^\"\\\\]|\\\\.))*--dry-run)(?:(?![;|]|&(?!\\d)|\\\\n)(?:[^\"\\\\]|\\\\.))*?--task[=\\s]+\\$?\\\\?[\"\\']?Add upload limits\\b(?!(?:(?![;|]|&(?!\\d)|\\\\n)(?:[^\"\\\\]|\\\\.))*\\|)",
+      "min": 1
+    },
+    {
       "name": "no single command launches two tasks",
       "rule": "Give each launch its own Bash call with `run_in_background: true`; never chain launches with `;` or `&&`, never pipe a launch, and never start one without the flag. Add no `| head`, `| tail` or `| cut` to a launch: its whole output is read from the notification's output file.",
       "type": "tool_used",
@@ -54,7 +62,7 @@
     },
     {
       "name": "the running task is not launched again",
-      "rule": "Ready means an open, unassigned task with clear scope, File ownership, an issue when required, no conflicting owner, and no unresolved human-review hold or lane gate.",
+      "rule": "Ready means an open task with clear scope, an issue when required, no running owner, and no unresolved architectural decision or exhausted failure budget.",
       "type": "tool_used",
       "tool": "Bash",
       "input_match": "\"command\": \"(?:[^\"\\\\]|\\\\.)*?(?:spawn_session\\.py|chief[-_]of[-_]stuff(?:\\.py)?\\s+worker)\\b(?!(?:(?![;|]|&(?!\\d)|\\\\n)(?:[^\"\\\\]|\\\\.))*--check)(?:(?![;|]|&(?!\\d)|\\\\n)(?:[^\"\\\\]|\\\\.))*?--task[=\\s]+\\$?\\\\?[\"\\']?Fix upload handler\\b",

@@ -21,11 +21,6 @@ Coordinator: coordinator. Board: self-hosted.
 | time | item | Robin's words |
 |---|---|---|
 
-## File ownership
-
-- Security audit: src/a/
-- Draft release notes: docs/release.md
-
 ## Log
 
 - 09:00 opened the day

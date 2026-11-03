@@ -13,9 +13,6 @@
 |---|---|---|
 | 09:10 | Write eval README | I'll take the README |
 
-## File ownership
-
-
 ## Log
 
 - 09:00 opened the day

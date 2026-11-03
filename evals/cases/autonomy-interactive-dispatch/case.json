@@ -1,0 +1,37 @@
+{
+  "golden": true,
+  "golden_why": "autonomy: a routine dispatch must not wait on the owner",
+  "tz": "America/Chicago",
+  "repo": {
+    "clone": "repo",
+    "trees": "trees",
+    "worktrees": [],
+    "files": {
+      "src/a/upload.py": "def upload(request):\n    path = request.get('path')\n    return open(path, 'wb')\n",
+      "src/a/__init__.py": "",
+      "notes/.keep": ""
+    }
+  },
+  "description": "A ready interactive task launches on the initial request without an owner yes; its worker can plan and proceed.",
+  "turns": [
+    {
+      "prompt": "Start the security audit.",
+      "graders": [
+        {
+          "name": "launches immediately",
+          "type": "spawn_calls",
+          "min": 1,
+          "max": 1
+        },
+        {
+          "name": "no yes requested",
+          "type": "regex",
+          "pattern": "(?i)(?:shall|should|may|can) I (?:launch|start)|approve.*(?:launch|dispatch)",
+          "match": "absent"
+        }
+      ]
+    }
+  ],
+  "max_turns": 36,
+  "timeout_seconds": 600
+}

@@ -22,11 +22,6 @@ Coordinator: coordinator. Board: self-hosted.
 |---|---|---|
 | 09:10 | Release-note format | "Use bullets, not a table; that is settled." |
 
-## File ownership
-
-- Security audit: src/a/
-- Draft release notes: docs/release.md
-
 ## Log
 
 - 09:00 opened the day

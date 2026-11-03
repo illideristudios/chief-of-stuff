@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import backlog as bl  # noqa: E402
+import backlog_ref  # noqa: E402
 
 TOKEN = "glpat-test-not-a-real-token"
 
@@ -507,6 +508,30 @@ class CliWriteTest(unittest.TestCase):
                 closer.assert_called_once()
                 self.assertEqual(closer.call_args.args[1], 226)
 
+    def test_close_of_a_sibling_project_url_closes_that_projects_issue(self):
+        """#416: the audit names another project on the home host by URL; its issue closes, not the home's same number."""
+        from urllib.parse import urlparse
+
+        server, base = serve({})
+        self.addCleanup(stop, server)
+        # issue_ref matches https URLs whose host equals home_of (including the test server's port).
+        sibling = f"https://{urlparse(base).netloc}/zachgardner/other/-/issues/5"
+        done = bl.Written(bl.CLOSE, "#5", done=True, iid=5)
+        with patch.object(bl, "close", return_value=done) as closer, patch("sys.stdout", new=io.StringIO()):
+            code = bl.main(["--config", self.config_at(base), "--close", sibling])
+        self.assertEqual(code, 0)
+        cfg_, number = closer.call_args.args[:2]
+        self.assertEqual((cfg_.project, number), ("zachgardner/other", 5))
+
+    def test_close_refuses_a_foreign_host_and_a_github_reference(self):
+        server, base = serve({})
+        self.addCleanup(stop, server)
+        for arg in ("https://evil.example/a/b/-/issues/5", "other/repo#5"):
+            with self.subTest(arg=arg), patch.object(bl, "close") as closer, patch("sys.stderr", new=io.StringIO()):
+                code = bl.main(["--config", self.config_at(base), "--close", arg])
+            self.assertEqual(code, 2)
+            closer.assert_not_called()
+
 
 # ---- GitHub -------------------------------------------------------------------------------------
 #
@@ -585,18 +610,13 @@ class GitHubConfigTest(unittest.TestCase):
                 with self.assertRaises(bl.BacklogError):
                     bl.parse_backlog(spec)
 
-    def test_gitlab_line_is_still_gitlab(self):
-        got = bl.parse_backlog("GitLab; host https://labs.gauntletai.com; project zachgardner/openemr")
-        self.assertIsInstance(got, bl.Backlog)
-
-
 class GitHubReadTest(unittest.TestCase):
     def test_list_argv_and_mapping(self):
         gh = FakeGh(rows={"open": [gh_issue(3, "inbox.py", labels=("bug",), closed="2026-09-17T19:05:00Z")]})
         got = bl.issues(GH, gh=gh)
         self.assertTrue(got.ok, got.error)
         self.assertEqual(gh.calls, [["issue", "list", "-R", REPO, "--state", "open", "--json",
-                                     "number,title,state,labels,url,updatedAt,closedAt", "--limit", "5000"]])
+                                     "number,title,state,labels,url,updatedAt,closedAt,body", "--limit", "5000"]])
         self.assertEqual(got.issues, (bl.Issue(iid=3, title="inbox.py", state=bl.OPEN, labels=("bug",),
                                                 web_url=f"https://github.com/{REPO}/issues/3",
                                                 updated_at="2026-09-22T19:24:55Z",
@@ -675,6 +695,29 @@ class IssueRefTest(unittest.TestCase):
         self.assertEqual(ref.label(GH), "#9")
         self.assertEqual(ref.label(bl.GitHubBacklog("o/n")), f"{REPO}#9")
 
+    def test_store_keys_use_the_same_reference_and_host_validation(self):
+        gl = bl.Backlog(host="https://gl.example", project="g/p")
+        self.assertEqual(bl.issue_ref("github:o/n#9", GH), bl.IssueRef("o/n", 9))
+        self.assertEqual(bl.issue_ref("gitlab:gl.example/g/sub/p#7", gl), bl.IssueRef("g/sub/p", 7, "gl.example"))
+        self.assertIsNone(bl.issue_ref("gitlab:other.example/g/p#7", gl))
+        self.assertEqual(bl.issue_ref("gitlab:other.example/g/p#7", gl, any_host=True),
+                         bl.IssueRef("g/p", 7, "other.example"))
+        self.assertIsNone(bl.issue_ref("github:invalid#9", GH))
+
+    def test_store_label_reads_a_home_key_as_a_number(self):
+        # #903: a store key labels like IssueRef.label. Home is `#N`; another project names itself; no home drops only the forge prefix.
+        gl = bl.Backlog(host="https://gl.example", project="g/p")
+        self.assertEqual(backlog_ref.store_label(f"github:{REPO}#9", GH), "#9")
+        self.assertEqual(backlog_ref.store_label("github:o/n#9", GH), "o/n#9")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/g/p#5", gl), "#5")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/acme/web#5", gl), "gitlab:gl.example/acme/web#5")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl2.example/g/p#5", gl), "gitlab:gl2.example/g/p#5")
+        self.assertEqual(backlog_ref.store_label(f"github:{REPO}#9", None), f"{REPO}#9")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/acme/web#5", None), "gitlab:gl.example/acme/web#5")
+        for cell in ("workflow", "#7", "https://github.com/o/n/issues/7"):
+            with self.subTest(cell=cell):
+                self.assertEqual(backlog_ref.store_label(cell, GH), cell)
+
 
 class ParseIssueArgTest(unittest.TestCase):
     """#44: a CLI argument may be a bare `N`; a tracker cell may not. Two parsers, one responsibility each."""
@@ -714,12 +757,12 @@ class GitLabIssueRefTest(unittest.TestCase):
         # the key an issue is filed under: another project on the home host, and the same path on another host, are two keys
         other_project = bl.IssueRef("acme/web", 8, "gl.example")
         other_host = bl.IssueRef("g/p", 8, "gl2.example")
-        self.assertEqual(other_project.label(GL), "gl.example/acme/web#8")
-        self.assertEqual(other_host.label(GL), "gl2.example/g/p#8")
+        self.assertEqual(other_project.label(GL), "gitlab:gl.example/acme/web#8")
+        self.assertEqual(other_host.label(GL), "gitlab:gl2.example/g/p#8")
         self.assertEqual(bl.IssueRef("g/p", 8, "gl.example").label(GL), "#8")
         # a GitHub repo keeps `owner/repo#N`; with no home, a GitLab ref is keyed by its host and project
         self.assertEqual(bl.IssueRef("o/n", 8).label(GL), "o/n#8")
-        self.assertEqual(other_project.label(None), "gl.example/acme/web#8")
+        self.assertEqual(other_project.label(None), "gitlab:gl.example/acme/web#8")
 
     def test_gitlab_urls(self):
         for cell, want in (("https://gl.example/g/p/-/issues/7", ("g/p", 7, "gl.example")),
@@ -736,10 +779,13 @@ class GitLabIssueRefTest(unittest.TestCase):
         self.assertIsNone(bl.issue_ref("https://gl.example/g/p/-/issues/1", GH))
         self.assertIsNone(bl.issue_ref("https://gl.example/g/p/-/issues/1", None))
 
-    def test_owner_repo_is_still_github(self):
+    def test_project_shorthand_remains_github_in_gitlab_backlog(self):
         ref = bl.issue_ref("locriani/GauntletIssues#33", GL)
         self.assertEqual(ref, bl.IssueRef(REPO, 33))
         self.assertEqual(ref.label(GL), f"{REPO}#33")
+        github = bl.issue_ref(f"https://github.com/{REPO}/issues/33", GL)
+        self.assertEqual(github, bl.IssueRef(REPO, 33))
+        self.assertEqual(github.label(GL), f"{REPO}#33")
 
     def test_the_same_path_on_another_host_is_not_home(self):
         self.assertEqual(bl.IssueRef("g/p", 9).label(GL), "g/p#9")
@@ -779,6 +825,14 @@ class IssueStatesTest(unittest.TestCase):
 
 
 class GitHubWriteTest(unittest.TestCase):
+    def test_run_gh_gives_up_on_a_stalled_gh(self):
+        import subprocess
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 1)) as run:
+            code, out, err = bl.run_gh(["issue", "list"])
+        self.assertEqual((code, out), (124, ""))
+        self.assertIn("timed out", err)
+        self.assertEqual(run.call_args.kwargs["timeout"], bl.GH_TIMEOUT)
+
     def test_eval_binary_override_is_absolute_and_does_not_depend_on_path(self):
         with tempfile.TemporaryDirectory() as d:
             fake = Path(d) / "fake-gh"
@@ -904,7 +958,7 @@ class ReadOneTest(unittest.TestCase):
     """#63: `--view` reads one issue's title, state, body and labels through the same port as the list."""
 
     def test_view_reads_title_state_body_and_labels(self):
-        row = {**issue(12, "the design gate"), "body": "gate the design before build"}
+        row = {**issue(12, "the design gate"), "description": "gate the design before build"}
         row["labels"] = ["design-gate", "board"]
         server, base = serve({("GET", f"{ISSUES}/12", "", "1"): (200, json.dumps(row), {})})
         try:
@@ -1047,7 +1101,7 @@ class ViewMainTest(unittest.TestCase):
     def run_view(self, *extra: str, plan: dict | None = None) -> tuple[int, str, str, ThreadingHTTPServer]:
         planned = plan if plan is not None else {
             ("GET", f"{ISSUES}/12", "", "1"):
-                (200, json.dumps({**issue(12, "the design gate"), "body": "gate it"}), {}),
+                (200, json.dumps({**issue(12, "the design gate"), "description": "gate it"}), {}),
         }
         server, base = serve(planned)
         self.addCleanup(stop, server)
@@ -1069,7 +1123,7 @@ class ViewMainTest(unittest.TestCase):
     def test_view_with_comments_prints_the_notes_in_order(self):
         plan = {
             ("GET", f"{ISSUES}/12", "", "1"):
-                (200, json.dumps({**issue(12, "the design gate"), "body": "gate it"}), {}),
+                (200, json.dumps({**issue(12, "the design gate"), "description": "gate it"}), {}),
             ("GET", f"{ISSUES}/12/notes", "", "1"): (200, json.dumps([
                 {"body": "the design gate passes", "author": {"username": "zach"},
                  "created_at": "2026-09-25T21:48:00Z", "system": False},
@@ -1084,6 +1138,41 @@ class ViewMainTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("unknown", err)
         self.assertEqual(out, "")
+
+
+class RetryTest(unittest.TestCase):
+    """A timed-out GitLab read is retried with backoff. A status, bad JSON, a refusal, or a write is not."""
+
+    def calls(self, answers, method="GET", **kwargs):
+        seen, slept = [], []
+        with patch.object(bl, "_call_once", side_effect=lambda *a, **k: seen.append(a) or answers[len(seen) - 1]), \
+             patch.object(bl, "_sleep", side_effect=slept.append):
+            got = bl._call(method, "https://gl.example/x", "t", 5, **kwargs)
+        return got, len(seen), slept
+
+    def test_a_timeout_then_a_success_uses_three_attempts_and_both_backoffs(self):
+        got, n, slept = self.calls([
+            (None, {}, "URLError: timed out"),
+            (None, {}, "URLError: The handshake operation timed out"),
+            ({"ok": True}, {}, ""),
+        ])
+        self.assertEqual((got, n, slept), (({"ok": True}, {}, ""), 3, list(bl.RETRY_BACKOFF)))
+
+    def test_five_timeouts_return_the_error_after_three_attempts_and_two_sleeps(self):
+        got, n, slept = self.calls([(None, {}, "URLError: timed out")] * 5)
+        self.assertEqual((got[2], n, slept), ("URLError: timed out", 3, list(bl.RETRY_BACKOFF)))
+
+    def test_http_status_bad_json_and_a_refusal_are_one_attempt(self):
+        for error in ("HTTP 404 from GitLab", "HTTP 502 from GitLab", "GitLab did not answer with JSON",
+                      "URLError: [Errno 61] Connection refused"):
+            with self.subTest(error=error):
+                self.assertEqual(self.calls([(None, {}, error)] * 3)[1], 1)
+
+    def test_a_write_is_one_attempt_unless_the_caller_passes_retries(self):
+        self.assertEqual(self.calls([(None, {}, "URLError: timed out")] * 3, method="PUT")[1], 1)
+        self.assertEqual(self.calls([(None, {}, "URLError: timed out")] * 3, method="POST")[1], 1)
+        got, n, slept = self.calls([(None, {}, "URLError: timed out")] * 5, method="POST", retries=2)
+        self.assertEqual((got[2], n, slept), ("URLError: timed out", 3, list(bl.RETRY_BACKOFF)))
 
 
 if __name__ == "__main__":

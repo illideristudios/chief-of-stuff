@@ -1,6 +1,6 @@
 """Whose is a tree at risk, and are they still here (#43). Pure: the join, and nothing that asks.
 
-Each claim source (File ownership rows, the worker registry, one-shot launchers) decides its own
+Each claim source (the Log's started lines, the worker registry, one-shot launchers) decides its own
 claim's liveness, because only it knows how. Any live claim holds the tree: a false orphan sends the
 user after a session that is working. A tree no source claims is `Unclaimed` — owner unknown is a
 different fact from owner gone, and the tree may be the user's own.
@@ -46,7 +46,7 @@ class Unclaimed:
 
     def __str__(self) -> str:
         return (f"{UNCLAIMED} {self.worktree} — {self.why}; "
-                "no File ownership row, worker registration or one-shot names this tree")
+                "no started line, worker registration or one-shot names this tree")
 
 
 def judge(name: str, state: TreeState, claims: list[Claim]) -> Orphan | Unclaimed | None:

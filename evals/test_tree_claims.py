@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import process_status  # noqa: E402
 import tree_claims  # noqa: E402
 
 
@@ -40,22 +41,22 @@ class RegistryClaimsTest(Workspace):
     def test_a_dead_worker_claims_its_tree_as_gone(self) -> None:
         pid = dead_pid()
         self.register("impl-7", pid, self.tree)
-        [claim] = tree_claims.registry_claims(self.root)[self.tree.resolve()]
+        [claim] = tree_claims.registry_claims(self.root, process_status.registrations, process_status.process_exists)[self.tree.resolve()]
         self.assertEqual((claim.owner, claim.live), ("impl-7", False))
         self.assertIn(str(pid), claim.absence)
 
     def test_a_live_worker_holds_its_tree(self) -> None:
         self.register("impl-7", os.getpid(), self.tree)
-        [claim] = tree_claims.registry_claims(self.root)[self.tree.resolve()]
+        [claim] = tree_claims.registry_claims(self.root, process_status.registrations, process_status.process_exists)[self.tree.resolve()]
         self.assertTrue(claim.live)
 
     def test_a_relative_worktree_is_read_against_the_workspace(self) -> None:
         """Not against wherever the audit happened to be started from."""
         self.register("impl-7", dead_pid(), Path("trees/wt-x"))
-        self.assertIn(self.tree.resolve(), tree_claims.registry_claims(self.root))
+        self.assertIn(self.tree.resolve(), tree_claims.registry_claims(self.root, process_status.registrations, process_status.process_exists))
 
     def test_no_registry_claims_nothing(self) -> None:
-        self.assertEqual(tree_claims.registry_claims(self.root), {})
+        self.assertEqual(tree_claims.registry_claims(self.root, process_status.registrations, process_status.process_exists), {})
 
 
 class OneShotClaimsTest(Workspace):
@@ -65,13 +66,13 @@ class OneShotClaimsTest(Workspace):
 
     def test_a_running_launcher_holds_its_tree(self) -> None:
         self.launcher(os.getpid())
-        [claim] = tree_claims.one_shot_claims(self.root / "trees")[self.tree.resolve()]
+        [claim] = tree_claims.one_shot_claims(self.root / "trees", process_status.running_trees)[self.tree.resolve()]
         self.assertEqual((claim.owner, claim.live), ("Unsaved work", True))
 
     def test_a_dead_launcher_claims_nothing(self) -> None:
-        """Its File ownership row, keyed on the task, is what still speaks for the tree."""
+        """Its started line, keyed on the task, is what still speaks for the tree."""
         self.launcher(dead_pid())
-        self.assertEqual(tree_claims.one_shot_claims(self.root / "trees"), {})
+        self.assertEqual(tree_claims.one_shot_claims(self.root / "trees", process_status.running_trees), {})
 
 
 if __name__ == "__main__":

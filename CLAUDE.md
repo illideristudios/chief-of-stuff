@@ -10,6 +10,7 @@ A versioned coordinator for Claude Code, Codex CLI, Cursor CLI, and Antigravity 
 - **No shell scripts.** Harness code, shims, mocks, and probes are Python (or another real language). Shell appears only as a one-line command someone types.
 - **Fixtures are templates.** `{{today}}`, `{{yesterday}}`, `{{tomorrow}}`, `{{tz}}`, `{{now_hhmm}}`, `{{now±Nh}}` (`|local`, `|hhmm`), `{{dotgit}}` (a `.git` dir name, since git cannot track one), and `{{live_pid}}` (a pid alive for the whole run) in file names and contents. No hardcoded dates. An unknown token fails the run.
 - **Fixtures are generic.** No data from any workspace that uses this agent — no patient data, no program documents, no real deploy names.
+- **Only the architecture agent changes the architecture docs.** `architecture/ARCHITECTURE.md` and `architecture/compliance.md` are changed by the architecture agent (`frank-lloyd-aight`) and by no other agent. That includes placing a new script in §4, recording or closing a gap, and rewriting a section to match code. Every other agent reads them, leaves them out of its changes, and reports to the architecture agent where code and document disagree. The architecture agent changes no code.
 
 ## Architecture
 
@@ -24,4 +25,4 @@ Read by `claude --agent frank-lloyd-aight`. Every path, name, and tool the archi
 - Publisher: self-hosted; URL http://127.0.0.1:8787/; dir `/Users/locriani/Developer/Gauntlet/Areas/pages/`. A review page written there is at `http://127.0.0.1:8787/<subject>-review.html`.
 - Session tools: `ListAgents` to find sessions, `SendMessage` to reach one
 - Diagram renderer: `~/Developer/ai-additions/plugins/mermaid-system-design/skills/mermaid-system-design/scripts/mermaid-check.py` (exit 0 rendered, 1 a diagram failed, 2 renderer missing). A diagram that did not render is never approved.
-- Commits: this session commits its own work in its own worktree, in small meaningful commits, and pushes each one. It does not merge.
+- Commits: this session commits its own work in its own worktree, in small meaningful commits, and pushes each one. It may merge its own pull requests with approval.

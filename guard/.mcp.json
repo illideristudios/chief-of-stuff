@@ -1,0 +1,6 @@
+{
+  "engine": {
+    "command": "${CHIEF_PYTHON}",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/../scripts/engine_mcp.py"]
+  }
+}

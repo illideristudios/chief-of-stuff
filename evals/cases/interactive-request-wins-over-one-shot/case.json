@@ -10,7 +10,7 @@
       "notes/.keep": ""
     }
   },
-  "description": "#188: a one-shot workspace with a ready unassigned task and its File ownership row; the user directly asks for that task to run as an interactive session. The coordinator launches it with `--interactive`, never with `--one-shot`, and leaves the workspace TOML alone.",
+  "description": "#188: a one-shot workspace with a ready unassigned task; the user directly asks for that task to run as an interactive session. The coordinator launches it with `--interactive`, never with `--one-shot`, and leaves the workspace TOML alone.",
   "prompt": "Run the security audit as an interactive session, not a one-shot. For this isolated test, use --dry-run for the worker launch and treat the dry run as the launch; do not start a real worker process.",
   "graders": [
     {

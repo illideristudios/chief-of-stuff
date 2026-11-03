@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workers overview: reliable orchestration</title>
+<style>
+@font-face { font-family: "Cormorant SC"; src: url("fonts/9777be10ff78.woff2") format("woff2"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Alegreya Sans"; src: url("fonts/624ea7e85a53.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Alegreya Sans"; src: url("fonts/dedb7e4dce28.woff2") format("woff2"); font-weight: 500; font-display: swap; }
+@font-face { font-family: "Alegreya Sans"; src: url("fonts/1a2f3006ecc7.woff2") format("woff2"); font-weight: 700; font-display: swap; }
+body { margin: 0; }
+</style>
+</head>
+<body>
+<div id="workers-overview">
+  <div class="shell">
+    <nav aria-label="Board sections"><span>Board</span><span class="current">Workers</span><span>Dispatch</span><span>Since you last looked</span><span>Epics</span><span>Decisions</span><span>Limits</span></nav>
+    <div id="overview">
+      <header><div><div class="muted small">Session activity · just updated</div><h1>Workers</h1></div><div class="stats"><div class="stat attention"><span>Needs attention</span><strong>1</strong></div><div class="stat"><span>Running</span><strong>2</strong></div><div class="stat"><span>Slots free</span><strong>1</strong></div></div></header>
+      <section><h2>Running · 2</h2><div class="table">
+        <div class="row headings"><span>State</span><span>Worker / job</span><span>Running</span><span>Last activity</span></div>
+        <div class="row problem"><div><span class="chip warning">NEEDS ATTENTION</span></div><div><button type="button" class="worker" data-open="stalled">Fix calendar sync</button><div class="muted small">Codex · attempt 2</div><div class="reason">Possible stall · no new activity for 18 minutes</div></div><span class="mono">42m</span><span class="mono warn">18m ago</span></div>
+        <div class="row"><div><span class="chip good">RUNNING</span></div><div><button type="button" class="worker" data-open="running">Improve search results</button><div class="muted small">Claude · Sonnet · attempt 1</div><div class="muted small">Updating ranking and running tests</div></div><span class="mono">24m</span><span class="mono">2m ago</span></div>
+      </div></section>
+      <section><h2>Queued · 1</h2><div class="table"><div class="simple"><span class="chip neutral">QUEUED</span><div><strong>Update onboarding copy</strong><div class="muted small">Waiting for an available worker slot</div></div></div></div></section>
+      <section><h2>Ended today · 1</h2><div class="table"><div class="simple"><span class="chip good">DONE</span><div><button type="button" class="worker" data-open="ended">Check upload limits</button><div class="muted small">Completed · transcript retained</div></div><span class="muted mono">09:43</span></div></div></section>
+    </div>
+    <div id="session" hidden><button type="button" class="back">← Workers</button><div id="chief-ui">
+  <div class="app">
+    <nav class="nav" aria-label="Board sections"><span>Board</span><span class="active">Workers</span><span>Dispatch</span><span>Since you last looked</span><span>Epics</span><span>Decisions</span><span>Limits</span></nav>
+    <div class="columns">
+      <aside class="jobs"><div class="eyebrow">EXAMPLE WORKERS</div>
+        <button class="job selected" type="button" data-job="running" aria-pressed="true"><span class="job-name">Improve search results</span><span class="job-meta"><span class="dot green"></span> Running <span>·</span> Claude</span></button>
+        <button class="job" type="button" data-job="stalled" aria-pressed="false"><span class="job-name">Fix calendar sync</span><span class="job-meta"><span class="dot amber"></span> Needs attention <span>·</span> Codex</span></button>
+        <button class="job" type="button" data-job="ended" aria-pressed="false" hidden>Check upload limits</button>
+      </aside>
+      <main class="detail">
+        <div class="crumb">Worker · autonomous · <span id="crumb-name">Improve search results</span></div>
+        <div class="title-row"><div><div class="heading-kicker">AUTONOMOUS JOB <span>·</span> <span id="attempt">ATTEMPT 1</span></div><h1 id="job-title">Improve search results</h1></div><span class="status running" id="status"><span class="dot green"></span> Running</span></div>
+        <div class="subrow"><span id="model">Claude · Sonnet</span><span>·</span><span id="attempt-label">Attempt 1</span><span>·</span><span id="last">Last activity 2 min ago</span><button class="stop" id="stop" type="button">Stop job</button></div>
+        <div class="notice" id="notice" hidden><strong>Possible stall</strong><span>No new activity for 18 minutes. The worker process is still running.</span><div><button type="button" id="retry">Restart job</button><button type="button" id="inspect">View last activity</button></div></div>
+        <div class="transcript-header"><div><h2>Transcript</h2><p id="transcript-sub">What the worker is doing, in order.</p></div><span class="live"><span class="dot green"></span> <span id="live-text">Live</span></span></div>
+        <div class="timeline" id="timeline" aria-live="polite"></div>
+        <form class="compose" id="compose"><label for="message">Message this worker</label><textarea id="message" rows="2" placeholder="Send a correction, question, or additional context…"></textarea><div class="compose-foot"><span id="compose-hint">The job continues autonomously.</span><button type="submit">Send message <span>↑</span></button></div></form>
+      </main>
+    </div>
+    <div class="mock-note" id="mock-note" aria-live="polite"></div>
+  </div>
+</div>
+<style>
+  #chief-ui { color-scheme: light dark; --paper: light-dark(#f4efe1,#211e23); --panel: light-dark(#fbf8ef,#2b272d); --ink: light-dark(#302630,#f0e9dd); --muted: light-dark(#716671,#b9acb6); --line: light-dark(#ddd3bd,#514650); --gold: light-dark(#95752f,#d3b66c); --selected: light-dark(#eee6d5,#3c3438); --good: light-dark(#397357,#82c79c); --warn: light-dark(#9a6524,#e0b26e); color:var(--ink); font-family: ui-sans-serif, system-ui, sans-serif; font-size:14px; line-height:1.45; }
+  #chief-ui * { box-sizing:border-box; }
+  #chief-ui .app { background:var(--paper); color:var(--ink); overflow:hidden; }
+  #chief-ui button, #chief-ui textarea { font:inherit; }
+  #chief-ui button { cursor:pointer; }
+  #chief-ui .top { display:flex; justify-content:space-between; align-items:center; padding:17px 24px 12px; }
+  #chief-ui .brand { display:flex; align-items:center; gap:8px; font-family:Georgia,serif; font-variant:small-caps; font-size:22px; letter-spacing:.02em; }
+  #chief-ui .brand-icon { color:var(--gold); font-size:18px; }
+  #chief-ui .workspace { color:var(--muted); font-size:12px; }
+  #chief-ui .workspace strong { color:var(--ink); font-weight:500; margin-left:7px; }
+  #chief-ui .nav { display:flex; gap:25px; padding:0 24px; border-bottom:1px solid var(--line); color:var(--muted); font-size:13px; }
+  #chief-ui .nav span { padding:11px 0; }
+  #chief-ui .nav .active { color:var(--ink); border-bottom:2px solid var(--gold); font-weight:600; }
+  #chief-ui .columns { display:grid; grid-template-columns:205px minmax(0,1fr); min-height:590px; }
+  #chief-ui .jobs { border-right:1px solid var(--line); padding:25px 14px; }
+  #chief-ui .eyebrow, #chief-ui .heading-kicker { font-size:10px; letter-spacing:.1em; font-weight:700; color:var(--muted); }
+  #chief-ui .eyebrow { display:flex; justify-content:space-between; padding:0 8px; }
+  #chief-ui .eyebrow span { letter-spacing:0; font-size:11px; font-weight:400; }
+  #chief-ui .aside-title { font-family:Georgia,serif; font-size:18px; margin:16px 8px 10px; }
+  #chief-ui .job { display:block; text-align:left; background:transparent; color:var(--ink); border:0; border-radius:5px; padding:11px 9px; width:100%; }
+  #chief-ui .job.selected { background:var(--selected); box-shadow:inset 2px 0 var(--gold); }
+  #chief-ui .job-name { display:block; font-weight:600; font-size:13px; }
+  #chief-ui .job-meta { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:11px; margin-top:5px; }
+  #chief-ui .dot { display:inline-block; width:7px; height:7px; border-radius:50%; flex:none; }
+  #chief-ui .green { background:var(--good); } #chief-ui .amber { background:var(--warn); }
+  #chief-ui .detail { padding:23px 27px 28px; min-width:0; }
+  #chief-ui .crumb { color:var(--muted); font-size:12px; margin-bottom:20px; } #chief-ui .crumb span:first-child { padding:0 4px; }
+  #chief-ui .title-row { display:flex; gap:12px; justify-content:space-between; align-items:start; }
+  #chief-ui h1 { font:400 25px/1.2 Georgia,serif; margin:5px 0 0; }
+  #chief-ui .heading-kicker span { margin:0 4px; }
+  #chief-ui .status { white-space:nowrap; display:flex; align-items:center; gap:6px; border:1px solid var(--line); background:var(--panel); padding:5px 9px; border-radius:20px; font-size:11px; font-weight:600; }
+  #chief-ui .subrow { display:flex; flex-wrap:wrap; align-items:center; gap:8px; color:var(--muted); font-size:12px; margin-top:10px; }
+  #chief-ui .stop { margin-left:auto; border:0; background:none; color:var(--muted); text-decoration:underline; }
+  #chief-ui .notice { margin-top:20px; background:var(--selected); border-left:3px solid var(--warn); padding:12px 14px; font-size:12px; }
+  #chief-ui .notice strong, #chief-ui .notice span { display:block; } #chief-ui .notice span { margin-top:3px; color:var(--muted); }
+  #chief-ui .notice div { display:flex; gap:8px; margin-top:10px; }
+  #chief-ui .notice button { background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:5px 8px; color:var(--ink); font-size:11px; }
+  #chief-ui .transcript-header { display:flex; justify-content:space-between; align-items:end; border-bottom:1px solid var(--line); padding-bottom:12px; margin-top:26px; }
+  #chief-ui h2 { font:400 19px Georgia,serif; margin:0; } #chief-ui .transcript-header p { margin:3px 0 0; color:var(--muted); font-size:12px; }
+  #chief-ui .live { color:var(--muted); font-size:11px; display:flex; gap:6px; align-items:center; }
+  #chief-ui .timeline { padding:5px 0; }
+  #chief-ui .event { display:grid; grid-template-columns:50px 1fr; gap:10px; padding:13px 0; border-bottom:1px solid var(--line); }
+  #chief-ui .time { color:var(--muted); font-size:11px; padding-top:2px; font-variant-numeric:tabular-nums; }
+  #chief-ui .event-label { font-size:12px; font-weight:700; } #chief-ui .event p { margin:4px 0 0; font-size:13px; }
+  #chief-ui .event .faint { color:var(--muted); font-size:12px; }
+  #chief-ui details { margin-top:7px; color:var(--muted); font-size:12px; } #chief-ui summary { cursor:pointer; } #chief-ui details p { overflow-wrap:anywhere; }
+  #chief-ui .delivery { color:var(--warn); font-size:11px; margin-left:6px; font-weight:500; }
+  #chief-ui .compose { background:var(--panel); border:1px solid var(--line); border-radius:6px; margin-top:18px; padding:12px; }
+  #chief-ui .compose label { display:block; font-size:12px; font-weight:700; margin-bottom:8px; }
+  #chief-ui textarea { display:block; width:100%; resize:vertical; color:var(--ink); background:transparent; border:0; min-height:45px; padding:0; font-size:13px; }
+  #chief-ui textarea::placeholder { color:var(--muted); }
+  #chief-ui .compose-foot { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-top:8px; }
+  #chief-ui .compose-foot span { color:var(--muted); font-size:11px; }
+  #chief-ui .compose-foot button { color:var(--panel); background:var(--ink); border:0; border-radius:4px; padding:8px 11px; white-space:nowrap; font-size:12px; }
+  #chief-ui .compose-foot button span { color:inherit; margin-left:5px; }
+  #chief-ui .mock-note { color:var(--muted); font-size:11px; padding:0 27px 12px; text-align:right; }
+  #chief-ui { --paper:light-dark(#f4efe1,#1c1813); --panel:light-dark(#fbf8ef,#262019); --ink:light-dark(#2f2630,#efe6d2); --muted:light-dark(#6e6470,#b3a791); --line:light-dark(#ddd3bd,#3d352a); --gold:light-dark(#a7843e,#d4b06a); --selected:light-dark(#efe7d3,#342b1f); --good:light-dark(#1e6b52,#72c28d); --warn:light-dark(#a8660f,#e8ad55); font-family:'Alegreya Sans','Gill Sans',system-ui,sans-serif; }
+  #chief-ui .app { padding:12px 24px 18px; }
+  #chief-ui .nav { padding:0; column-gap:20px; row-gap:0; flex-wrap:wrap; font-family:'Cormorant SC',Georgia,serif; font-size:15.5px; font-weight:600; letter-spacing:.08em; }
+  #chief-ui .nav span { padding:8px 0 7px; }
+  #chief-ui .nav .active { border-bottom:1px solid var(--ink); }
+  #chief-ui .columns { display:flex; flex-direction:column; min-height:0; }
+  #chief-ui .jobs { border:0; padding:14px 0 0; display:flex; flex-wrap:wrap; align-items:center; gap:7px; }
+  #chief-ui .eyebrow { padding:0; margin-right:5px; font-weight:500; }
+  #chief-ui .job { width:auto; padding:5px 9px; background:var(--panel); border:1px solid var(--line); border-radius:4px; display:flex; align-items:center; gap:8px; }
+  #chief-ui .job.selected { background:var(--selected); box-shadow:none; border-color:var(--gold); }
+  #chief-ui .job-name { font-weight:500; } #chief-ui .job-meta { margin:0; }
+  #chief-ui .detail { padding:18px 0 8px; }
+  #chief-ui .crumb { margin-bottom:5px; font-size:12.5px; }
+  #chief-ui .heading-kicker { display:none; }
+  #chief-ui .title-row { border-bottom:1px solid var(--gold); padding-bottom:10px; align-items:center; }
+  #chief-ui h1 { font:600 27px/1.2 'Cormorant SC',Georgia,serif; letter-spacing:.04em; margin:0; }
+  #chief-ui .status { border-radius:3px; padding:2px 7px; letter-spacing:.06em; text-transform:uppercase; }
+  #chief-ui .subrow { margin-top:10px; }
+  #chief-ui h2 { font:600 16px 'Cormorant SC',Georgia,serif; letter-spacing:.1em; text-transform:uppercase; }
+  #chief-ui .transcript-header { border:0; padding-bottom:6px; margin-top:23px; }
+  #chief-ui .timeline { border:1px solid var(--line); background:var(--panel); border-radius:5px; padding:4px 14px; }
+  #chief-ui .event { border-bottom:1px dotted var(--line); padding:8px 0; } #chief-ui .event:last-child { border-bottom:0; }
+  #chief-ui .time { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  #chief-ui .compose textarea { border:1px solid var(--line); border-radius:4px; padding:8px 10px; }
+  #chief-ui .notice { background:var(--panel); border:1px solid var(--line); border-top:3px solid var(--warn); border-radius:5px; }
+  #chief-ui .mock-note { padding:0; }
+  #chief-ui [hidden] { display:none !important; }
+  @media (max-width:580px) { #chief-ui .app { padding:10px 16px 16px; } #chief-ui .nav { gap:0 16px; } #chief-ui .detail { padding:16px 0 8px; } #chief-ui .jobs { padding:12px 0 0; } #chief-ui .eyebrow { width:100%; } #chief-ui .job { width:auto; } #chief-ui h1 { font-size:23px; } }
+</style>
+<script>
+(() => {
+  const root = document.getElementById('chief-ui');
+  const byId = id => root.querySelector('#' + id);
+  const jobs = {
+    running: { title:'Improve search results', attempt:'ATTEMPT 1', model:'Claude · Sonnet', last:'Last activity 2 min ago', status:'Running', events:[['10:14','Worker','I’m tracing how search results are ranked before changing the query.'],['10:17','Tool activity','Read search/index.py and ran the search tests.'],['10:21','Worker','The current ranking treats exact matches and partial matches equally. I’m updating the scoring and will run the tests again.']] },
+    stalled: { title:'Fix calendar sync', attempt:'ATTEMPT 2', model:'Codex · GPT', last:'Last activity 18 min ago', status:'Needs attention', events:[['09:52','Worker','I’m checking how the sync job handles expired calendar credentials.'],['10:03','Tool activity','Ran the calendar integration tests.'],['10:06','Worker','The tests are waiting on the calendar service. I’m investigating the timeout.']] },
+    ended: { title:'Check upload limits', attempt:'ATTEMPT 1', model:'Claude · Sonnet', last:'Completed at 09:43', status:'Completed', events:[['09:25','Worker','I’ll check the upload limits and how errors are reported.'],['09:38','Tool activity','Ran the upload tests.'],['09:43','Worker','The upload limits are consistent, and the tests passed.']] }
+  };
+  let current = 'running';
+  const savedMessages = { running:[], stalled:[], ended:[] };
+  function addEvent(time, who, text, pending=false) {
+    const row=document.createElement('div'); row.className='event';
+    const stamp=document.createElement('span'); stamp.className='time'; stamp.textContent=time;
+    const content=document.createElement('div'); const label=document.createElement('div'); label.className='event-label'; label.textContent=who;
+    if (pending) { const badge=document.createElement('span'); badge.className='delivery'; badge.textContent='Queued · not yet delivered'; label.appendChild(badge); }
+    const body=document.createElement('p'); body.textContent=text; content.append(label,body);
+    if (who==='Tool activity') { body.className='faint'; const details=document.createElement('details'); const summary=document.createElement('summary'); summary.textContent='View details'; const p=document.createElement('p'); p.textContent='Tool output would appear here.'; details.append(summary,p); content.appendChild(details); }
+    row.append(stamp,content); byId('timeline').appendChild(row);
+  }
+  function render() {
+    const j=jobs[current]; byId('crumb-name').textContent=j.title; byId('job-title').textContent=j.title; byId('attempt').textContent=j.attempt; byId('attempt-label').textContent=j.attempt.charAt(0)+j.attempt.slice(1).toLowerCase(); byId('model').textContent=j.model; byId('last').textContent=j.last;
+    byId('status').innerHTML='<span class="dot '+(current==='stalled'?'amber':'green')+'"></span> '+j.status;
+    byId('notice').hidden=current!=='stalled'; byId('live-text').textContent=current==='running'?'Live':current==='ended'?'Ended':'Last activity'; byId('stop').hidden=current==='ended'; byId('message').disabled=current==='ended'; byId('compose').querySelector('button').disabled=current==='ended'; byId('compose-hint').textContent=current==='ended'?'This worker has finished; messages cannot be delivered.':'The job continues autonomously.'; byId('timeline').replaceChildren();
+    j.events.forEach(e=>addEvent(...e)); savedMessages[current].forEach(text=>addEvent('Now','You',text,true));
+    root.querySelectorAll('[data-job]').forEach(b=>{const selected=b.dataset.job===current; b.classList.toggle('selected',selected); b.setAttribute('aria-pressed',String(selected));});
+    byId('mock-note').textContent='';
+  }
+  root.querySelectorAll('[data-job]').forEach(b=>b.addEventListener('click',()=>{current=b.dataset.job; render();}));
+  byId('compose').addEventListener('submit',e=>{e.preventDefault(); const input=byId('message'); const text=input.value.trim(); if (!text) return; savedMessages[current].push(text); input.value=''; render();});
+  byId('stop').addEventListener('click',()=>{byId('mock-note').textContent='In the finished product, this would ask you to confirm stopping the job.';});
+  byId('retry').addEventListener('click',()=>{byId('mock-note').textContent='In the finished product, restart would preserve this attempt and its transcript.';});
+  byId('inspect').addEventListener('click',()=>{byId('timeline').scrollIntoView({behavior:'smooth',block:'nearest'});});
+  render();
+})();
+</script>
+</div>
+  </div>
+</div>
+<style>
+  #workers-overview { color-scheme:light dark; --paper:light-dark(#f4efe1,#1c1813); --panel:light-dark(#fbf8ef,#262019); --ink:light-dark(#2f2630,#efe6d2); --muted:light-dark(#6e6470,#b3a791); --line:light-dark(#ddd3bd,#3d352a); --gold:light-dark(#a7843e,#d4b06a); --good:light-dark(#1e6b52,#72c28d); --warn:light-dark(#a8660f,#e8ad55); --bad:light-dark(#a3402b,#f08566); --trouble:light-dark(#f8e7df,#35251c); font:14px/1.45 'Alegreya Sans','Gill Sans',system-ui,sans-serif; color:var(--ink); }
+  #workers-overview * {box-sizing:border-box} #workers-overview .shell {background:var(--paper);padding:12px 24px 26px}
+  #workers-overview nav {display:flex;flex-wrap:wrap;column-gap:20px;border-bottom:1px solid var(--line);font:600 15.5px 'Cormorant SC',Georgia,serif;letter-spacing:.08em;color:var(--muted)}
+  #workers-overview nav span {padding:8px 0 7px} #workers-overview nav .current {color:var(--ink);border-bottom:3px solid var(--ink)}
+  #workers-overview header {display:flex;justify-content:space-between;gap:12px;align-items:end;padding:21px 0 10px;border-bottom:1px solid var(--gold)}
+  #workers-overview h1 {font:600 27px/1.2 'Cormorant SC',Georgia,serif;letter-spacing:.04em;margin:2px 0 0} #workers-overview h2 {font:600 16px 'Cormorant SC',Georgia,serif;letter-spacing:.1em;margin:0 0 7px}
+  #workers-overview .stats {display:flex;gap:7px} #workers-overview .stat {background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:6px 10px;min-width:66px;text-align:right}
+  #workers-overview .stat.attention {border-top:3px solid var(--bad);padding-top:4px} #workers-overview .stat span {display:block;color:var(--muted);font-size:10px;letter-spacing:.08em;text-transform:uppercase} #workers-overview .stat strong {font:400 18px ui-monospace,monospace}
+  #workers-overview section {margin-top:19px} #workers-overview .table {background:var(--panel);border:1px solid var(--line);border-radius:5px;overflow:hidden}
+  #workers-overview .row {display:grid;grid-template-columns:132px minmax(0,1fr) 70px 100px;gap:10px;align-items:center;padding:10px 13px} #workers-overview .row+.row,#workers-overview .simple+.simple {border-top:1px dotted var(--line)}
+  #workers-overview .row.headings {color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em;padding:6px 13px;border-bottom:1px solid var(--line)} #workers-overview .problem {background:var(--trouble)}
+  #workers-overview .worker {font:600 14px 'Alegreya Sans',sans-serif;text-decoration:underline;text-align:left;color:var(--ink);padding:0;border:0;background:none;cursor:pointer}
+  #workers-overview .muted {color:var(--muted)} #workers-overview .small {font-size:12px} #workers-overview .mono {font:12px ui-monospace,monospace} #workers-overview .warn {color:var(--warn)} #workers-overview .reason {font-size:12px;color:var(--bad);margin-top:4px}
+  #workers-overview .chip {font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:2px 6px;white-space:nowrap;border:1px solid var(--line)} #workers-overview .chip.warning {color:var(--bad);border-color:var(--bad)} #workers-overview .chip.good {color:var(--good);border-color:var(--good)}
+  #workers-overview .simple {display:grid;grid-template-columns:132px 1fr auto;align-items:center;gap:10px;padding:10px 13px} #workers-overview .simple .chip {justify-self:start}
+  #workers-overview .back {font:600 14px 'Alegreya Sans',sans-serif;color:var(--ink);text-decoration:underline;border:0;background:none;padding:14px 0 0;cursor:pointer}
+  #workers-overview #chief-ui .app {padding:0} #workers-overview #chief-ui .nav,#workers-overview #chief-ui .jobs {display:none} #workers-overview #chief-ui .detail {padding:12px 0 0}
+  #workers-overview [hidden] {display:none!important}
+  @media(max-width:580px) { #workers-overview .shell{padding:10px 16px 20px} #workers-overview nav{gap:0 16px} #workers-overview header{align-items:start;flex-direction:column} #workers-overview .row.headings{display:none} #workers-overview .row{grid-template-columns:1fr auto;gap:5px 10px} #workers-overview .row>div:first-child{grid-column:1/-1} #workers-overview .row>span:nth-last-child(2){display:none} #workers-overview .simple{grid-template-columns:1fr auto} #workers-overview .simple .chip{grid-column:1/-1} }
+</style>
+<script>
+(() => {
+ const root=document.getElementById('workers-overview'), overview=root.querySelector('#overview'), session=root.querySelector('#session');
+ root.querySelectorAll('[data-open]').forEach(button=>button.addEventListener('click',()=>{const target=button.dataset.open;root.querySelector('#chief-ui [data-job="'+target+'"]').click();overview.hidden=true;session.hidden=false;}));
+ root.querySelector('.back').addEventListener('click',()=>{session.hidden=true;overview.hidden=false;});
+})();
+</script>
+
+</body>
+</html>

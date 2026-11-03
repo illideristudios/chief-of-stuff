@@ -1,12 +1,4 @@
-"""Unit tests for scripts/notify.py: the coordinator's notifications, written as an md-notify queue.
-
-Zach, 2026-09-22 22:20: "consider integration with my md-notify repo for initial setup of notifications -
-with a note that we will be plugging this out later and integrating with my todo tooling instead". He asked
-for four kinds: awaiting you, deadline warnings, day open and close, a session stopped or gone.
-
-md-notify's parser is ported below line for line, so every row the script writes is checked the way the app
-will read it. No app, no notification centre and no network are involved.
-"""
+"""Unit tests for scripts/notify.py: exception-only notifications from the store (M6 item 3, G1–G5, #714, #92)."""
 
 import io
 import re
@@ -20,10 +12,12 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import notify as nt  # noqa: E402
+import store  # noqa: E402
 
 CT = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 9, 23, 14, 0, tzinfo=CT)
 QUEUE = "notes/NOTIFICATIONS.md"
+KEY = "github:example/repo#12"
 
 CLAUDE = """# Workspace
 
@@ -36,17 +30,11 @@ CLAUDE = """# Workspace
 - Deadlines:
   - Early: 2026-09-23 23:59
   - Final: 2026-09-27 12:00
-  - Past: 2026-09-20 12:00
 - Board: Artifact tool; URL https://claude.ai/artifact/board-7
 - Settings: `chief-of-stuff.toml`
 """
 
 TOML = f'[notify]\nadapter = "md-notify"\nqueue = "{QUEUE}"\n'
-
-
-def tracker(*decisions: tuple[str, str]) -> str:
-    rows = "".join(f"| {when} | {item} | recorded |\n" for when, item in decisions)
-    return "## Decisions\n\n| time | item | source |\n|---|---|---|\n" + rows
 
 
 def md_notify_entries(text: str) -> list[tuple[str, str]]:
@@ -84,6 +72,8 @@ class Workspace:
         (self.root / "CLAUDE.md").write_text(claude)
         if toml is not None:
             (self.root / "chief-of-stuff.toml").write_text(toml)
+        store.migrate(self.root / "store.db")
+        self.db = store.Store(self.root / "store.db", clock=lambda: NOW)
 
     @property
     def queue(self) -> Path:
@@ -99,75 +89,89 @@ class Workspace:
 class NotifyTest(unittest.TestCase):
     def ws(self, **kw) -> Workspace:
         w = Workspace(**kw)
+        self.addCleanup(w.db.engine.dispose)
         self.addCleanup(w.tmp.cleanup)
         return w
 
-    def test_first_sync_creates_the_queue(self):
+    def test_notify_does_not_import_tracker_read(self):
+        # Compliance G5: notify.py stops importing tracker_read.
+        self.assertNotIn("tracker_read", nt.__dict__)
+
+    def test_sync_emits_no_deadline_warnings_or_day_open_close_rows(self):
+        # Compliance G3, G4: deadline warnings and day open/close recurring pings are removed.
         w = self.ws()
         code, out = w.run("sync")
         self.assertEqual(code, 0, out)
         text = w.queue.read_text()
         self.assertIn("md-notify", text)
         self.assertIn("| When (CT) | Title | Message | Open |", text)
-        self.assertIn("## Recurring", text)
-        self.assertEqual(sorted(md_notify_entries(text)), sorted([
-            ("2026-09-23 20:59", "⏰ Early in 3h (Wed 2026-09-23 23:59)"),
-            ("2026-09-23 22:59", "⏰ Early in 1h (Wed 2026-09-23 23:59)"),
-            ("2026-09-26 12:00", "⏰ Final in 24h (Sun 2026-09-27 12:00)"),
-            ("2026-09-27 09:00", "⏰ Final in 3h (Sun 2026-09-27 12:00)"),
-            ("2026-09-27 11:00", "⏰ Final in 1h (Sun 2026-09-27 12:00)"),
-            ("daily 06:00", "☀️ Open the day"),
-            ("daily 22:00", "🌙 Close the day"),
-        ]))
-        self.assertNotIn("https://", text)
+        self.assertEqual(md_notify_entries(text), [])
+        self.assertNotIn("⏰", text)
+        self.assertNotIn("☀️", text)
+        self.assertNotIn("🌙", text)
 
-    def test_no_row_carries_a_url_to_open(self):
-        """Zach, 2026-09-25 22:00: "the notification script is opening the URL again. Let's make it so it never
-        actually opens the URL". md-notify opens a row's Open cell, so the script writes none."""
+    def test_sync_emits_exception_pings_from_the_store_and_links_the_board_item(self):
+        # Compliance G1, G2: notify.py reads the store (human_review stops, open decisions, unexpected failures)
+        # and links to the board item in the Open cell.
         w = self.ws()
-        w.run("sync")
-        w.run("add", "--kind", "awaiting", "--what", "Robin to approve the deploy")
-        for line in w.queue.read_text().split("\n"):
-            if nt._is_data(line):
-                self.assertEqual(nt._cells(line)[3], "", line)
+        w.db.upsert_item(KEY, title="Upload size limit", stage="review", forge_state="open", human_review=True)
+        w.db.record_segment(
+            KEY, "review", 1,
+            started_at="2026-09-23T13:00:00-05:00",
+            ended_at="2026-09-23T13:30:00-05:00",
+            outcome="human_review",
+            runner="rev-1",
+        )
+        key2 = "github:example/repo#15"
+        w.db.upsert_item(key2, title="Cache warmup", stage="plan", forge_state="open")
+        w.db.add_decision(key2, "plan", "Split cache pool?")
+        key3 = "github:example/repo#18"
+        w.db.upsert_item(key3, title="Auth token", stage="implement", forge_state="open")
+        w.db.record_segment(
+            key3, "implement", 1,
+            started_at="2026-09-23T13:10:00-05:00",
+            ended_at="2026-09-23T13:45:00-05:00",
+            outcome="crashed",
+            runner="impl-3",
+        )
+        w.db.log_event(key3, "stage write failed: label offline")
 
-    def test_sync_and_add_clear_urls_already_in_owned_rows(self):
-        """A queue written by an earlier release keeps its Open cells until something rewrites the row."""
-        w = self.ws()
-        board = "https://claude.ai/artifact/board-7"
-        w.queue.parent.mkdir(parents=True)
-        w.queue.write_text(nt.TEMPLATE.replace(
-            "| When (CT) | Title | Message | Open |\n|---|---|---|---|\n",
-            "| When (CT) | Title | Message | Open |\n|---|---|---|---|\n"
-            f"| 2026-09-23 13:00 | 🙋 Awaiting you — deploy (13:00) | deploy | {board} |\n"
-            "| 2026-09-23 13:30 | Dentist | someone else's row | https://example.com/dentist |\n").replace(
-            "| Every | Title | Message | Open |\n|---|---|---|---|\n",
-            "| Every | Title | Message | Open |\n|---|---|---|---|\n"
-            f"| daily 06:00 | ☀️ Open the day | Open the day with the coordinator. | {board} |\n"))
-        w.run("add", "--kind", "stopped", "--what", "impl07")
-        self.assertNotIn(board, w.queue.read_text())
-        self.assertIn("https://example.com/dentist", w.queue.read_text())
-        w.queue.write_text(w.queue.read_text().replace("Open the day with the coordinator. |  |",
-                                                       f"Open the day with the coordinator. | {board} |"))
-        w.run("sync")
-        self.assertNotIn(board, w.queue.read_text())
-        self.assertIn("https://example.com/dentist", w.queue.read_text())
-
-    def test_a_warning_already_past_is_never_written(self):
-        """A one-shot row resurfaces every 15 minutes until tapped, so a past one would nag for nothing."""
-        w = self.ws()
-        w.run("sync")
-        for when, _ in md_notify_entries(w.queue.read_text()):
-            if not when.startswith("daily"):
-                self.assertGreater(datetime.strptime(when, "%Y-%m-%d %H:%M").replace(tzinfo=CT), NOW)
+        code, out = w.run("sync")
+        self.assertEqual(code, 0, out)
+        text = w.queue.read_text()
+        entries = md_notify_entries(text)
+        titles = [t for _, t in entries]
+        self.assertTrue(any("Upload size limit" in t or "#12" in t for t in titles), titles)
+        self.assertTrue(any("Split cache pool?" in t or "#15" in t for t in titles), titles)
+        self.assertTrue(any("impl-3" in t or "stage write failed" in t or "#18" in t for t in titles), titles)
+        # Every store-backed exception row links to its board item in the Open cell:
+        data_rows = [nt._cells(line) for line in text.split("\n") if nt._is_data(line)]
+        self.assertTrue(data_rows)
+        for cells in data_rows:
+            self.assertTrue(cells[3].startswith("http"), f"expected board item URL in Open cell, got {cells!r}")
+            self.assertIn("/issues/", cells[3])
 
     def test_second_sync_changes_nothing(self):
         w = self.ws()
+        w.db.upsert_item(KEY, title="Upload size limit", stage="review", forge_state="open", human_review=True)
         w.run("sync")
         before = w.queue.read_bytes()
         code, out = w.run("sync")
         self.assertEqual((code, out.strip()), (0, "notify: nothing to change"))
         self.assertEqual(w.queue.read_bytes(), before)
+
+    def test_refused_stage_or_board_write_emits_an_exception_ping(self):
+        # #714: refused board or stage writes notify the user as an unexpected failure.
+        w = self.ws()
+        code, out = w.run("add", "--kind", "stopped", "--what", "stage write refused on #12",
+                          "--message", "Kanban state changed outside the store", "--issue", KEY)
+        self.assertEqual(code, 0, out)
+        text = w.queue.read_text()
+        entries = md_notify_entries(text)
+        self.assertEqual(len(entries), 1)
+        self.assertIn("stage write refused on #12", entries[0][1])
+        data_rows = [nt._cells(line) for line in text.split("\n") if nt._is_data(line)]
+        self.assertIn("/issues/", data_rows[0][3])
 
     def test_add_goes_in_the_active_table(self):
         w = self.ws()
@@ -175,8 +179,6 @@ class NotifyTest(unittest.TestCase):
         code, out = w.run("add", "--kind", "awaiting", "--what", "CIMP 0.21.0")
         self.assertEqual(code, 0, out)
         lines = w.queue.read_text().split("\n")
-        row = next(i for i, x in enumerate(lines) if "Awaiting you" in x)
-        self.assertLess(row, lines.index("## Recurring"))
         self.assertIn(("2026-09-23 14:00", "🙋 Awaiting you — CIMP 0.21.0 (14:00)"), md_notify_entries("\n".join(lines)))
 
     def test_kinds(self):
@@ -213,8 +215,7 @@ class NotifyTest(unittest.TestCase):
         w = self.ws()
         w.queue.parent.mkdir(parents=True)
         original = ("# Mine\n\nSome prose I wrote.\n\n| When (CT) | Title | Message | Open | Snoozes |\n|---|---|---|---|---|\n"
-                    "| 2026-09-24 09:00 | Dentist | go | | 2 |\n\n## Recurring\n| Every | Title | Message | Open |\n|---|---|---|---|\n"
-                    "| mon 09:30 | Standup | join | |\n\n## Completed\n| When (CT) | Title | Message | Open |\n|---|---|---|---|\n"
+                    "| 2026-09-24 09:00 | Dentist | go | | 2 |\n\n## Completed\n| When (CT) | Title | Message | Open |\n|---|---|---|---|\n"
                     "| 2026-09-20 09:00 | Old | done | |\n")
         w.queue.write_text(original)
         w.run("add", "--kind", "gone", "--what", "impl02")
@@ -223,124 +224,6 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(len(added), 1)
         self.assertEqual([x for x in after if x not in added], original.split("\n"))
         self.assertEqual(after.index(added[0]), original.split("\n").index("| 2026-09-24 09:00 | Dentist | go | | 2 |") + 1)
-
-    def test_a_moved_deadline_replaces_its_future_rows(self):
-        w = self.ws()
-        w.run("sync")
-        (w.root / "CLAUDE.md").write_text(CLAUDE.replace("Final: 2026-09-27 12:00", "Final: 2026-09-27 18:00"))
-        code, out = w.run("sync")
-        titles = [t for _, t in md_notify_entries(w.queue.read_text())]
-        self.assertFalse([t for t in titles if "2026-09-27 12:00)" in t], out)
-        self.assertEqual(len([t for t in titles if "2026-09-27 18:00)" in t]), 3, out)
-        self.assertEqual(len([t for t in titles if t.startswith("⏰ Early")]), 2)
-
-    def test_a_removed_deadline_loses_future_rows_and_keeps_past_ones(self):
-        w = self.ws()
-        w.run("sync")
-        text = w.queue.read_text().replace("| When (CT) | Title | Message | Open |\n|---|---|---|---|\n",
-                                           "| When (CT) | Title | Message | Open |\n|---|---|---|---|\n| 2026-09-23 12:59 | ⏰ Early in 11h (Wed 23:59) | Due | |\n", 1)
-        w.queue.write_text(text)
-        (w.root / "CLAUDE.md").write_text(CLAUDE.replace("  - Early: 2026-09-23 23:59\n", ""))
-        w.run("sync")
-        titles = [t for _, t in md_notify_entries(w.queue.read_text())]
-        self.assertEqual([t for t in titles if t.startswith("⏰ Early")], ["⏰ Early in 11h (Wed 23:59)"])
-
-    def test_today_decision_adds_warnings_and_moving_it_removes_old_future_rows(self):
-        w = self.ws()
-        path = w.root / "daily/2026-09-23-tracker.md"
-        path.parent.mkdir()
-        path.write_text(tracker(("14:01", "deadline: Review 2026-09-27 16:00")))
-        w.run("sync")
-        titles = [title for _, title in md_notify_entries(w.queue.read_text())]
-        self.assertEqual(len([title for title in titles if "Review" in title and "2026-09-27 16:00" in title]), 3)
-        path.write_text(tracker(("14:01", "deadline: Review 2026-09-27 16:00"),
-                                ("14:02", "deadline: Review 2026-09-27 18:00")))
-        w.run("sync")
-        titles = [title for _, title in md_notify_entries(w.queue.read_text())]
-        self.assertFalse([title for title in titles if "Review" in title and "16:00" in title])
-        self.assertEqual(len([title for title in titles if "Review" in title and "18:00" in title]), 3)
-        before = w.queue.read_bytes()
-        self.assertEqual(w.run("sync")[1].strip(), "notify: nothing to change")
-        self.assertEqual(w.queue.read_bytes(), before)
-
-    def test_yesterday_decision_carries_forward_and_today_overrides_it(self):
-        w = self.ws()
-        directory = w.root / "daily"
-        directory.mkdir()
-        (directory / "2026-09-22-tracker.md").write_text(
-            tracker(("17:00", "deadline: Review 2026-09-27 16:00")))
-        w.run("sync")  # today's tracker does not exist yet
-        self.assertEqual(sum("Review" in title for _, title in md_notify_entries(w.queue.read_text())), 3)
-        (directory / "2026-09-23-tracker.md").write_text(
-            tracker(("14:01", "deadline: Review 2026-09-27 18:00")))
-        w.run("sync")
-        titles = [title for _, title in md_notify_entries(w.queue.read_text()) if "Review" in title]
-        self.assertEqual(len(titles), 3)
-        self.assertTrue(all("2026-09-27 18:00" in title for title in titles))
-
-    def test_no_time_decision_adds_no_warning(self):
-        w = self.ws()
-        path = w.root / "daily/2026-09-23-tracker.md"
-        path.parent.mkdir()
-        path.write_text(tracker(("14:01", "deadline: Exam, Sat 2026-09-26 (no time given)")))
-        w.run("sync")
-        self.assertNotIn("Exam", w.queue.read_text())
-
-    def test_same_weekday_time_next_week_gets_a_new_warning(self):
-        w = self.ws()
-        w.run("sync")
-        (w.root / "CLAUDE.md").write_text(CLAUDE.replace("Final: 2026-09-27 12:00", "Final: 2026-10-04 12:00"))
-        w.run("sync")
-        titles = [title for _, title in md_notify_entries(w.queue.read_text()) if "Final" in title]
-        self.assertEqual(len(titles), 3)
-        self.assertTrue(all("2026-10-04" in title for title in titles))
-
-    def test_legacy_warning_titles_migrate_without_losing_snooze_or_parked_state(self):
-        w = self.ws()
-        w.queue.parent.mkdir(parents=True)
-        w.queue.write_text(
-            "# Mine\n\n| When (CT) | Title | Message | Open | Snoozes |\n|---|---|---|---|---|\n"
-            "| 2026-09-23 23:30 | ⏰ Early in 3h (Wed 23:59) | Due 2026-09-23 23:59 | | 1 |\n"
-            "\n## Completed\n| When (CT) | Title | Message | Open |\n|---|---|---|---|\n"
-            "| 2026-09-23 22:59 | ⏰ Early in 1h (Wed 23:59) | Due 2026-09-23 23:59 | |\n")
-        w.run("sync")
-        text = w.queue.read_text()
-        self.assertIn("| 2026-09-23 23:30 | ⏰ Early in 3h (Wed 2026-09-23 23:59) | Due 2026-09-23 23:59 | | 1 |", text)
-        self.assertIn("## Completed", text)
-        self.assertIn("| 2026-09-23 22:59 | ⏰ Early in 1h (Wed 2026-09-23 23:59) | Due 2026-09-23 23:59 | |", text)
-        self.assertEqual(sum("Early in 1h" in title for _, title in md_notify_entries(text)), 0)
-
-    def test_parked_legacy_warning_from_previous_week_does_not_hide_new_warning(self):
-        w = self.ws()
-        w.queue.parent.mkdir(parents=True)
-        w.queue.write_text(
-            "# Mine\n\n## Completed\n| When (CT) | Title | Message | Open |\n|---|---|---|---|\n"
-            "| 2026-09-16 20:59 | ⏰ Early in 3h (Wed 23:59) | Due 2026-09-16 23:59 | |\n")
-        w.run("sync")
-        titles = [title for _, title in md_notify_entries(w.queue.read_text())]
-        self.assertIn("⏰ Early in 3h (Wed 2026-09-23 23:59)", titles)
-
-    def test_day_rows_follow_the_settings(self):
-        w = self.ws()
-        w.run("sync")
-        (w.root / "chief-of-stuff.toml").write_text(TOML + 'day_open = "07:15"\n')
-        code, out = w.run("sync")
-        entries = md_notify_entries(w.queue.read_text())
-        self.assertIn(("daily 07:15", "☀️ Open the day"), entries)
-        self.assertNotIn(("daily 06:00", "☀️ Open the day"), entries)
-        self.assertIn(("daily 22:00", "🌙 Close the day"), entries)
-
-    def test_a_hand_written_queue_gains_a_recurring_table(self):
-        w = self.ws()
-        w.queue.parent.mkdir(parents=True)
-        w.queue.write_text("# Mine\n\n| When (CT) | Title | Message | Open |\n|---|---|---|---|\n| 2026-09-24 09:00 | Dentist | go | |\n")
-        w.run("sync")
-        text = w.queue.read_text()
-        self.assertTrue(text.startswith("# Mine\n\n| When (CT) | Title | Message | Open |\n|---|---|---|---|\n| 2026-09-24 09:00 | Dentist | go | |\n"), text)
-        entries = md_notify_entries(text)
-        self.assertIn(("daily 06:00", "☀️ Open the day"), entries)
-        self.assertEqual(len([e for e in entries if e[1].startswith("⏰")]), 5)
-        self.assertLess(text.index("⏰"), text.index("## Recurring"))
 
     def test_a_later_when(self):
         w = self.ws()

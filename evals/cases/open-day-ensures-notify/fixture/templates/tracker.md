@@ -10,6 +10,4 @@
 | time | item | Robin's words |
 |---|---|---|
 
-## File ownership
-
 ## Log

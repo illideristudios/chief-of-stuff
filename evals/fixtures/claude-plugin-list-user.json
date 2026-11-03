@@ -1,0 +1,22 @@
+[
+  {
+    "id": "datetime-inject@ai-additions",
+    "version": "1.0.0",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "captured-install-path",
+    "installedAt": "2026-10-10T02:40:18.221Z",
+    "lastUpdated": "2026-10-10T02:40:18.221Z",
+    "errors": [
+      "Plugin datetime-inject not found in marketplace ai-additions"
+    ],
+    "errorDetails": [
+      {
+        "type": "plugin-not-found",
+        "plugin": "datetime-inject",
+        "marketplace": "ai-additions"
+      }
+    ],
+    "projectEnabled": false
+  }
+]

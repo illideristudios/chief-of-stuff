@@ -1,0 +1,5 @@
+{
+  "name": "chief-worker-guard",
+  "version": "0.1.0",
+  "description": "Engine-owned worker gates and the report/ask channel"
+}

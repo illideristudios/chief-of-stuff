@@ -14,8 +14,6 @@
 |---|---|---|
 | 08:00 | Retry jitter, Locale fallback, Export header | "yes, dispatch them" |
 
-## File ownership
-
 ## Log
 
 - 08:00 opened the day

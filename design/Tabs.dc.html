@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Board tabs</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+SC:wght@600;700&amp;display=swap">
+<style>
+body{margin:0;background:#f4efe1}
+</style>
+</helmet>
+<nav aria-label="Board sections" style="display: flex; flex-wrap: wrap; align-items: flex-end; column-gap: 28px; border-bottom: 1px solid #ddd3bd; background: #f4efe1;">
+  <sc-for list="{{tabs}}" as="t" hint-placeholder-count="7">
+    <a href="{{t.href}}" aria-current="{{t.current}}" style="display: inline-flex; align-items: baseline; gap: 7px; min-height: 34px; box-sizing: border-box; padding: 8px 0 7px; font-family: 'Cormorant SC', Georgia, serif; font-size: 15.5px; font-weight: 600; letter-spacing: .08em; text-decoration: none; margin-bottom: -1px; color: {{t.color}}; box-shadow: {{t.underline}};">{{t.label}}<span title="{{t.why}}" style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 700; letter-spacing: 0; color: {{t.tone}};">{{t.count}}</span></a>
+  </sc-for>
+</nav>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"current":{"editor":"enum","options":["Board","Workers","Dispatch","Since you last looked","Epics","Decisions","Limits"],"default":"Board"},"parent":{"editor":"boolean","default":false},"$preview":{"width":1216,"height":34}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var current = this.props.current || 'Board';
+    var parent = this.props.parent === true || this.props.parent === 'true';
+    var TABS = [
+      ['Board', 'Flow.dc.html', '', '', ''],
+      ['Workers', 'Workers.dc.html', '1', '1 worker needs input', '#a3402b'],
+      ['Dispatch', 'Dispatch.dc.html', '4', '4 ready to dispatch', '#1e6b52'],
+      ['Since you last looked', 'Since.dc.html', '6', '6 need input', '#a3402b'],
+      ['Epics', 'Goals.dc.html', '3', '2 at risk · 1 late', '#a8660f'],
+      ['Decisions', 'Decisions.dc.html', '2', '2 pending', '#8a6c30'],
+      ['Limits', 'Limits.dc.html', '', '', '']
+    ];
+    return {
+      tabs: TABS.map(function (t) {
+        var on = t[0] === current;
+        return {
+          label: t[0], href: t[1], count: t[2], why: t[3] || undefined, tone: t[4] || 'inherit',
+          current: on && !parent ? 'page' : undefined,
+          color: on ? '#2f2630' : '#6e6470',
+          underline: on ? (parent ? 'inset 0 -1px 0 #2f2630' : 'inset 0 -3px 0 #2f2630') : 'none'
+        };
+      })
+    };
+  }
+}
+</script>
+</body>
+</html>

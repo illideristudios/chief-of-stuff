@@ -1,11 +1,12 @@
 {
   "name": "chief-of-stuff",
   "description": "Coordinator for daily work: maintains the tracker and board, dispatches ready one-shot tasks automatically, and asks before new interactive sessions. Supports Claude Code and the versioned cross-runtime launcher.",
-  "version": "0.128.68",
+  "version": "0.129.126",
   "author": {
     "name": "Zach Gardner",
     "email": "locriani@gmail.com"
   },
+  "repository": "https://github.com/illideristudios/chief-of-stuff",
   "license": "MIT",
   "keywords": [
     "agent",
@@ -13,5 +14,12 @@
     "daily-log",
     "planning",
     "dispatch"
+  ],
+  "dependencies": [
+    {
+      "name": "datetime-inject",
+      "marketplace": "ai-additions",
+      "version": "^1.0"
+    }
   ]
 }

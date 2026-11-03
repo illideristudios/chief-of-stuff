@@ -6,14 +6,11 @@ import fcntl
 import hashlib
 import json
 import os
-import plistlib
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,46 +19,15 @@ import notify
 from notify import configuration, sync_workspace
 from workspace import ConfigError, daily_trackers
 from settings import SettingsError
+from supervisor import ServiceError, atomic_write, label, load_agent, lock, state_dir, unload_agent
 
 POLL = 5
 RECONCILE = 60
 RELEASE = Path(__file__).resolve().parent.parent
 
 
-class ServiceError(RuntimeError):
-    pass
-
-
-def atomic_write(path: Path, data: bytes, mode: int | None = None):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        if mode is not None:  # mkstemp makes 0600; a served page is world-readable
-            os.chmod(name, mode)
-        os.replace(name, path)
-    finally:
-        Path(name).unlink(missing_ok=True)
-
-
-def state_dir(root: Path) -> Path:
-    return root.resolve() / ".chief-of-stuff"
-
-
-@contextmanager
 def instance_lock(root: Path, name: str = "notify-service.lock"):
-    directory = state_dir(root)
-    directory.mkdir(parents=True, exist_ok=True)
-    with (directory / name).open("a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ServiceError("notification service already running or being managed") from None
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+    return lock(state_dir(root) / name)
 
 
 def fingerprints(root: Path, now: datetime) -> tuple:
@@ -149,25 +115,6 @@ def status(root: Path) -> dict:
     return dict(record, running=running)
 
 
-def label(root: Path) -> str:
-    key = hashlib.sha256(os.fsencode(root.resolve())).hexdigest()[:20]
-    return f"com.chief-of-stuff.notify.{key}"
-
-
-def launchctl(*args: str, missing_ok: bool = False) -> bool:
-    result = subprocess.run(["/bin/launchctl", *args], capture_output=True, text=True, timeout=15)
-    if result.returncode:
-        if missing_ok and any(word in result.stderr.lower() for word in
-                              ("could not find service", "no such process", "service not found")):
-            return False
-        raise ServiceError(result.stderr.strip() or f"launchctl exited {result.returncode}")
-    return True
-
-
-def job_path(root: Path, jobs_dir: Path | None) -> Path:
-    return (jobs_dir or Path.home() / "Library/LaunchAgents") / f"{label(root)}.plist"
-
-
 def require_macos():
     if sys.platform != "darwin":
         raise ServiceError("managed notifications require macOS; run notify serve under your host supervisor")
@@ -180,58 +127,21 @@ def ensure(root: Path, jobs_dir: Path | None = None) -> str:
         return "notify: off"
     require_macos()
     with instance_lock(root, "notify-management.lock"):
-        name = label(root)
-        target = f"gui/{os.getuid()}/{name}"
         directory = state_dir(root)
-        path = job_path(root, jobs_dir)
-        desired = {"Label": name,
+        desired = {"Label": label("notify", root),
                    "ProgramArguments": [str(Path(sys.executable).resolve()),
                                         str(RELEASE / "scripts/notify_service.py"), "--root", str(root), "serve"],
                    "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True,
                    "ThrottleInterval": 10,
                    "StandardOutPath": str(directory / "notify-service.log"),
                    "StandardErrorPath": str(directory / "notify-service.log")}
-        existing = plistlib.loads(path.read_bytes()) if path.exists() else None
-        if existing is not None and (existing.get("Label") != name or
-                                     existing.get("WorkingDirectory") != str(root)):
-            raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
-        loaded = launchctl("print", target, missing_ok=True)
-        if existing == desired and loaded:
-            return "notify: serving"
-        if loaded:
-            launchctl("bootout", target)
-            time.sleep(0.05)
-        atomic_write(path, plistlib.dumps(desired))
-        # stop removes the plist; enable also recovers a job disabled externally.
-        launchctl("enable", target)
-        for attempt in range(5):
-            try:
-                launchctl("bootstrap", f"gui/{os.getuid()}", str(path))
-                break
-            except ServiceError as exc:
-                if "Input/output error" in str(exc) and attempt < 4:
-                    time.sleep(0.1 * (attempt + 1))
-                    launchctl("bootout", target, missing_ok=True)
-                    continue
-                raise
-        return "notify: restarted" if existing or loaded else "notify: started"
+        return "notify: " + load_agent(desired, jobs_dir)
 
 
 def stop(root: Path, jobs_dir: Path | None = None) -> str:
     require_macos()
     with instance_lock(root, "notify-management.lock"):
-        path = job_path(root, jobs_dir)
-        target = f"gui/{os.getuid()}/{label(root)}"
-        if path.exists():
-            job = plistlib.loads(path.read_bytes())
-            if job.get("Label") != label(root) or job.get("WorkingDirectory") != str(root.resolve()):
-                raise ServiceError(f"refusing to remove unrelated LaunchAgent: {path}")
-        # Remove the login registration first so an interrupted stop cannot leave
-        # a job which reappears at the next login.
-        path.unlink(missing_ok=True)
-        if launchctl("print", target, missing_ok=True):
-            launchctl("bootout", target)
-            time.sleep(0.05)
+        unload_agent(label("notify", root), root.resolve(), jobs_dir)
         return "notify: stopped"
 
 

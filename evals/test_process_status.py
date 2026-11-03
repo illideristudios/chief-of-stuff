@@ -26,17 +26,21 @@ class ProcessStatusTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        self.tree = self.root / "worker-tree"
+        self.tree.mkdir()
+        old_tree = self.root / "old-tree"
+        old_tree.mkdir()
         folder = self.root / ".chief-of-stuff" / "sessions"
         session_exec.register(folder / "worker.json", runtime="cursor", name="worker",
-                              worktree="/tmp/worker-tree", pid=123)
+                              worktree=str(self.tree), pid=123)
         session_exec.register(folder / "old.json", runtime="codex", name="old",
-                              worktree="/tmp/old-tree", pid=456)
+                              worktree=str(old_tree), pid=456)
 
     def test_batch_check_verifies_identity_and_reports_missing_and_unregistered(self):
         def exists(pid):
             return pid != 789
 
-        probe = mock.Mock(returncode=0, stdout=(" 123 /bin/agent --workspace /tmp/worker-tree\n"
+        probe = mock.Mock(returncode=0, stdout=(f" 123 /bin/agent --workspace {self.tree}\n"
                                                    " 456 /bin/other --workspace /tmp/elsewhere\n"
                                                    " 999 /bin/python\n"))
         with mock.patch.object(process_status, "process_exists", side_effect=exists), \
@@ -100,6 +104,8 @@ class OneShotRunsTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         (self.root / "CLAUDE.md").write_text(CLAUDE)
+        self.tree = self.root / "worker-tree"
+        self.tree.mkdir()
         self.alive = {LIVE}
         self.tracker(*TASKS)
 
@@ -119,7 +125,7 @@ class OneShotRunsTests(unittest.TestCase):
 
     def register(self, pid: int) -> None:
         session_exec.register(self.root / ".chief-of-stuff" / "sessions" / "worker.json", runtime="cursor",
-                              name="worker", worktree="/tmp/worker-tree", pid=pid)
+                              name="worker", worktree=str(self.tree), pid=pid)
 
     def promptly(self, fn):
         """`fn()` in a daemon thread: a reader that hangs (a FIFO) fails here instead of hanging the suite."""
@@ -149,7 +155,7 @@ class OneShotRunsTests(unittest.TestCase):
         return {tree.name: task for tree, task in found.items()}
 
     def processes(self, *pids: str) -> tuple[str, list[dict]]:
-        probe = mock.Mock(returncode=0, stdout="".join(f" {pid} /bin/agent --workspace /tmp/worker-tree\n"
+        probe = mock.Mock(returncode=0, stdout="".join(f" {pid} /bin/agent --workspace {self.tree}\n"
                                                      for pid in self.alive))
         out, err = io.StringIO(), io.StringIO()
         with self.alive_patch(), mock.patch.object(process_status.subprocess, "run", return_value=probe), \

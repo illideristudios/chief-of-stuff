@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Decision page</title>
+<script src="lib/86a3e9940611.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/ee8b56df405b.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/c271ee5c70f2.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/b80617d9b7e8.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fddc117a5ff1.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/1ca85659ab25.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/d8bf25eb11d0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/624ea7e85a53.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/bab9dc1971b0.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/261638ad9761.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/517fcb8cabb3.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/b34c10a1ffe0.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/43dc1b9a0c96.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/5be63e946cc5.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/dedb7e4dce28.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3df86f009f15.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/4bb93aca54b3.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/967b38372db4.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/9a9defceff14.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/f1c49bfd357d.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5c1cb227aa5a.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/1a2f3006ecc7.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/b3cedae80e66.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/071a53d2119e.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/455dfdb0f51a.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/50e2fc3909a0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/9777be10ff78.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5bf655ce1293.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/ea97db9e8f8b.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/156f0047d272.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3b1c199b3a86.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/aab9ff2ff8f0.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+<style>
+body{margin:0;font-family:"Alegreya Sans","Gill Sans",system-ui,sans-serif;background:#f4efe1;color:#2f2630}
+a{color:#8a6c30}a:hover{color:#6b5325}
+p{margin:0}
+.h2{margin:0 0 6px;font-family:'Cormorant SC',Georgia,serif;font-size:16px;font-weight:600;letter-spacing:.1em}
+.card{background:#fbf8ef;border:1px solid #ddd3bd;border-radius:5px;padding:10px 14px}
+.cap{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6e6470}
+.ref{font-family:ui-monospace,monospace;font-size:.88em;color:#8a6c30;text-decoration:none;border-bottom:1px dotted #a7843e;background:#efe7d3;padding:0 3px;border-radius:3px;white-space:nowrap}
+.ref::before{content:attr(data-k);font-size:.8em;color:#6e6470;margin-right:3px}
+.chip{font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:0 6px}
+.tl{display:grid;grid-template-columns:70px 14px minmax(0,1fr);gap:0 10px;padding:6px 0}
+.tl+.tl{border-top:1px dotted #ddd3bd}
+.tl .t{font-family:ui-monospace,monospace;font-size:12.5px;color:#6e6470}
+.tl .dot{width:9px;height:9px;border-radius:50%;margin-top:5px}
+.opt{display:grid;grid-template-columns:44px minmax(0,1fr);gap:2px 8px;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer}
+.opt{padding:8px 6px;margin:0 -6px;width:calc(100% + 12px);box-sizing:border-box;border-radius:3px}
+.opt+.opt{border-top:1px dotted #ddd3bd}
+.opt:hover{background:#f4efe1}
+.opt input{accent-color:#a7843e;margin:0 4px 0 0;vertical-align:1px}
+.opt .k{font-family:ui-monospace,monospace;font-weight:700;font-size:16px;color:#6e6470}
+.tag{font-size:10px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:#8a6c30;margin-left:6px}
+.wi{display:flex;gap:8px;align-items:center}
+.wi input{flex-grow:1;min-width:0;margin:0;font:inherit;color:#2f2630;background:#f4efe1;border:1px solid #ddd3bd;border-radius:3px;padding:4px 8px}
+.wi button{font:inherit;font-size:13px;color:#8a6c30;background:#efe7d3;border:1px solid #a7843e;border-radius:3px;padding:3px 12px;cursor:pointer}
+svg text{font-family:"Alegreya Sans",system-ui,sans-serif}
+svg .t{font-size:14px;font-weight:700;fill:#2f2630}
+svg .tm{font-family:ui-monospace,monospace;font-size:10.5px;fill:#8a6c30}
+svg .tl{font-size:11.5px;fill:#6e6470}
+svg .halo{paint-order:stroke;stroke:#fbf8ef;stroke-width:4px}
+</style>
+</helmet>
+
+<div style="width: 1280px; height: 1924px; box-sizing: border-box; padding: 24px 32px 22px; background: #f4efe1; color: #2f2630; display: flex; flex-direction: column; gap: 16px; overflow: hidden; font-size: 14px; line-height: 1.5;">
+
+  <div style="margin: -12px 0 -4px;"><dc-import name="Tabs" current="Decisions" parent="true" hint-size="100%,34px"></dc-import></div>
+
+  <div style="display: flex; align-items: flex-end; gap: 20px; border-bottom: 1px solid #a7843e; padding-bottom: 10px;">
+    <div style="flex-grow: 1;">
+      <div style="font-size: 12.5px; color: #6e6470;">Decision · cache · Sat 26 Sep · asked 01:41 · holds <a href="Goal.dc.html">&amp;14 Demo</a></div>
+      <h1 style="margin: 2px 0 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 27px; font-weight: 600; letter-spacing: .04em;">Cache warmup: keep the warm pool or drop it</h1>
+    </div>
+    <span class="chip" style="color: #8a6c30; border: 1px solid #a7843e; margin-bottom: 4px;">PENDING</span>
+  </div>
+
+  <div class="card" style="border-top: 3px solid #a7843e; display: flex; flex-direction: column; gap: 4px;">
+    <span class="cap">ask</span>
+    <strong style="font-size: 16px;">Should the cache keep a warm pool of 20 connections, or start cold?</strong>
+    <p style="color: #6e6470;">On A, <a class="ref" data-k="MR" href="Source58.dc.html">!58</a> merges as is and <a class="ref" data-k="issue" href="#">#111</a> leaves triage.</p>
+  </div>
+
+  <div>
+    <h2 class="h2">WHERE IT SITS</h2>
+    <figure class="card" style="margin: 0; padding: 8px 10px 10px;">
+      <svg role="img" aria-label="Requests pass through the gateway and session service to the cache, which the in-flight warm pool keeps connected to the database." sc-camel-view-box="0 0 1196 330" width="1196" height="330" style="display: block;">
+        <defs>
+          <marker id="arr" sc-camel-view-box="0 0 10 10" sc-camel-ref-x="9" sc-camel-ref-y="5" sc-camel-marker-width="7" sc-camel-marker-height="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2b3542"></path></marker>
+          <marker id="arr-if" sc-camel-view-box="0 0 10 10" sc-camel-ref-x="9" sc-camel-ref-y="5" sc-camel-marker-width="7" sc-camel-marker-height="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a8660f"></path></marker>
+          <marker id="arr-ds" sc-camel-view-box="0 0 10 10" sc-camel-ref-x="9" sc-camel-ref-y="5" sc-camel-marker-width="7" sc-camel-marker-height="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2c58a0"></path></marker>
+        </defs>
+
+        <!-- edges -->
+        <line x1="130" y1="90" x2="208" y2="90" stroke="#2b3542" stroke-width="1.5" marker-end="url(#arr)"></line>
+        <text class="tl halo" x="169" y="80" text-anchor="middle">requests</text>
+        <line x1="378" y1="90" x2="456" y2="90" stroke="#2b3542" stroke-width="1.5" marker-end="url(#arr)"></line>
+        <text class="tl halo" x="417" y="80" text-anchor="middle">reads session</text>
+        <line x1="626" y1="90" x2="704" y2="90" stroke="#2b3542" stroke-width="1.5" marker-end="url(#arr)"></line>
+        <text class="tl halo" x="665" y="80" text-anchor="middle">get / set</text>
+        <line x1="874" y1="90" x2="992" y2="90" stroke="#2b3542" stroke-width="1.5" marker-end="url(#arr)"></line>
+        <text class="tl halo" x="933" y="80" text-anchor="middle">miss: query</text>
+        <path d="M789,215 C 900,215 960,160 1010,128" fill="none" stroke="#a8660f" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arr-if)"></path>
+        <text class="tl halo" x="905" y="202" text-anchor="middle" style="fill:#a8660f">holds 20 open</text>
+        <line x1="789" y1="120" x2="789" y2="180" stroke="#a8660f" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arr-if)"></line>
+        <text class="tl halo" x="797" y="155">warms</text>
+        <line x1="540" y1="285" x2="700" y2="235" stroke="#2c58a0" stroke-width="1.5" stroke-dasharray="2 3" marker-end="url(#arr-ds)"></line>
+        <text class="tl halo" x="610" y="247" text-anchor="middle" style="fill:#2c58a0">caps</text>
+
+        <!-- nodes -->
+        <rect x="20" y="62" width="110" height="56" rx="14" fill="#f1eee6" stroke="#8a8f98" stroke-width="1.5"></rect>
+        <text class="t" x="75" y="88" text-anchor="middle" style="fill:#5f6b7b">Clients</text>
+        <text class="tl" x="75" y="106" text-anchor="middle">browser, mobile</text>
+
+        <rect x="210" y="56" width="168" height="68" fill="#fbf8ef" stroke="#2b3542" stroke-width="1.5"></rect>
+        <text class="t" x="294" y="83" text-anchor="middle">API gateway</text>
+        <a href="#"><text class="tm" x="294" y="104" text-anchor="middle">src/gateway/</text></a>
+
+        <rect x="458" y="56" width="168" height="68" fill="#fbf8ef" stroke="#2b3542" stroke-width="1.5"></rect>
+        <text class="t" x="542" y="83" text-anchor="middle">Session service</text>
+        <a href="#"><text class="tm" x="542" y="104" text-anchor="middle">src/session/service.py</text></a>
+
+        <rect x="706" y="56" width="168" height="68" fill="#fbf8ef" stroke="#2b3542" stroke-width="1.5"></rect>
+        <text class="t" x="790" y="83" text-anchor="middle">Cache</text>
+        <a href="Source58.dc.html"><text class="tm" x="790" y="104" text-anchor="middle">src/cache/client.py</text></a>
+
+        <rect x="994" y="56" width="180" height="68" rx="14" fill="#f1eee6" stroke="#c9533a" stroke-width="2"></rect>
+        <text class="t" x="1084" y="83" text-anchor="middle" style="fill:#5f6b7b">Database</text>
+        <text class="tl" x="1084" y="104" text-anchor="middle" style="fill:#c9533a;font-weight:700">limit 320 connections</text>
+
+        <rect x="706" y="182" width="168" height="68" fill="#f6ead6" stroke="#a8660f" stroke-width="1.5" stroke-dasharray="6 4"></rect>
+        <text class="t" x="790" y="209" text-anchor="middle">Warm pool · 20</text>
+        <a href="Source58.dc.html"><text class="tm" x="790" y="230" text-anchor="middle">src/cache/pool.py · !58</text></a>
+
+        <rect x="380" y="262" width="180" height="56" fill="#dfe8f6" stroke="#2c58a0" stroke-width="1.5" stroke-dasharray="2 3"></rect>
+        <text class="t" x="470" y="286" text-anchor="middle" style="fill:#2c58a0">Connection budget</text>
+        <a href="#"><text class="tm" x="470" y="306" text-anchor="middle" style="fill:#2c58a0">architecture.md §4.2</text></a>
+      </svg>
+      <figcaption style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 12px; color: #6e6470; border-top: 1px dotted #ddd3bd; padding-top: 7px; margin-top: 4px;">
+        <span class="chip" style="border: 1.5px solid #2b3542; color: #2b3542;">DEPLOYED</span>
+        <span class="chip" style="border: 1.5px dashed #a8660f; color: #a8660f; background: #f6ead6;">IN FLIGHT</span>
+        <span class="chip" style="border: 1.5px dotted #2c58a0; color: #2c58a0; background: #dfe8f6;">DESIGNED</span>
+        <span class="chip" style="border: 2px solid #c9533a; color: #c9533a;">NEEDS INPUT</span>
+        <span class="chip" style="border: 1.5px solid #8a8f98; color: #5f6b7b; border-radius: 9px;">EXTERNAL</span>
+        <span>Not drawn: auth, the job queue, other database clients.</span>
+      </figcaption>
+    </figure>
+  </div>
+
+  <div>
+    <h2 class="h2">MODULE GRAPH · <a class="ref" data-k="MR" href="Source58.dc.html">!58</a> <a href="Source58.dc.html" style="font-family: 'Alegreya Sans', system-ui, sans-serif; font-size: 12px; letter-spacing: 0;">source &amp; diff, with A · B · C as diffs</a> <span class="cap" style="letter-spacing: .06em;">2 views · at most 12 modules each</span></h2>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+      <figure class="card" style="margin: 0; padding: 8px 10px 10px;">
+        <div class="cap" style="margin-bottom: 4px;">1 · cache.client</div>
+        <svg role="img" aria-label="cache.client, changed, is imported by session.service and no longer imports cache.legacy, which is removed." sc-camel-view-box="0 0 560 150" width="560" height="150" style="display: block;">
+          <defs><marker id="mg1" sc-camel-view-box="0 0 10 10" sc-camel-ref-x="9" sc-camel-ref-y="5" sc-camel-marker-width="7" sc-camel-marker-height="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2f2630"></path></marker></defs>
+          <line x1="160" y1="75" x2="208" y2="75" stroke="#2f2630" stroke-width="1.5" marker-end="url(#mg1)"></line>
+          <line x1="360" y1="75" x2="398" y2="75" stroke="#6e6470" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#mg1)"></line>
+          <rect x="10" y="48" width="150" height="54" fill="#fbf8ef" stroke="#8a8f98" stroke-width="1.5"></rect>
+          <text class="t" x="85" y="72" text-anchor="middle" style="fill:#5f6b7b">session.service</text>
+          <text class="tl" x="85" y="90" text-anchor="middle">context</text>
+          <rect x="210" y="48" width="150" height="54" fill="#e3eef7" stroke="#0072B2" stroke-width="2"></rect>
+          <a href="Source58.dc.html"><text class="t" x="285" y="72" text-anchor="middle" style="fill:#0072B2">cache.client</text></a>
+          <text class="tm" x="285" y="91" text-anchor="middle">+42 −8</text>
+          <rect x="400" y="48" width="150" height="54" fill="#fbeee6" stroke="#D55E00" stroke-width="1.5" stroke-dasharray="6 4"></rect>
+          <text class="t" x="475" y="72" text-anchor="middle" style="fill:#D55E00">cache.legacy</text>
+          <text class="tl" x="475" y="90" text-anchor="middle">removed</text>
+        </svg>
+      </figure>
+      <figure class="card" style="margin: 0; padding: 8px 10px 10px;">
+        <div class="cap" style="margin-bottom: 4px;">2 · cache.pool</div>
+        <svg role="img" aria-label="cache.pool is new; cache.client imports it, and it imports db.driver, which no rule allows." sc-camel-view-box="0 0 560 150" width="560" height="150" style="display: block;">
+          <defs><marker id="mg2" sc-camel-view-box="0 0 10 10" sc-camel-ref-x="9" sc-camel-ref-y="5" sc-camel-marker-width="6" sc-camel-marker-height="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#009E73"></path></marker></defs>
+          <line x1="160" y1="75" x2="206" y2="75" stroke="#009E73" stroke-width="3" marker-end="url(#mg2)"></line>
+          <line x1="360" y1="75" x2="396" y2="75" stroke="#009E73" stroke-width="3" marker-end="url(#mg2)"></line>
+          <rect x="10" y="48" width="150" height="54" fill="#fbf8ef" stroke="#8a8f98" stroke-width="1.5"></rect>
+          <text class="t" x="85" y="72" text-anchor="middle" style="fill:#5f6b7b">cache.client</text>
+          <text class="tl" x="85" y="90" text-anchor="middle">view 1</text>
+          <rect x="210" y="48" width="150" height="54" fill="#e2f3ec" stroke="#009E73" stroke-width="2"></rect>
+          <a href="Source58.dc.html"><text class="t" x="285" y="72" text-anchor="middle" style="fill:#00785a">cache.pool</text></a>
+          <text class="tm" x="285" y="91" text-anchor="middle">new · +61</text>
+          <rect x="400" y="48" width="150" height="54" fill="#fbf8ef" stroke="#E69F00" stroke-width="2.5"></rect>
+          <text class="t" x="475" y="72" text-anchor="middle">db.driver</text>
+          <text class="tl" x="475" y="90" text-anchor="middle" style="fill:#a8660f;font-weight:700">drift</text>
+          <a href="Source58.dc.html"><text class="tm" x="475" y="125" text-anchor="middle">cache/pool.py:3</text></a>
+        </svg>
+      </figure>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 12px; color: #6e6470; padding-top: 7px;">
+      <span class="chip" style="border: 2px solid #009E73; color: #00785a; background: #e2f3ec;">NEW</span>
+      <span class="chip" style="border: 2px solid #0072B2; color: #0072B2; background: #e3eef7;">CHANGED</span>
+      <span class="chip" style="border: 1.5px dashed #D55E00; color: #D55E00; background: #fbeee6;">REMOVED</span>
+      <span class="chip" style="border: 2.5px solid #E69F00; color: #a8660f;">DRIFT</span>
+      <span style="font-family: ui-monospace, monospace;">nodes +1 −1 ~1 · edges +2 −1 · drift 1</span>
+      <span>Not drawn: 9 test modules (tests.*, evals.*), 5 more.</span>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; flex-grow: 1; min-height: 0;">
+
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div>
+        <h2 class="h2">WHAT CHANGED</h2>
+        <div class="card" style="display: flex; flex-direction: column; gap: 6px;">
+          <p>Cold starts after a deploy take 9–14 s on the first request (<a class="ref" data-k="log" href="#">deploy-0925-1620</a>); with the pool they take 180 ms.</p>
+          <p>The pool holds 20 idle connections, 6% of the database's 320 (<a class="ref" data-k="code" href="Source58.dc.html">config/db.toml:14</a>).</p>
+        </div>
+      </div>
+
+      <div>
+        <h2 class="h2">WHERE IT STANDS</h2>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+          <div class="card" style="display: flex; flex-direction: column; gap: 4px;">
+            <span class="chip" style="align-self: flex-start; color: #fff; background: #009e73;">DONE</span>
+            <p><b>Pool change</b>: <a class="ref" data-k="MR" href="Source58.dc.html">!58</a> passed, one approval.</p>
+          </div>
+          <div class="card" style="display: flex; flex-direction: column; gap: 4px;">
+            <span class="chip" style="align-self: flex-start; color: #2f2630; background: #e69f00;">OPEN</span>
+            <p><b>Connection budget</b>: <a class="ref" data-k="issue" href="#">#111</a> in triage, needs input.</p>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 class="h2">HOW IT GOT HERE</h2>
+        <div class="card" style="padding: 4px 14px;">
+          <div class="tl"><span class="t">Fri 16:20</span><span class="dot" style="background: #c9533a;"></span><span>Deploy; first requests timed out for 12 s. <a class="ref" data-k="log" href="#">deploy-0925-1620</a></span></div>
+          <div class="tl"><span class="t">Fri 19:05</span><span class="dot" style="background: #0072b2;"></span><span>Warm pool of 20 opened for review. <a class="ref" data-k="MR" href="Source58.dc.html">!58</a> <a class="ref" data-k="commit" href="#">a41c9e2</a></span></div>
+          <div class="tl"><span class="t">Fri 21:40</span><span class="dot" style="background: #009e73;"></span><span>Pipeline passed; one approval. <a class="ref" data-k="pipeline" href="#">#8812</a></span></div>
+          <div class="tl"><span class="t">00:30</span><span class="dot" style="background: #009e73;"></span><span>Review asked how many connections the database allows. <a class="ref" data-k="note" href="#">!58#note_2291</a></span></div>
+          <div class="tl"><span class="t">01:02</span><span class="dot" style="background: #2c58a0;"></span><span>The design caps each service's connections; no cap is set yet. <a class="ref" data-k="doc" href="#">architecture.md §4.2</a></span></div>
+          <div class="tl"><span class="t">01:41</span><span class="dot" style="background: #e69f00;"></span><span>Budget work needs input in triage. <a class="ref" data-k="issue" href="#">#111</a></span></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div>
+        <h2 class="h2">OPTIONS</h2>
+        <div class="card" style="padding: 4px 14px; border-top: 3px solid #a7843e; box-shadow: 0 2px 6px rgba(47,38,48,.08);">
+          <label class="opt">
+            <span class="k"><input type="radio" name="answer"> A</span>
+            <b>Keep the pool<span class="tag">recommended</span></b>
+            <span></span><p>Merge <a class="ref" data-k="MR" href="Source58.dc.html">!58</a> as is; 20 idle connections held.</p>
+          </label>
+          <label class="opt">
+            <span class="k"><input type="radio" name="answer"> B</span>
+            <b>Start cold</b>
+            <span></span><p>Close <a class="ref" data-k="MR" href="Source58.dc.html">!58</a>; first request after a deploy stays at 9–14 s.</p>
+          </label>
+          <label class="opt">
+            <span class="k"><input type="radio" name="answer"> C</span>
+            <b>Pool of 5</b>
+            <span></span><p>Change <a class="ref" data-k="code" href="Source58.dc.html">src/cache/pool.py:31</a>; warm start 400 ms, 5 connections held.</p>
+          </label>
+          <label class="opt">
+            <span class="k"><input type="radio" name="answer"> D</span>
+            <b>Your own answer</b>
+            <span></span><span class="wi"><input type="text" placeholder="write it here" aria-label="Your own answer"><button type="submit">save</button></span>
+          </label>
+        </div>
+      </div>
+
+      <div>
+        <h2 class="h2">RECOMMENDATION</h2>
+        <div class="card"><p>A: 20 connections is 6% of the limit, and the timeouts hit users on every deploy.</p></div>
+      </div>
+
+      <div>
+        <h2 class="h2">IF YOU DON'T ANSWER</h2>
+        <div class="card" style="border-left: 3px solid #6e6470;"><p>The pool stays; <a class="ref" data-k="issue" href="#">#111</a> waits in triage.</p></div>
+      </div>
+
+      <div>
+        <h2 class="h2">REFERENCES</h2>
+        <div class="card" style="display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; gap: 5px 10px; font-size: 13px; align-items: baseline;">
+          <span class="cap">MR</span><a href="Source58.dc.html">!58 Warm the cache pool</a><span style="color: #6e6470; font-size: 12px;">open · passed</span>
+          <span class="cap">issue</span><a href="#">#111 Connection budget per service</a><span style="color: #6e6470; font-size: 12px;">triage · needs input</span>
+          <span class="cap">code</span><a href="Source58.dc.html" style="font-family: ui-monospace, monospace; font-size: 12px;">src/cache/pool.py L24–58</a><span style="color: #6e6470; font-size: 12px; font-family: ui-monospace, monospace;">@ a41c9e2</span>
+          <span class="cap">code</span><a href="Source58.dc.html" style="font-family: ui-monospace, monospace; font-size: 12px;">config/db.toml L14</a><span style="color: #6e6470; font-size: 12px; font-family: ui-monospace, monospace;">@ main</span>
+          <span class="cap">doc</span><a href="#">architecture.md §4.2 Connection budgets</a><span style="color: #6e6470; font-size: 12px;">designed</span>
+          <span class="cap">note</span><a href="Source58.dc.html">!58 review thread</a><span style="color: #6e6470; font-size: 12px;">00:30 · open</span>
+          <span class="cap">pipeline</span><a href="#">#8812</a><span style="color: #6e6470; font-size: 12px;">passed · Fri 21:40</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="border-top: 1px solid #ddd3bd; padding-top: 8px; font-size: 12.5px; color: #6e6470;">Answer here or in chat: A, B, C, or D in your own words.</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script="" data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:1924}}">
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+
+
+</body></html>

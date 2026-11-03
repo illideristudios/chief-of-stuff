@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Dispatch</title>
+<script src="lib/86a3e9940611.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/ee8b56df405b.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/c271ee5c70f2.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/b80617d9b7e8.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fddc117a5ff1.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/1ca85659ab25.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/d8bf25eb11d0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/624ea7e85a53.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/bab9dc1971b0.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/261638ad9761.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/517fcb8cabb3.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/b34c10a1ffe0.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/43dc1b9a0c96.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/5be63e946cc5.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/dedb7e4dce28.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3df86f009f15.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/4bb93aca54b3.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/967b38372db4.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/9a9defceff14.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/f1c49bfd357d.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5c1cb227aa5a.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/1a2f3006ecc7.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/b3cedae80e66.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/071a53d2119e.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/455dfdb0f51a.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/50e2fc3909a0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/9777be10ff78.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5bf655ce1293.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/ea97db9e8f8b.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/156f0047d272.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3b1c199b3a86.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/aab9ff2ff8f0.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+<style>
+body{margin:0;font-family:"Alegreya Sans","Gill Sans",system-ui,sans-serif;background:#f4efe1;color:#2f2630}
+a{color:#8a6c30}a:hover{color:#6b5325}
+p{margin:0}
+.h2{margin:0 0 6px;font-family:'Cormorant SC',Georgia,serif;font-size:16px;font-weight:600;letter-spacing:.1em}
+.card{background:#fbf8ef;border:1px solid #ddd3bd;border-radius:5px}
+.cap{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6e6470}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.chip{font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:0 6px;white-space:nowrap;justify-self:start}
+.q{display:grid;grid-template-columns:44px minmax(0,1fr) 92px 38px;gap:2px 10px;align-items:baseline;width:100%;text-align:left;font:inherit;color:inherit;background:transparent;border:0;border-top:1px dotted #ddd3bd;padding:9px 14px;cursor:pointer}
+.q:hover{background:#f4efe1}
+.ck{display:inline-block;width:10px;height:10px;border-radius:2px;box-sizing:border-box;margin-right:2px}
+.mdl{display:grid;grid-template-columns:18px 110px minmax(0,1fr) 110px;gap:0 10px;align-items:center;width:100%;text-align:left;font:inherit;font-size:13px;color:inherit;background:transparent;border:0;border-top:1px dotted #ddd3bd;padding:7px 12px;cursor:pointer;min-height:40px}
+.mdl:hover{background:#f4efe1}
+textarea,input[type=text]{font:inherit;font-size:13px;line-height:1.45;color:#2f2630;background:#fbf8ef;border:1px solid #ddd3bd;border-radius:4px;padding:6px 9px;width:100%;box-sizing:border-box}
+textarea{resize:vertical}
+.btn{font:inherit;font-size:14px;font-weight:500;border-radius:5px;padding:6px 18px;min-height:42px;cursor:pointer}
+.file{display:inline-flex;align-items:center;gap:6px;font-family:ui-monospace,monospace;font-size:11.5px;background:#efe7d3;border:1px solid #ddd3bd;border-radius:3px;padding:1px 4px 1px 7px}
+.file button{font:inherit;font-size:12px;line-height:1;color:#6e6470;background:transparent;border:0;cursor:pointer;padding:2px 3px}
+</style>
+</helmet>
+
+<div style="width: 1280px; height: 1480px; box-sizing: border-box; padding: 24px 32px 22px; background: #f4efe1; color: #2f2630; display: flex; flex-direction: column; gap: 16px; overflow: hidden; font-size: 14px; line-height: 1.45;">
+
+  <div style="margin: -12px 0 -4px;"><dc-import name="Tabs" current="Dispatch" hint-size="100%,34px"></dc-import></div>
+
+  <div style="display: flex; align-items: flex-end; gap: 20px; border-bottom: 1px solid #a7843e; padding-bottom: 10px;">
+    <div style="flex-grow: 1;">
+      <div style="font-size: 12.5px; color: #6e6470;">queue from the tracker 02:05</div>
+      <h1 style="margin: 2px 0 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 27px; font-weight: 600; letter-spacing: .04em;">Dispatch</h1>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: flex-end;">
+      <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 6px 12px; text-align: right;">
+        <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">slots free</div>
+        <div class="mono" style="font-size: 18px;">{{slots}} <span style="font-size: 13px; color: #6e6470;">of 6</span></div>
+      </div>
+      <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 6px 12px; text-align: right;">
+        <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">ready</div>
+        <div class="mono" style="font-size: 18px;">{{readyCount}} <span style="font-size: 13px; color: #6e6470;">of {{queueCount}}</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: 520px minmax(0, 1fr); gap: 18px; flex-grow: 1; min-height: 0;">
+
+    <div style="display: flex; flex-direction: column; min-height: 0;">
+      <h2 class="h2">QUEUE</h2>
+      <div class="card" style="overflow: hidden;">
+        <div style="display: grid; grid-template-columns: 44px minmax(0, 1fr) 92px 38px; gap: 0 10px; padding: 6px 14px 4px;">
+          <span class="cap">issue</span><span class="cap">epic · due</span><span class="cap">ready</span><span class="cap" style="text-align: right;">est</span>
+        </div>
+        <sc-for list="{{queue}}" as="q" hint-placeholder-count="7">
+          <button type="button" class="q" sc-camel-on-click="{{q.pick}}" aria-current="{{q.current}}" style="{{q.style}}">
+            <span class="mono" style="font-size: 12px; color: #8a6c30;">{{q.id}}</span>
+            <span style="display: flex; flex-direction: column; min-width: 0;">
+              <b style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{q.name}}</b>
+              <span style="font-size: 12px; color: #6e6470; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="{{q.epicStyle}}">{{q.epic}}</span> · {{q.due}}</span>
+            </span>
+            <span style="display: flex; flex-direction: column; gap: 3px;">
+              <span><sc-for list="{{q.checks}}" as="c" hint-placeholder-count="5"><span class="ck" title="{{c.title}}" style="{{c.style}}"></span></sc-for></span>
+              <span style="{{q.stateStyle}}">{{q.state}}</span>
+            </span>
+            <span class="mono" style="font-size: 12px; text-align: right;">{{q.est}}</span>
+          </button>
+        </sc-for>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: #6e6470; padding-top: 6px;">
+        <span>ready squares:</span><span>brief</span><span>acceptance</span><span>files</span><span>estimate</span><span>unblocked</span>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px; min-width: 0;">
+      <div style="display: flex; align-items: baseline; gap: 10px; border-bottom: 1px solid #ddd3bd; padding-bottom: 6px;">
+        <span class="mono" style="font-size: 14px; color: #8a6c30;">{{sel.id}}</span>
+        <strong style="font-size: 20px; font-weight: 600;">{{sel.name}}</strong>
+        <span class="chip" style="{{sel.stateChip}}">{{sel.state}}</span>
+        <a href="{{sel.epicHref}}" style="margin-left: auto; font-size: 13px;">{{sel.epic}}</a>
+      </div>
+
+      <sc-if value="{{sel.hasPrior}}" hint-placeholder-val="{{ false }}">
+        <div class="card" style="padding: 8px 14px; border-top: 3px solid #c9533a; font-size: 13px; display: flex; flex-direction: column; gap: 4px;">
+          <span><b style="font-weight: 600;">{{sel.priorHead}}</b> <span style="color: #6e6470;">{{sel.priorMeta}}</span></span>
+          <label style="display: flex; gap: 8px; align-items: baseline; cursor: pointer;"><input type="checkbox" checked="" style="accent-color: #2f2630;"> <span>Give the new worker its summary and the branch <span class="mono" style="font-size: 12px;">{{sel.priorBranch}}</span></span></label>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{sel.blocked}}" hint-placeholder-val="{{ false }}">
+        <div class="card" style="padding: 10px 14px; border: 1.5px dashed #c9533a; display: flex; flex-direction: column; gap: 3px;">
+          <b style="font-weight: 600; color: #a3402b;">{{sel.blockHead}}</b>
+          <span style="font-size: 13px;">{{sel.blockBody}} <a href="{{sel.blockHref}}">{{sel.blockLink}}</a></span>
+        </div>
+      </sc-if>
+
+      <div>
+        <h2 class="h2">BRIEF</h2>
+        <textarea rows="3" aria-label="Brief">{{sel.brief}}</textarea>
+      </div>
+
+      <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px;">
+        <div>
+          <h2 class="h2">ACCEPTANCE</h2>
+          <div class="card" style="{{sel.acceptStyle}}">
+            <sc-for list="{{sel.accept}}" as="a" hint-placeholder-count="3">
+              <div style="display: flex; gap: 8px; align-items: baseline; padding: 4px 0; border-top: 1px dotted #e6dcc6; font-size: 13px;"><span class="mono" style="color: #6e6470;">·</span><span>{{a.t}}</span></div>
+            </sc-for>
+            <sc-if value="{{sel.noAccept}}" hint-placeholder-val="{{ false }}">
+              <input type="text" aria-label="First acceptance criterion" placeholder="a test that proves it's done">
+            </sc-if>
+          </div>
+        </div>
+        <div>
+          <h2 class="h2">FILES GIVEN</h2>
+          <div class="card" style="padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
+            <sc-for list="{{sel.files}}" as="f" hint-placeholder-count="3">
+              <span class="file">{{f.t}}<button type="button" aria-label="Remove {{f.t}}">×</button></span>
+            </sc-for>
+            <input type="text" aria-label="Add a file" placeholder="add a path" style="width: 150px; padding: 2px 7px; font-family: ui-monospace, monospace; font-size: 11.5px;">
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 class="h2">RUN ON</h2>
+        <div class="card" style="overflow: hidden;">
+          <div style="display: grid; grid-template-columns: 18px 110px minmax(0, 1fr) 110px; gap: 0 10px; padding: 5px 12px 3px;">
+            <span></span><span class="cap">platform</span><span class="cap">left now → after this issue</span><span class="cap" style="text-align: right;">runs out</span>
+          </div>
+          <sc-for list="{{models}}" as="m" hint-placeholder-count="4">
+            <button type="button" class="mdl" sc-camel-on-click="{{m.pick}}" aria-pressed="{{m.on}}" style="{{m.style}}">
+              <span style="{{m.radio}}"></span>
+              <span><b style="font-weight: 600;">{{m.name}}</b> <span style="font-size: 11.5px; color: #6e6470;">{{m.window}}</span></span>
+              <span style="position: relative; height: 12px; background: #ebe4d2; border-radius: 3px;">
+                <span style="{{m.leftBar}}"></span>
+                <span style="{{m.costBar}}"></span>
+              </span>
+              <span class="mono" style="{{m.outStyle}}">{{m.out}}</span>
+            </button>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;">
+        <label style="display: flex; flex-direction: column; gap: 3px;"><span class="cap">time limit</span><input type="text" value="{{sel.time}}" class="mono"></label>
+        <label style="display: flex; flex-direction: column; gap: 3px;"><span class="cap">token limit</span><input type="text" value="{{sel.tokens}}" class="mono"></label>
+        <label style="display: flex; flex-direction: column; gap: 3px;"><span class="cap">checks</span><input type="text" value="silence 15m · loop 3× · no migrations" class="mono"></label>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 12px; margin-top: 2px;">
+        <sc-if value="{{canDispatch}}" hint-placeholder-val="{{ true }}">
+          <button type="button" class="btn" sc-camel-on-click="{{dispatch}}" style="color: #fbf8ef; background: #2f2630; border: 1px solid #2f2630;">Dispatch to {{modelName}}</button>
+        </sc-if>
+        <sc-if value="{{cannot}}" hint-placeholder-val="{{ false }}">
+          <button type="button" class="btn" disabled="" style="color: #8f8578; background: #ebe4d2; border: 1px solid #ddd3bd; cursor: not-allowed;">Dispatch</button>
+          <span style="font-size: 13px; color: #a3402b;">{{cannotWhy}}</span>
+        </sc-if>
+        <sc-if value="{{done}}" hint-placeholder-val="{{ false }}">
+          <span style="font-size: 14px;"><b style="font-weight: 600;">Dispatched</b> as <a href="AgentHealthy.dc.html">{{doneWorker}}</a> · {{doneWhen}}</span>
+          <button type="button" class="btn" sc-camel-on-click="{{undo}}" style="color: #2f2630; background: #fbf8ef; border: 1px solid #ddd3bd; margin-left: auto;">Undo (prototype)</button>
+        </sc-if>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script="" data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:1480}}">
+class Component extends DCLogic {
+  renderVals() {
+    var self = this, st = this.state || {};
+    var sent = st.sent || {};
+    // id, name, epic, epic status, epic href, due, est h, est tokens (M), state, checks [brief, acceptance, files, estimate, unblocked], brief, acceptance, files, extra
+    var Q = [
+      ['#124', 'Webhook signature check', '&15 Security review prep', 'AT RISK', 'Goals.dc.html', 'due Mon 09:00', 3, 1.1, 'orphaned', [1, 1, 1, 1, 1],
+        'Verify the HMAC signature on incoming webhooks and reject anything unsigned or stale.',
+        ['unsigned requests get 401', 'signatures older than 5 minutes get 401', 'test_webhook_signature_* all pass'],
+        ['src/webhooks/receive.py', 'src/webhooks/hmac.py', 'tests/webhooks/'],
+        { prior: ['implementer-codex-05 crashed at 23:58', 'after 1h10m · 2 commits · 5 of 9 tests passing', 'trees/webhook-sig'] }],
+      ['#113', 'Password reset email', '&15 Security review prep', 'AT RISK', 'Goals.dc.html', 'due Mon 09:00', 4, 1.4, 'queued', [1, 1, 1, 1, 1],
+        'Send a single-use reset link that expires in 30 minutes; never reveal whether the address exists.',
+        ['same response for known and unknown addresses', 'link works once and expires at 30m', 'test_password_reset_* all pass'],
+        ['src/auth/reset.py', 'src/mail/templates/reset.txt', 'tests/auth/test_reset.py'], {}],
+      ['#115', 'Webhook retries', '&11 API v2 freeze', 'ON TRACK', 'Goals.dc.html', 'due Wed 17:00', 6, 2.0, 'queued', [1, 1, 1, 1, 1],
+        'Retry failed webhook deliveries with backoff, up to 8 attempts over 24 hours.',
+        ['backoff doubles from 1m, capped at 6h', 'gives up after 8 attempts and marks the delivery failed', 'test_webhook_retry_* all pass'],
+        ['src/webhooks/deliver.py', 'src/jobs/queue.py'], {}],
+      ['#112', 'Export format', '&13 Self-serve exports', 'LATE', 'Goals.dc.html', 'due Thu 18:00', 4, 1.3, 'queued', [1, 1, 1, 1, 1],
+        'Add CSV and JSON Lines as export formats, chosen per request.',
+        ['format=csv and format=jsonl both stream', 'unknown format gets 400', 'test_export_format_* all pass'],
+        ['src/export/writer.py', 'src/export/api.py'], {}],
+      ['#114', 'Search pagination', '&11 API v2 freeze', 'ON TRACK', 'Goals.dc.html', 'due Wed 17:00', 6, 1.8, 'queued', [1, 0, 1, 1, 1],
+        'Cursor-based pagination for /search.', [], ['src/search/api.py'],
+        { block: ['No acceptance criteria', 'Nothing says when this is done. Add at least one criterion a test can check.', '', ''] }],
+      ['#116', 'Admin audit export', '&13 Self-serve exports', 'LATE', 'Goals.dc.html', 'due Thu 18:00', 8, 2.4, 'queued', [1, 1, 1, 1, 0],
+        'Let admins export the audit log in any export format.', ['exports the last 90 days', 'uses the formats from #112'], ['src/admin/audit.py'],
+        { block: ['Blocked by #112', 'Needs the export formats from #112, which has not merged.', '', 'open #112'] }],
+      ['#107', 'Session timeout', '&16 Session cleanup', 'NEEDS INPUT', 'Goals.dc.html', 'due Tue 12:00', 3, 0.9, 'needs input', [1, 1, 1, 1, 0],
+        'Set the idle session timeout.', ['idle sessions end at the chosen timeout'], ['src/auth/session.py'],
+        { block: ['Needs input', 'Session timeout: 30 or 60 minutes? asked 00:52.', 'Issue107.dc.html', 'open #107'] }]
+    ];
+    var slots = 1 - Object.keys(sent).length;
+    var si = st.sel || 0;
+    var ep = { 'AT RISK': 'color: #a8660f; font-weight: 700;', 'LATE': 'color: #a3402b; font-weight: 700;', 'NEEDS INPUT': 'color: #a3402b;', 'ON TRACK': '' };
+    var checkNames = ['brief', 'acceptance criteria', 'files named', 'estimate', 'unblocked'];
+    var ready = function (q) { return q[9].every(function (c) { return c; }); };
+    var queue = Q.map(function (q, i) {
+      var isSent = !!sent[q[0]], ok = ready(q);
+      var state = isSent ? 'dispatched' : q[8] === 'orphaned' ? 're-dispatch' : q[8] === 'needs input' ? 'needs input' : ok ? 'ready' : 'not ready';
+      return { id: q[0], name: q[1], epic: q[2].split(' ')[0] + ' ' + q[2].split(' ').slice(1).join(' '), epicStyle: ep[q[3]], due: q[5], est: q[6] + 'h',
+        current: i === si ? 'true' : 'false',
+        style: i === si ? 'background: #efe7d3; box-shadow: inset 3px 0 0 #2f2630;' : (isSent ? 'opacity: .55;' : ''),
+        checks: q[9].map(function (c, k) { return { title: checkNames[k] + (c ? ' ✓' : ' missing'), style: c ? 'background: #4f6b3a;' : 'border: 1.5px solid #c9533a;' }; }),
+        state: state,
+        stateStyle: 'font-size: 11px; font-weight: 700; letter-spacing: .04em; color: ' + (state === 'ready' ? '#1e6b52' : state === 're-dispatch' ? '#a3402b' : state === 'dispatched' ? '#0072B2' : '#a3402b') + ';',
+        pick: function () { self.setState({ sel: i }); } };
+    });
+    var q = Q[si], x = q[13] || {};
+    var isSent = !!sent[q[0]];
+    // platforms: name, window label, % left, capacity per window in M tokens, runs out text, short already
+    var P = [
+      ['Claude opus', '5h', 28, 4.5, 'out 03:44', true],
+      ['Codex', '5h', 59, 4.0, 'past reset', false],
+      ['Antigravity', '5h', 77, 3.0, 'past reset', false],
+      ['Cursor', 'cycle', 19, 30, 'Sep 29', true]
+    ];
+    var pick = st.model !== undefined ? st.model : 1;
+    var models = P.map(function (p, i) {
+      var cost = Math.round(q[7] / p[3] * 100);
+      var after = p[2] - cost, bad = p[5] || after < 5;
+      return { name: p[0], window: p[1], on: i === pick ? 'true' : 'false',
+        radio: 'width: 14px; height: 14px; border-radius: 50%; box-sizing: border-box; ' + (i === pick ? 'border: 4px solid #2f2630;' : 'border: 1.5px solid #8f8578;'),
+        leftBar: 'position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: #9daa72; width: ' + Math.max(after, 0) + '%;',
+        costBar: 'position: absolute; top: 0; bottom: 0; background: ' + (bad ? '#c9533a' : '#6f63b4') + '; left: ' + Math.max(after, 0) + '%; width: ' + Math.min(cost, p[2]) + '%;',
+        out: p[5] ? p[4] : after < 0 ? 'short' : p[2] + '% → ' + after + '%',
+        outStyle: 'font-size: 12px; text-align: right; ' + (bad ? 'color: #a3402b; font-weight: 700;' : 'color: #6e6470;'),
+        style: i === pick ? 'background: #efe7d3;' : '',
+        pick: function () { self.setState({ model: i }); } };
+    });
+    var blocked = !!x.block;
+    var canDispatch = !isSent && !blocked && slots > 0;
+    var chip = { orphaned: 'color: #a3402b; border: 1px dashed #c9533a;', queued: 'color: #2f2630; border: 1px solid #a39884;', 'needs input': 'color: #a3402b; border: 1px dashed #c9533a;' };
+    return {
+      slots: slots, readyCount: Q.filter(function (q) { return ready(q) && !sent[q[0]]; }).length, queueCount: Q.length,
+      queue: queue, models: models, modelName: P[pick][0],
+      sel: { id: q[0], name: q[1], epic: q[2], epicHref: q[4], state: isSent ? 'DISPATCHED' : q[8].toUpperCase(), stateChip: isSent ? 'color: #fbf8ef; background: #0072B2;' : chip[q[8]],
+        brief: q[10], accept: q[11].map(function (t) { return { t: t }; }), noAccept: q[11].length === 0,
+        acceptStyle: 'padding: 2px 12px 6px;' + (q[11].length === 0 ? ' border: 1.5px dashed #c9533a;' : ''),
+        files: q[12].map(function (t) { return { t: t }; }),
+        time: Math.round(q[6] * 1.5 * 10) / 10 + 'h', tokens: Math.round(q[7] * 1.8 * 10) / 10 + 'M',
+        hasPrior: !!x.prior, priorHead: x.prior ? x.prior[0] : '', priorMeta: x.prior ? x.prior[1] : '', priorBranch: x.prior ? x.prior[2] : '',
+        blocked: blocked, blockHead: blocked ? x.block[0] : '', blockBody: blocked ? x.block[1] : '', blockHref: blocked ? (x.block[2] || '#') : '#', blockLink: blocked ? x.block[3] : '' },
+      canDispatch: canDispatch, cannot: !isSent && !canDispatch, done: isSent,
+      cannotWhy: blocked ? x.block[0] : 'no free slot · next frees ~02:40',
+      doneWorker: sent[q[0]] || '', doneWhen: '02:10',
+      dispatch: function () { var s = Object.assign({}, sent); s[q[0]] = 'implementer-' + P[pick][0].split(' ')[0].toLowerCase() + '-0' + (8 + Object.keys(sent).length); self.setState({ sent: s }); },
+      undo: function () { var s = Object.assign({}, sent); delete s[q[0]]; self.setState({ sent: s }); }
+    };
+  }
+}
+</script>
+
+
+</body></html>

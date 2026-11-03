@@ -535,7 +535,7 @@ class ChangeKeysReviewTest(unittest.TestCase):
     CHANGE = "https://forge.example/group/project/-/merge_requests/51"
     OTHER_CHANGE = "https://forge.example/group/project/-/merge_requests/50"
     CONTEXT_ISSUE = "https://forge.example/group/project/-/issues/7"
-    OWN_ISSUE = "forge.example/group/project#8"
+    OWN_ISSUE = "gitlab:forge.example/group/project#8"
 
     def test_a_context_issue_url_is_not_a_change_issue_key(self):
         text = f"Review {self.CHANGE} and check diagnostics; context: {self.CONTEXT_ISSUE}"

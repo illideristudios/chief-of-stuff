@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Worker recovery: stalls and repeated failures</title>
+<style>
+@font-face { font-family: "Cormorant SC"; src: url("fonts/9777be10ff78.woff2") format("woff2"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Alegreya Sans"; src: url("fonts/624ea7e85a53.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Alegreya Sans"; src: url("fonts/dedb7e4dce28.woff2") format("woff2"); font-weight: 500; font-display: swap; }
+@font-face { font-family: "Alegreya Sans"; src: url("fonts/1a2f3006ecc7.woff2") format("woff2"); font-weight: 700; font-display: swap; }
+body { margin: 0; }
+</style>
+</head>
+<body>
+<div id="recovery-ui">
+  <div class="shell">
+    <nav aria-label="Board sections"><span>Board</span><span class="current">Workers</span><span>Dispatch</span><span>Since you last looked</span><span>Epics</span><span>Decisions</span><span>Limits</span></nav>
+    <div class="examples"><span>EXAMPLE STATES</span><button type="button" data-scenario="stall" aria-pressed="true">Possible stall</button><button type="button" data-scenario="loop" aria-pressed="false">Repeated failure</button></div>
+    <div class="crumb">‹ Workers &nbsp; · &nbsp; autonomous &nbsp; · &nbsp; <span id="runtime">Codex</span></div>
+    <header><div><h1 id="title">Fix calendar sync</h1><div class="sub"><span id="attempt">Attempt 2</span> · <span id="condition">Process running</span> · <span id="activity">Last activity 18m ago</span></div></div><span class="chip alert" id="state">NEEDS ATTENTION</span></header>
+    <div class="alert-card" role="status"><div class="alert-title" id="alert-title">This job may be stalled</div><p id="alert-description">No new activity for 18 minutes. The worker process is still running; it may be waiting on the calendar service.</p><div class="evidence" id="evidence">Last event: integration tests started · 10:06</div><div class="actions"><button type="button" class="primary" id="message-action">Message worker</button><button type="button" class="quiet" id="restart-action">Restart job</button><button type="button" class="quiet danger" id="stop-action">Stop job</button></div></div>
+    <div class="confirm" id="confirm" hidden aria-live="polite"><h2 id="confirm-title">Restart this job?</h2><p id="confirm-description">The running worker will stop. A new attempt will use the existing worktree; this attempt and its transcript stay available.</p><label id="restart-label">Instruction for the new attempt <span>(optional)</span><textarea id="restart-note" rows="2" placeholder="Add context for the worker…"></textarea></label><div class="actions"><button type="button" class="primary" id="confirm-action">Restart job</button><button type="button" class="quiet" id="cancel-action">Cancel</button></div></div>
+    <div class="section-head"><h2>Transcript</h2><span id="live">Last activity</span></div><div class="transcript" id="events"></div>
+    <form id="composer" class="compose"><label for="message">Message this worker</label><textarea id="message" rows="2" placeholder="Send a correction, question, or additional context…"></textarea><div class="compose-foot"><span id="message-hint">Messages remain queued until delivery is confirmed.</span><button type="submit" class="primary">Send message ↑</button></div></form>
+    <div class="demo-status" id="demo-status" aria-live="polite"></div>
+  </div>
+</div>
+<style>
+  #recovery-ui {color-scheme:light dark;--paper:light-dark(#f4efe1,#1c1813);--panel:light-dark(#fbf8ef,#262019);--ink:light-dark(#2f2630,#efe6d2);--muted:light-dark(#6e6470,#b3a791);--line:light-dark(#ddd3bd,#3d352a);--gold:light-dark(#a7843e,#d4b06a);--bad:light-dark(#a3402b,#f08566);--warn:light-dark(#a8660f,#e8ad55);--select:light-dark(#efe7d3,#342b1f);font:14px/1.45 'Alegreya Sans','Gill Sans',system-ui,sans-serif;color:var(--ink)}
+  #recovery-ui *{box-sizing:border-box} #recovery-ui .shell{background:var(--paper);padding:12px 24px 26px} #recovery-ui button,#recovery-ui textarea{font:inherit} #recovery-ui button{cursor:pointer}
+  #recovery-ui nav{display:flex;flex-wrap:wrap;column-gap:20px;border-bottom:1px solid var(--line);font:600 15.5px 'Cormorant SC',Georgia,serif;letter-spacing:.08em;color:var(--muted)} #recovery-ui nav span{padding:8px 0 7px} #recovery-ui nav .current{color:var(--ink);border-bottom:1px solid var(--ink)}
+  #recovery-ui .examples{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:14px 0 18px} #recovery-ui .examples span{font-size:10px;letter-spacing:.1em;color:var(--muted);margin-right:5px} #recovery-ui .examples button{border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--ink);padding:5px 9px} #recovery-ui .examples button[aria-pressed=true]{background:var(--select);border-color:var(--gold)}
+  #recovery-ui .crumb{font-size:12.5px;color:var(--muted);margin-bottom:3px} #recovery-ui header{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--gold);padding-bottom:10px} #recovery-ui h1{font:600 27px/1.2 'Cormorant SC',Georgia,serif;letter-spacing:.04em;margin:0} #recovery-ui .sub{color:var(--muted);font-size:12px;margin-top:5px} #recovery-ui .chip{font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:2px 6px;border:1px solid var(--bad);color:var(--bad);white-space:nowrap}
+  #recovery-ui .alert-card,#recovery-ui .confirm,#recovery-ui .transcript,#recovery-ui .compose{background:var(--panel);border:1px solid var(--line);border-radius:5px} #recovery-ui .alert-card{border-top:3px solid var(--bad);margin-top:17px;padding:12px 14px} #recovery-ui .alert-title{font-size:16px;font-weight:700} #recovery-ui p{margin:4px 0 0} #recovery-ui .evidence{font-size:12px;color:var(--muted);margin-top:7px}
+  #recovery-ui .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px} #recovery-ui .primary,#recovery-ui .quiet{border-radius:5px;padding:7px 13px;min-height:36px} #recovery-ui .primary{color:var(--panel);background:var(--ink);border:1px solid var(--ink)} #recovery-ui .primary:disabled{opacity:.5;cursor:not-allowed} #recovery-ui .quiet{color:var(--ink);background:var(--panel);border:1px solid var(--line)} #recovery-ui .danger{color:var(--bad);border-color:var(--bad)}
+  #recovery-ui .confirm{margin-top:10px;padding:12px 14px} #recovery-ui h2{font:600 16px 'Cormorant SC',Georgia,serif;letter-spacing:.1em;text-transform:uppercase;margin:0} #recovery-ui .confirm label{display:block;font-size:12px;font-weight:700;margin-top:10px} #recovery-ui .confirm label span{font-weight:400;color:var(--muted)}
+  #recovery-ui textarea{display:block;width:100%;resize:vertical;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin-top:7px} #recovery-ui .section-head{display:flex;justify-content:space-between;align-items:center;margin:20px 0 7px} #recovery-ui .section-head span{font-size:11px;color:var(--muted)} #recovery-ui .transcript{padding:4px 14px}
+  #recovery-ui .event{display:grid;grid-template-columns:50px 1fr;gap:10px;padding:8px 0} #recovery-ui .event+.event{border-top:1px dotted var(--line)} #recovery-ui .time{font:11px ui-monospace,monospace;color:var(--muted);padding-top:3px} #recovery-ui .who{font-size:12px;font-weight:700} #recovery-ui .event p{font-size:13px} #recovery-ui .delivery{font-weight:400;color:var(--warn)}
+  #recovery-ui .compose{padding:12px;margin-top:14px} #recovery-ui .compose label{font-size:12px;font-weight:700} #recovery-ui .compose-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:9px} #recovery-ui .compose-foot span{font-size:11px;color:var(--muted)} #recovery-ui .demo-status{font-size:12px;color:var(--muted);margin-top:8px} #recovery-ui [hidden]{display:none!important}
+  @media(max-width:580px){#recovery-ui .shell{padding:10px 16px 20px} #recovery-ui nav{gap:0 16px} #recovery-ui header{align-items:start;flex-wrap:wrap} #recovery-ui h1{font-size:23px} #recovery-ui .compose-foot{align-items:start;flex-direction:column}}
+</style>
+<script>
+(() => {
+ const root=document.getElementById('recovery-ui'), id=x=>root.querySelector('#'+x); let current='stall', action='restart';
+ const examples={
+  stall:{title:'Fix calendar sync',runtime:'Codex',attempt:'Attempt 2',condition:'Process running',activity:'Last activity 18m ago',state:'NEEDS ATTENTION',headline:'This job may be stalled',description:'No new activity for 18 minutes. The worker process is still running; it may be waiting on the calendar service.',evidence:'Last event: integration tests started · 10:06',events:[['09:52','Worker','I’m checking how sync handles expired calendar credentials.'],['10:03','Tool activity','Started the calendar integration tests.'],['10:06','Worker','The tests are waiting on the calendar service. I’m investigating the timeout.']]},
+  loop:{title:'Repair report export',runtime:'Claude',attempt:'Attempt 3',condition:'Worker stopped',activity:'Last activity 6m ago',state:'REPEATED FAILURE',headline:'The same test failed three times',description:'Three attempts ended with the same assertion failure. Automatic retries have stopped and this job needs a decision.',evidence:'Most recent failure: test_export_handles_quotes · attempt 3',events:[['10:01','Worker','The export test is failing on a quoted field.'],['10:05','Tool activity','test_export_handles_quotes failed with the same assertion.'],['10:06','Orchestrator','Stopped automatic retries after attempt 3.']]}
+ };
+ const pending={stall:[],loop:[]};
+ function event(time,who,text,delivery){const row=document.createElement('div');row.className='event';const t=document.createElement('span');t.className='time';t.textContent=time;const b=document.createElement('div');const w=document.createElement('div');w.className='who';w.textContent=who;if(delivery){const d=document.createElement('span');d.className='delivery';d.textContent=' · Queued, not yet delivered';w.appendChild(d)}const p=document.createElement('p');p.textContent=text;b.append(w,p);row.append(t,b);id('events').appendChild(row)}
+ function render(){const e=examples[current];for(const [key,value] of Object.entries({title:e.title,runtime:e.runtime,attempt:e.attempt,condition:e.condition,activity:e.activity,state:e.state,'alert-title':e.headline,'alert-description':e.description,evidence:e.evidence}))id(key).textContent=value;root.querySelectorAll('[data-scenario]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.scenario===current)));id('events').replaceChildren();e.events.forEach(x=>event(...x));pending[current].forEach(x=>event('Now','You',x,true));id('message-action').hidden=current==='loop';id('stop-action').hidden=current==='loop';id('composer').hidden=current==='loop';id('live').textContent=current==='loop'?'Attempt 3 · ended':'Last activity';id('confirm').hidden=true;id('demo-status').textContent=''}
+ root.querySelectorAll('[data-scenario]').forEach(b=>b.addEventListener('click',()=>{current=b.dataset.scenario;render()}));
+ id('message-action').addEventListener('click',()=>id('message').focus());
+ function confirm(kind){action=kind;id('confirm-title').textContent=kind==='restart'?'Restart this job?':'Stop this job?';id('confirm-description').textContent=kind==='restart'?(current==='stall'?'The running worker will stop. A new attempt will use the existing worktree; this attempt and its transcript stay available.':'A new attempt will use the existing worktree; earlier attempts and their transcripts stay available.'):'The worker will stop. Its worktree and transcript will be preserved for review.';id('restart-label').hidden=kind!=='restart';id('confirm-action').textContent=kind==='restart'?'Restart job':'Stop job';id('confirm').hidden=false;}
+ id('restart-action').addEventListener('click',()=>confirm('restart'));id('stop-action').addEventListener('click',()=>confirm('stop'));id('cancel-action').addEventListener('click',()=>{id('confirm').hidden=true});id('confirm-action').addEventListener('click',()=>{id('confirm').hidden=true;id('demo-status').textContent='Example only: no job was '+(action==='restart'?'restarted.':'stopped.')});
+ id('composer').addEventListener('submit',e=>{e.preventDefault();let v=id('message').value.trim();if(!v)return;pending[current].push(v);id('message').value='';render()});render();
+})();
+</script>
+
+</body>
+</html>

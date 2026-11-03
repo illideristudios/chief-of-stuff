@@ -9,11 +9,29 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import tree_state  # noqa: E402
-from tree_state import TreeState, at_risk  # noqa: E402
+from tree_state import TreeState, at_risk, unsaved  # noqa: E402
 
 
 def state(dirty: int | None = 0, off_origin: int | None = 0, unpushed: int | None = None) -> TreeState:
     return TreeState(branch="feat/x", dirty=dirty, off_origin=off_origin, unpushed=unpushed)
+
+
+class UnsavedTest(unittest.TestCase):
+    def test_ignored_engine_metadata_and_build_output_are_not_unsaved(self) -> None:
+        self.assertEqual(unsaved("!! .chief-of-stuff/\n!! node_modules/\n!! scripts/__pycache__/\n"), ())
+
+    def test_only_the_ignored_root_metadata_directory_is_exempt(self) -> None:
+        status = "?? .chief-of-stuff/\n!! nested/.chief-of-stuff/\n!! .chief-of-stuff\nM .chief-of-stuff/dispatch.md\n"
+        self.assertEqual(unsaved(status), (".chief-of-stuff/", "nested/.chief-of-stuff/", ".chief-of-stuff",
+                                           ".chief-of-stuff/dispatch.md"))
+
+    def test_cursor_channel_only_accepts_only_the_single_ignored_root_channel_file(self) -> None:
+        self.assertEqual(tree_state.CURSOR_CHANNEL_EXCLUDE, "/.cursor/mcp.json")
+        self.assertTrue(tree_state.cursor_channel_only("!! .cursor/mcp.json"))
+        self.assertTrue(tree_state.cursor_channel_only("!! .cursor/mcp.json\n"))
+        for other in ("", "?? .cursor/mcp.json", "!! .cursor/", "!! .cursor/mcp.json\n!! .cursor/notes.md"):
+            with self.subTest(other=other):
+                self.assertFalse(tree_state.cursor_channel_only(other))
 
 
 class AtRiskTest(unittest.TestCase):

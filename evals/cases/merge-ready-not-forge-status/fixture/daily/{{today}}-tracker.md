@@ -12,8 +12,6 @@
 |---|---|---|
 | 08:00 | Retry jitter | "yes, dispatch it" |
 
-## File ownership
-
 ## Log
 
 - 08:00 opened the day

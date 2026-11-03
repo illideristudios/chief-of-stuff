@@ -23,7 +23,7 @@ class HostCommandTest(unittest.TestCase):
         with mock.patch.object(run.shutil, "which", return_value="/bin/agy"):
             self.assertTrue(has_run(run.host_command("agy", "m", "hi", Path("/tmp/work"), Path("/tmp/plugin"),
                                                      effort="high"), "agy"))
-        self.assertTrue(has_run(run.command(run.Case("c", Path("/c"), {}), "baseline", "sonnet", "x", effort="high"),
+        self.assertTrue(has_run(run.claude_adapter.argv(run.claude_request(run.Case("c", Path("/c"), {}), "baseline", "sonnet", "x", Path("/work"), effort="high"), "/host", []),
                                 "claude"))
 
     def test_each_backend_runs_headlessly_on_an_explicit_model(self):

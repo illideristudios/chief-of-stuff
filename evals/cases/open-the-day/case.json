@@ -63,12 +63,6 @@
       "pattern": "^## Decisions"
     },
     {
-      "name": "tracker has File ownership",
-      "type": "file_matches",
-      "path": "daily/{{today}}-tracker.md",
-      "pattern": "^## File ownership"
-    },
-    {
       "name": "tracker has Log",
       "type": "file_matches",
       "path": "daily/{{today}}-tracker.md",

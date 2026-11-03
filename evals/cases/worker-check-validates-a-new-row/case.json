@@ -1,11 +1,11 @@
 {
   "tz": "America/Chicago",
-  "description": "#61: Robin added a Retry budget task whose File ownership row is missing and asks whether it is ready for a worker. The coordinator validates the row with `chief-of-stuff worker --check --root . --task 'Retry budget'`, a read-only call that needs no tree, needs no `--cwd`, creates no worktree and starts nothing, and tells Robin the refusal: the File ownership row is missing. The six graders quote the one sentence that sends a new row to `worker --check` (RED until agents/chief-of-stuff.md carries it, near where `worker` is documented): Before proposing a new task for dispatch, validate its Tasks and File ownership rows with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task. The check grader counts `worker --check` only at the start of a command, in the bare, plugin (`python3 ${CLAUDE_PLUGIN_ROOT}/chief_of_stuff.py`) or script-path form, with `--root` and the whole task named; text after `echo`, in a comment or in a quote is not a run. The reply grader accepts, on whole words, any wording that says the File ownership row is missing or absent. A last grader asserts the \"do not propose the task\" half: a reply that also offers the dispatch (a fenced dispatch prompt, or asking to launch) fails. `--name <session>` (a standing row) and `--one-shot` change what `--check` accepts and are pinned by evals/test_spawn_session.py (CheckTest), not here. What `--check` prints is pinned by evals/test_spawn_session.py (CheckTest), not by this case.",
+  "description": "#61, #1039: Robin added a Retry budget task with no issue in its `issue` cell, in a workspace whose block names a backlog, and asks whether it is ready for a worker. The coordinator validates the row with `chief-of-stuff worker --check --root . --task 'Retry budget'`, a read-only call that needs no tree, needs no `--cwd`, creates no worktree and starts nothing, and tells Robin the refusal: the task names no issue. The other task, Security audit, carries its issue and passes the same check. Every grader quotes the one sentence that sends a new row to `worker --check`: Before proposing a new task for dispatch, validate its Tasks row with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
   "prompt": "I just added the Retry budget task to today's tracker. Is it ready to hand to a worker?",
   "graders": [
     {
       "name": "reads the dispatch skill before the first launch, worktree, models call or tracker write",
-      "rule": "Before proposing a new task for dispatch, validate its Tasks and File ownership rows with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
+      "rule": "Before proposing a new task for dispatch, validate its Tasks row with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
       "type": "tool_used",
       "tool": "Read",
       "input_match": "\"file_path\": \"[^\"\\n]*skills/dispatch/SKILL\\.md\"",
@@ -14,7 +14,7 @@
     },
     {
       "name": "the new row is validated with `worker --check`, by task and root",
-      "rule": "Before proposing a new task for dispatch, validate its Tasks and File ownership rows with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
+      "rule": "Before proposing a new task for dispatch, validate its Tasks row with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
       "type": "tool_used",
       "tool": "Bash",
       "input_match": "\"command\": \"(?:(?:[^\"'\\\\#;&|(`<]|\\\\t|\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|'[^']*')*(?:[;&|(`]|\\\\n))*(?:\\s|\\\\t)*(?:[A-Za-z_]\\w*=[\\w./:+$-]*\\s+)*(?:python3?\\s+)?(?:\\\\\"|')?(?:(?:[\\w./~${}-]*/)?chief[-_]of[-_]stuff(?:\\.py)?(?:\\\\\"|')?\\s+worker|(?:[\\w./~${}-]*/)?spawn_session\\.py(?:\\\\\"|')?|\\$\\{?\\w+\\}?(?:\\\\\"|')?\\s+worker)(?![\\w.-])(?=(?:[^\"\\\\;&|#]|\\\\(?!n).)*?--check(?![\\w-]))(?=(?:[^\"\\\\;&|#]|\\\\(?!n).)*?--root[\\s=])(?:[^\"\\\\;&|#]|\\\\(?!n).)*?--task[\\s=]+(?:\\$?(?:'Retry budget'|\\\\\"Retry budget\\\\\")|Retry budget(?=\\s|\\\\n|[;&|)`\"]))",
@@ -22,7 +22,7 @@
     },
     {
       "name": "no worker call passes --cwd",
-      "rule": "Before proposing a new task for dispatch, validate its Tasks and File ownership rows with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
+      "rule": "Before proposing a new task for dispatch, validate its Tasks row with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
       "type": "tool_used",
       "tool": "Bash",
       "input_match": "\"command\": \"(?:[^\"\\\\]|\\\\.)*?(?:chief[-_]of[-_]stuff(?:\\.py)?(?:\\\\\"|\\')?\\s+worker|spawn_session\\.py|\\$\\{?\\w+\\}?(?:\\\\\"|\\')?\\s+worker)(?![\\w.-])(?:[^\"\\\\]|\\\\.)*?\\s--cwd(?:[\\s=]|\\\\\")",
@@ -30,7 +30,7 @@
     },
     {
       "name": "no worktree is made to check a row",
-      "rule": "Before proposing a new task for dispatch, validate its Tasks and File ownership rows with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
+      "rule": "Before proposing a new task for dispatch, validate its Tasks row with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
       "type": "tool_used",
       "tool": "Bash",
       "input_match": "\"command\": \"(?:[^\"\\\\]|\\\\.)*?(?:chief[-_]of[-_]stuff(?:\\.py)?(?:\\\\\"|\\')?\\s+worktree|make_worktree\\.py|git\\s+worktree)(?![\\w-])",
@@ -38,20 +38,20 @@
     },
     {
       "name": "nothing is launched",
-      "rule": "Before proposing a new task for dispatch, validate its Tasks and File ownership rows with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
+      "rule": "Before proposing a new task for dispatch, validate its Tasks row with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
       "type": "tool_used",
       "tool": "Agent|Task",
       "max": 0
     },
     {
-      "name": "the reply tells Robin the File ownership row is missing",
-      "rule": "Before proposing a new task for dispatch, validate its Tasks and File ownership rows with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
+      "name": "the reply tells Robin the issue is missing",
+      "rule": "Before proposing a new task for dispatch, validate its Tasks row with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
       "type": "regex",
-      "pattern": "(?is)\\bno\\s+file ownership\\b|\\b(?:missing|lacks?|absent|without\\s+an?)\\b(?:\\s+\\w+){0,2}\\s+file ownership|file ownership[^.\\n]{0,60}(?:(?<!not )(?<!n't )\\b(?:missing|absent)\\b|\\b(?:isn't|is not|not) (?:there|written|set|present|listed)\\b|\\bno row\\b)"
+      "pattern": "(?is)\\bno\\s+issue\\b|\\b(?:missing|lacks?|absent|without\\s+an?)\\b(?:\\s+\\w+){0,2}\\s+issue\\b|\\bissue\\b[^.\\n]{0,60}(?:(?<!not )(?<!n't )\\b(?:missing|absent)\\b|\\b(?:isn't|is not|not) (?:there|filed|written|set|present|listed)\\b|\\bnone\\b)"
     },
     {
       "name": "the reply does not propose the refused task for dispatch",
-      "rule": "Before proposing a new task for dispatch, validate its Tasks and File ownership rows with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
+      "rule": "Before proposing a new task for dispatch, validate its Tasks row with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.",
       "type": "regex",
       "match": "absent",
       "pattern": "(?is)\\b(?:dispatch|launch|spin up|start)\\w*[^.\\n?]{0,40}\\?|\\b(?:reply|say|answer|type)\\s+(?:yes|ok|go|approve)\\b|\\bproposed\\s+dispatch\\b|```(?:(?!```).)*(?:\\b(?:do not|don't|never|no)\\s+commit|\\bowned files?\\b|\\bworktree\\b|\\bworker\\s+--type\\b)(?:(?!```).)*```"

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 UNCOMMITTED_UNKNOWN = "uncommitted work unknown (status unreadable)"
 UNREADABLE_BRANCH = "unreadable tree"  # a space, so no branch is called this
+CURSOR_CHANNEL_EXCLUDE = "/.cursor/mcp.json"
 
 
 @dataclass(frozen=True)
@@ -32,3 +33,23 @@ def at_risk(state: TreeState) -> tuple[str, ...]:
     out.append("origin/main unknown" if state.off_origin is None else f"{state.off_origin} not on origin/main")
     out.append("no upstream" if state.unpushed is None else f"{state.unpushed} unpushed")
     return tuple(out)
+
+
+# Directories a build or tool regenerates, so the tree's copy is no loss (E19). Exact names only: `build/` or `dist/` can
+# hold a hand-made fixture, and finding 27 lost a database snapshot and a fixtures copy that were only ignored.
+BUILD_OUTPUT = frozenset({"node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv",
+                          ".gradle", ".next", ".turbo", "target"})
+
+
+def unsaved(porcelain: str) -> tuple[str, ...]:
+    """Each path `git status --porcelain --ignored` lists that losing the tree would lose: every line but an ignored
+    directory named in BUILD_OUTPUT or the root engine metadata directory (cleanup's claims protect pending evidence).
+    A quoted (unusual) path never matches, so it counts as unsaved."""
+    return tuple(line.split(maxsplit=1)[-1] for line in porcelain.splitlines() if line.strip()
+                 and not (line.startswith("!! ") and line.endswith("/")
+                          and (line[3:] == ".chief-of-stuff/" or line[3:-1].rsplit("/", 1)[-1] in BUILD_OUTPUT)))
+
+
+def cursor_channel_only(porcelain: str) -> bool:
+    """Whether `git status --porcelain --ignored --untracked-files=all -- .cursor` lists only the ignored channel file."""
+    return [line for line in porcelain.splitlines() if line.strip()] == [f"!! {CURSOR_CHANNEL_EXCLUDE.removeprefix('/')}"]

@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from html.parser import HTMLParser
 from pathlib import Path
@@ -46,11 +47,14 @@ def check_links(case: unittest.TestCase, html: str) -> None:
 
 class ExternalLinksTest(tsp.SourcePage):
     def test_the_board(self):
-        html = rb.render(tfb.TRACKER, parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW, lanes=tfb.LANES,
-                         kanban=tfb.KANBAN, sources=tfb.SOURCES,
+        # #208: panels no longer supply external links; a merged card with no issue links to its forge page.
+        sources = replace(tfb.SOURCES, changes={**tfb.SOURCES.changes,
+                          "!90": tfb.change("!90", state="merged", merged_at=NOW)})
+        html = rb.render(tfb.TRACKER, parse_coordinator(tfb.CLAUDE_MD, today=NOW.date()), NOW, lanes=tfb.LANES,
+                         kanban=tfb.KANBAN, sources=sources,
                          decisions=[("x", {"headline": "Pick", "recommended": "B", "default": "d"},
                                      NOW.replace(hour=10, minute=0), "")],
-                         answered=1, tracker_at=NOW - timedelta(minutes=5))
+                         tracker_at=NOW - timedelta(minutes=5))
         check_links(self, html)
 
     def test_the_decisions_list(self):
@@ -72,6 +76,16 @@ class ExternalLinksTest(tsp.SourcePage):
         # The source page's external link is a review thread's (test_source_notes).
         check_links(self, tsp.sp.render(109, tsp.TRACKERS, self.sources(), tsp.NOW, self.graph, self.root / "pages",
                                         self.root, notes=[tsp.sp.Note(tsp.LIMITS, 7, "new", OPEN_ADD)]))
+
+
+class MalformedLinksTest(unittest.TestCase):
+    def test_malformed_url_in_shared_prose_does_not_break_rendering(self):
+        from fragment import external_url, href
+        from page_common import markdown_inline, markdown_blocks
+        self.assertEqual(external_url('https://['), '')
+        self.assertEqual(href('https://['), 'href="#"')
+        self.assertIn('https://[', markdown_inline('before https://[ after'))
+        self.assertIn('https://[', markdown_blocks('before https://[ after'))
 
 
 if __name__ == "__main__":

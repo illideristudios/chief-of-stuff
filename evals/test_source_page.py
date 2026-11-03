@@ -8,9 +8,11 @@ The module the implementer creates is `scripts/source_page.py` with
     write(root: Path, pages_dir: Path, number: int) -> Path | None
 
 `render` returns None when no task in `trackers` names issue `number` (as issue_page.render). The change is the one the
-sources say closes the issue; its diff is read from the clone at `root / graph.clone`, fetched and merge-based as
-module_graph.draw does. `write` writes `<pages_dir>/issue-<n>-source.html`, or removes it and returns None when
-`render` does. pages.py serves it at `GET /issues/<n>/source`.
+sources say closes the issue; its diff is read from the clone at `root / graph.clone` when settings name a `[graph]`
+table, otherwise from `root` when that path is a git repository, fetched and merge-based as module_graph.draw does.
+With no clone path and no workspace repo, the page lists files from the sources cache only. `write` writes
+`<pages_dir>/issue-<n>-source.html`, or removes it and returns None when `render` does. pages.py serves it at
+`GET /issues/<n>/source`.
 
 Markup contract these tests read (keep to it; everything else is free):
 
@@ -43,8 +45,9 @@ import board_sources as bs  # noqa: E402
 import issue_page as ip  # noqa: E402
 import make_repo  # noqa: E402
 import pages as pg  # noqa: E402
+import task_forge  # noqa: E402
 from settings import Graph  # noqa: E402
-from test_flow_chart import LANES, NOW, TODAY, YESTERDAY  # noqa: E402
+from test_flow_chart import BoardTest, LANES, NOW, TODAY, YESTERDAY  # noqa: E402
 from test_issue_page import ISSUE, OTHER, ROUTE_TRACKER, TODAY_START, YESTERDAY_TRACKER, ZONE  # noqa: E402
 from test_pages import get  # noqa: E402
 
@@ -171,7 +174,8 @@ class SourcePage(unittest.TestCase):
 
     def sources(self, *changes: bs.Change) -> bs.Sources:
         changes = changes or (self.mr, self.other, self.merged)
-        return bs.Sources({}, {"#109": ISSUE}, {c.ref: c for c in changes}, (), {})
+        return bs.Sources({}, {"#109": ISSUE}, {c.ref: c for c in changes}, (), {},
+                          bs.backlog.Backlog('https://forge.example', 'grp/app'))
 
     def render(self, number: int = 109, src: bs.Sources | None = None, graph: bool = True) -> str | None:
         if sp is None:
@@ -188,6 +192,15 @@ class SourcePage(unittest.TestCase):
 
 
 class RenderTest(SourcePage):
+    def test_offline_warm_diff_is_shown_with_stale_warning(self):
+        from unittest import mock
+        import module_graph
+        self.render()  # populate a verified comparison
+        with mock.patch.object(module_graph, 'fetch', side_effect=ValueError('offline')):
+            html = self.render()
+        self.assertIn('Stale cached diff: the current base could not be verified.', html)
+        self.assertIn('data-path="src/app/limits.py"', html)
+
     def test_no_header_prints_a_rendered_clock(self) -> None:
         # #215: the source crumb keeps the task and board links and the sources' read times, not a render clock.
         self.assertNotRegex(self.page(), r"\brendered \d{1,2}:\d{2}")
@@ -266,8 +279,8 @@ class RenderTest(SourcePage):
         self.assertIn("&lt;script&gt;", row["raw"])
 
     def test_without_a_graph_table_the_files_are_listed_and_the_clone_is_named(self):
-        # "The diff comes from the configured clone; with no `[graph]` table the page still lists the files from the
-        # sources cache and says the diff needs the clone."
+        # "With no `[graph]` table and no workspace root passed, the page lists files from the sources cache, says the
+        # diff needs the clone, and does not link file paths to missing anchors."
         html = self.render(graph=False)
         got = items(html)
         self.assertEqual(set(got), {LIMITS, QUOTA, LEGACY})
@@ -277,6 +290,40 @@ class RenderTest(SourcePage):
         self.assertRegex(text(html), r"(?i)\bclone\b|\[graph\]")
         self.assertEqual([r for _, t in tables(html).values() for r in rows(t)], [])
         self.assertIsNone(re.search(r'<tr\b[^>]*class="[^"]*\b(?:add|del|ctx)\b', html))
+        m = re.search(r'<ul\b[^>]*class="[^"]*\bfiles\b[^"]*"[^>]*>(.*?)</ul>', html, re.S)
+        self.assertIsNotNone(m)
+        self.assertNotIn('href="#', m[1])
+
+    def test_a_workspace_repo_without_a_graph_table_shows_its_diff(self):
+        # "When settings name no `[graph]` table but the workspace root is the change's clone, the page shows the diff."
+        pages = self.root / "fresh-pages"
+        pages.mkdir()
+        html = sp.render(109, TRACKERS, self.sources(), NOW, None, pages, self.root / "repos" / "app")
+        self.assertIsNotNone(html)
+        diffs = tables(html)
+        self.assertEqual(set(diffs), {LIMITS, QUOTA, LEGACY})
+        self.assertNotRegex(text(html), r"\[graph\]")
+        m = re.search(r'<ul\b[^>]*class="[^"]*\bfiles\b[^"]*"[^>]*>(.*?)</ul>', html, re.S)
+        self.assertIsNotNone(m)
+        for path in (LIMITS, QUOTA, LEGACY):
+            with self.subTest(path=path):
+                anchor_id = diffs[path][0]
+                self.assertRegex(m[1], rf'href="#{re.escape(anchor_id)}"[^>]*>\s*{re.escape(path)}\s*</a>')
+
+    def test_workspace_fallback_keeps_stale_diff_notes_when_offline(self):
+        from unittest import mock
+        import module_graph
+        clone, pages = self.root / "repos" / "app", self.root / "pages"
+        sp.render(109, TRACKERS, self.sources(), NOW, None, pages, clone)
+        with mock.patch.object(module_graph, "fetch", side_effect=ValueError("offline")):
+            html = sp.render(109, TRACKERS, self.sources(), NOW, None, pages, clone)
+        self.assertIn("Stale cached diff: the current base could not be verified.", html)
+        self.assertIn('data-path="src/app/limits.py"', html)
+
+    def test_graph_without_a_workspace_root_remains_a_file_listing(self):
+        html = sp.render(109, TRACKERS, self.sources(), NOW, self.graph, self.root / "pages")
+        self.assertIn(LIMITS, html)
+        self.assertNotIn('href="#f-', html)
 
     def test_no_change_naming_the_issue_says_nothing_to_diff(self):
         # "With no change naming the issue the page says there is nothing to diff."
@@ -302,7 +349,8 @@ class TaskPageLinkTest(SourcePage):
     def test_the_files_changed_card_links_to_the_source_page(self):
         # "The task page's Files changed card links to the source page: `open source & diff` goes to
         # `/issues/<n>/source`, and each file path links to that file on the source page."
-        task = ip.render(109, TRACKERS, self.sources(), NOW, LANES)
+        task = ip.render(109, TRACKERS, self.sources(), NOW, LANES,
+                         replace(BoardTest().cfg(), backlog=self.sources().home))
         m = re.search(r"<h2[^>]*>\s*Files changed\b.*?(?=<h2|\Z)", task, re.S)
         self.assertIsNotNone(m, "the task page has no Files changed section")
         card = m[0]
@@ -354,6 +402,74 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(get(self.port, "/issues/109/source").status, 200)
         self.assertTrue((self.pages / "issue-109-source.html").is_file(), "the route did not write issue-109-source.html")
         self.assertEqual(get(self.port, "/issue-109-source.html").status, 404)
+
+
+class StoreAndCrossRepoSourcePageTest(unittest.TestCase):
+    """#996: store-backed source pages resolve their own merged/open change without cross-repo bare-#N collisions
+    and refuse unsafe thread URL schemes."""
+
+    def make_db(self):
+        from test_m6_store_board import make_store_workspace
+
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        return db
+
+    def test_store_task_finds_its_merged_change_on_numeric_and_qualified_routes(self):
+        db = self.make_db()
+        key = "gitlab:labs.example.test/team/app#5"
+        db.upsert_item(key, title="Merged GitLab task", stage="merge", forge_state="closed")
+        src = bs.Sources(
+            {},
+            {"#5": bs.Issue("#5", "https://labs.example.test/team/app/-/issues/5", "Merged GitLab task", "closed", ())},
+            {"!12": bs.Change("!12", "https://labs.example.test/team/app/-/merge_requests/12", "Ship feature 5",
+                              "merged", False, "passed", True, 1, NOW, "main", ("src/feature.py",), ("#5",))},
+            (),
+            {},
+            home=bs.backlog.Backlog("https://labs.example.test", "team/app"),
+        )
+        pdata = task_forge.page_data(db)
+        for route in (5, key):
+            with self.subTest(route=route):
+                html = sp.render(route, [], src, NOW, db=pdata)
+                self.assertIsNotNone(html)
+                self.assertIn("!12", text(header(html)))
+                self.assertIn("src/feature.py", text(html))
+                self.assertNotIn("Nothing to diff", text(html))
+
+    def test_cross_repo_numeric_route_does_not_steal_home_repo_issue_or_change(self):
+        db = self.make_db()
+        db.upsert_item("github:example/other#12", title="Other-repo task", stage="implement")
+        src = bs.Sources(
+            {},
+            {"#12": bs.Issue("#12", "https://github.com/example/repo/issues/12", "Wrong home issue", "open", (), "Wrong home body")},
+            {"#55": bs.Change("#55", "https://github.com/example/repo/pull/55", "Wrong home PR", "open", False,
+                              "passed", True, 1, None, "main", ("src/wrong.py",), ("#12",))},
+            (),
+            {},
+            home=bs.backlog.GitHubBacklog("example/repo"),
+        )
+        html = sp.render(12, [], src, NOW, db=task_forge.page_data(db))
+        self.assertIsNotNone(html)
+        self.assertIn("Nothing to diff", text(html))
+        for wrong in ("#55", "Wrong home issue", "Wrong home body", "Wrong home PR", "src/wrong.py"):
+            self.assertNotIn(wrong, html)
+
+    def test_unsafe_thread_url_is_not_linked(self):
+        note = sp.Note(
+            path="src/a.py",
+            line=None,
+            side="new",
+            thread=bs.ReviewThread(False, "reviewer", "Check bounds", NOW, "javascript:alert(1)"),
+        )
+        mr = bs.Change("!48", "https://forge.example/grp/app/-/merge_requests/48", "Cap uploads", "open",
+                       False, "passed", False, 0, None, "main", ("src/a.py",), ("#109",))
+        html = sp.render(109, TRACKERS, bs.Sources({}, {"#109": ISSUE}, {"!48": mr}, (), {},
+                                                    bs.backlog.Backlog('https://forge.example', 'grp/app')), NOW, notes=[note])
+        self.assertNotRegex(html, r'(?i)href="\s*javascript:')
+        self.assertNotIn('href=""', html)
+        self.assertIn("Check bounds", text(html))
 
 
 if __name__ == "__main__":

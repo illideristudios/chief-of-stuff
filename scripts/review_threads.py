@@ -7,7 +7,7 @@
 The user, 2026-09-26 (#104): "I also want to be able to leave review comments in PRs and have them get
 addressed and picked up." A thread counts when `[workflow] approver`, the user's forge username, wrote in
 it and it is unresolved. It needs work while the user has the last word, and awaits the user once someone
-answers. A reply never resolves a thread: resolving is the user's. REF is `#12/<comment id>` on GitHub and
+answers. A reply never resolves a thread; the coordinator verifies fixes and resolves addressed threads without an owner wait. REF is `#12/<comment id>` on GitHub and
 `!5/<discussion id>` on GitLab, as the listing prints it.
 """
 
@@ -25,11 +25,19 @@ from forge_review import forge
 from workspace import ConfigError
 from settings import SettingsError
 
-# ponytail: first 100 open requests, threads and comments each; paginate when a request outgrows that.
-QUERY = """query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
-  pullRequests(states: OPEN, first: 100) { nodes { number title url
-    reviewThreads(first: 100) { nodes { isResolved path line
-      comments(first: 100) { nodes { author { login } body url databaseId } } } } } } } }"""
+LIMIT = 100  # open requests, threads per request and comments per thread, each read once
+QUERY = f"""query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{
+  pullRequests(states: OPEN, first: {LIMIT}) {{ nodes {{ number title url
+    reviewThreads(first: {LIMIT}) {{ nodes {{ isResolved path line
+      comments(first: {LIMIT}) {{ nodes {{ author {{ login }} body url databaseId }} }} }} }} }} }} }} }}"""
+
+
+def _whole(what: str, items: list) -> list:
+    """`items` unless the read reached LIMIT, which may have cut it short: a partial list never passes for a whole one."""
+    if len(items) >= LIMIT:
+        # shortcut: refuse rather than page; page these reads when a repo or request keeps this many open
+        raise RuntimeError(f"{what}: {LIMIT} or more; refusing to read a partial list as whole")
+    return items
 
 
 @dataclass(frozen=True)
@@ -55,10 +63,13 @@ def github_threads(repo: str, approver: str, gh=backlog.run_gh) -> list[Thread]:
     code, out, err = gh(["api", "graphql", "-f", f"query={QUERY}", "-F", f"owner={owner}", "-F", f"name={name}"])
     if code != 0:
         raise RuntimeError(f"gh api graphql: {err.strip() or code}")
+    answer = json.loads(out)
+    if answer.get("errors"):  # partial data beside errors is never the whole set
+        raise RuntimeError(f"gh api graphql: {answer['errors']}")
     found = []
-    for pr in json.loads(out)["data"]["repository"]["pullRequests"]["nodes"]:
-        for t in pr["reviewThreads"]["nodes"]:
-            comments = t["comments"]["nodes"]
+    for pr in _whole("open pull requests", answer["data"]["repository"]["pullRequests"]["nodes"]):
+        for t in _whole(f"#{pr['number']} review threads", pr["reviewThreads"]["nodes"]):
+            comments = _whole(f"#{pr['number']} thread comments", t["comments"]["nodes"])
             if t["isResolved"] or not comments:
                 continue
             notes = [((c.get("author") or {}).get("login"), c["body"], c["url"]) for c in comments]
@@ -71,16 +82,16 @@ def github_threads(repo: str, approver: str, gh=backlog.run_gh) -> list[Thread]:
 
 def gitlab_threads(home: backlog.Backlog, project: str, approver: str, token: str, call=backlog._call) -> list[Thread]:
     base = home.api(project)
-    listed, _, err = call("GET", f"{base}/merge_requests?" + urlencode({"state": "opened", "per_page": 100}), token, backlog.TIMEOUT)
+    listed, _, err = call("GET", f"{base}/merge_requests?" + urlencode({"state": "opened", "per_page": LIMIT}), token, backlog.TIMEOUT)
     if err:
         raise RuntimeError(f"merge requests: {err}")
     found = []
-    for mr in listed:
+    for mr in _whole("merge requests", listed):
         iid = int(mr["iid"])
-        discussions, _, err = call("GET", f"{base}/merge_requests/{iid}/discussions?per_page=100", token, backlog.TIMEOUT)
+        discussions, _, err = call("GET", f"{base}/merge_requests/{iid}/discussions?per_page={LIMIT}", token, backlog.TIMEOUT)
         if err:
             raise RuntimeError(f"!{iid} discussions: {err}")
-        for d in discussions:
+        for d in _whole(f"!{iid} discussions", discussions):
             notes = [n for n in d.get("notes") or [] if not n.get("system")]
             if not notes or not notes[0].get("resolvable") or notes[0].get("resolved"):
                 continue

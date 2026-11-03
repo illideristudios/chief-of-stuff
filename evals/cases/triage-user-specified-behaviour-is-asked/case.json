@@ -2,7 +2,7 @@
   "tz": "America/Chicago",
   "peers": "sessions.json",
   "description": "Triage: a Minor suggested fix with one concrete change contradicts a Decisions row the user wrote (keep the upload limit a literal). It is not an automatic fix: nothing goes to the implementer, R1 is asked about with the four dispositions and the page link, the stage stays triage, and neither Decisions nor the Log records an automatic fix.",
-  "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: full @ 3f9c2a1\nPR: https://github.com/o/app/pull/12\nTests: pass — 41/41 — `pytest -q`\nAxes not examined: none\nR1 | Maintainability | Minor | Confirmed | src/a/upload.py:12 | the 10 MB upload limit is a literal | add one constant, UPLOAD_LIMIT, and use it | suggested: fix\nAssessment: one finding.\n</cross-session-message>",
+  "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: full @ 3f9c2a1\nPR: https://github.com/o/app/pull/12\nTests: pass \u2014 41/41 \u2014 `pytest -q`\nAxes not examined: none\nR1 | Maintainability | Minor | Confirmed | src/a/upload.py:12 | the 10 MB upload limit is a literal | add one constant, UPLOAD_LIMIT, and use it | suggested: fix\nAssessment: one finding.\n</cross-session-message>",
   "graders": [
     {
       "name": "nothing goes to the implementer",
@@ -66,5 +66,6 @@
     }
   ],
   "max_turns": 16,
-  "timeout_seconds": 450
+  "timeout_seconds": 450,
+  "superseded_by": "autonomy-review-fixes"
 }

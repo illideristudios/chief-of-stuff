@@ -4,6 +4,4 @@
 
 ## Decisions
 
-## File ownership
-
 ## Log

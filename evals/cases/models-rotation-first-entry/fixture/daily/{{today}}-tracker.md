@@ -12,10 +12,6 @@
 | time | item | Robin's words |
 |---|---|---|
 
-## File ownership
-
-- Fix CSV export: quote fields that contain commas, with a test: `src/export.py`, `tests/test_export.py`
-
 ## Log
 
 - 09:00 opened the day

@@ -25,7 +25,7 @@
       "name": "queue holds an awaiting row",
       "type": "file_matches",
       "path": "notes/NOTIFICATIONS.md",
-      "pattern": "(?m)^\\| \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} \\| 🙋 Awaiting you — "
+      "pattern": "(?m)^\\| \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} \\| \ud83d\ude4b Awaiting you \u2014 "
     },
     {
       "name": "queue never written by hand",
@@ -43,5 +43,6 @@
     }
   ],
   "max_turns": 12,
-  "timeout_seconds": 300
+  "timeout_seconds": 300,
+  "superseded_by": "autonomy-routine-push"
 }

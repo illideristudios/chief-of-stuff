@@ -1,6 +1,7 @@
 """Unit tests for scripts/render_board.py: the board is a render of the tracker, and every bar cites a field."""
 
 import contextlib
+from dataclasses import replace
 import hashlib
 import http.server
 import io
@@ -15,6 +16,7 @@ import unittest
 from unittest import mock
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from evals.rules_text import rules_text
@@ -23,11 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import estimate  # noqa: E402
 import md  # noqa: E402
 import render_board as rb  # noqa: E402
-from workspace import parse_coordinator  # noqa: E402
+from workspace import Deadline, parse_coordinator  # noqa: E402
 from test_board_flow_design import outline  # noqa: E402
 import tracker as tr  # noqa: E402
 from backlog import Backlog, GitHubBacklog  # noqa: E402
 import settings as st  # noqa: E402
+import task_forge  # noqa: E402
 
 CT = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 9, 16, 14, 30, tzinfo=CT)
@@ -331,7 +334,7 @@ class RenderTest(unittest.TestCase):
 
     def test_the_page_declares_its_charset_first(self) -> None:
         """The Artifact wrapper sets one; a local open of the written file showed `Â·` for every ` · ` (C7's visual check)."""
-        self.assertTrue(self.html.startswith('<meta charset="utf-8">\n'), self.html[:80])
+        self.assertTrue(self.html.startswith('<!doctype html>\n<html lang="en">\n<meta charset="utf-8">\n'), self.html[:80])
 
     def test_embeds_tracker_hash_and_instants(self) -> None:
         sha = hashlib.sha256(TRACKER.encode()).hexdigest()
@@ -362,6 +365,17 @@ class RenderTest(unittest.TestCase):
             with self.subTest(cell=bad):
                 html = rb.render(LANED_TRACKER.replace("| 09:00 | 17:00 |", f"| {bad} | {bad} |", 1), self.cfg, NOW)
                 self.assertIn("Write eval README", html)
+
+    def test_the_header_shows_the_latest_policy_change(self) -> None:
+        early = SimpleNamespace(kind="policy_change", message="engine: policy changed: aaaaaaaaaaaa (overlay policy.toml)")
+        late = SimpleNamespace(kind="policy_change", message="engine: policy changed: bbbbbbbbbbbb (overlay policy.toml)")
+        page = task_forge.PageData((), (), (), (), {}, (), (early, late))
+        html = rb.render(TRACKER, self.cfg, NOW, db=page)
+        self.assertIn("bbbbbbbbbbbb", html)
+        self.assertIn("overlay policy.toml", html)
+        self.assertNotIn("aaaaaaaaaaaa", html)
+        quiet = rb.render(TRACKER, self.cfg, NOW, db=task_forge.PageData((), (), (), (), {}))
+        self.assertNotIn("policy changed", quiet)
 
 
 class ShortNameTest(unittest.TestCase):
@@ -662,13 +676,34 @@ class CliTest(unittest.TestCase):
         self.assertIn(">ANSWERED · B<", (pages / "decision-cache-size.html").read_text())
         self.assertIn(">PENDING<", (pages / "decision-deploy-window.html").read_text())
         self.assertEqual((pages / "decision-broken.html").exists(), False)
-        # The board's DECISIONS panel lists the same pending entries as decisions.html, the unreadable one apart.
-        self.assertIn('<a class="panels-link" href="/decisions">decisions page</a><b class="panels-count">1</b>', board)
-        self.assertIn('<a class="panels-name" href="/decisions/deploy-window">Decide deploy-window</a>', board)
-        # #349: the artboard's label. Its six tiles have no DECISIONS; the pending count is the tab bar's badge.
-        self.assertNotIn('<span class="panels-label">DECISIONS</span>', board)
-        self.assertIn('<span class="badge" title="1 pending">1</span>', board)
-        self.assertIn('decision-broken.json', board)
+        # #208: detail stays on the Decisions page; the board's tab retains its pending count.
+        self.assertIn('<a href="/decisions#pending-decisions" data-tone="pending">Decisions<span class="badge" title="1 pending">1</span></a>', board)
+        self.assertNotIn('id="decisions"', board)
+
+    def test_needs_input_tile_and_decisions_tab_link_to_the_pending_block(self) -> None:
+        # #1122: the tile and the tab name the id of the labelled PENDING block on /decisions, which exists, once,
+        # whether or not a decision is pending.
+        for pending in (True, False):
+            with self.subTest(pending=pending):
+                root = self.pages_root(free_port())
+                pages = root / "pages"
+                pages.mkdir()
+                if pending:
+                    (pages / "decision-deploy-window.json").write_text(json.dumps(
+                        {"ask": "Which window?", "options": [{"key": "A", "title": "Tonight"}], "recommended": "A",
+                         "why": "Quiet.", "default": "Nothing ships.", "headline": "Decide deploy-window"}))
+                    (pages / "decision-deploy-window.html").write_text("page")
+                (root / "daily" / "2026-09-16-tracker.md").write_text(TRACKER)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    board = rb.main(["--date", "2026-09-16", "--root", str(root)]).read_text()
+                page = (pages / "decisions.html").read_text()
+                target = "/decisions#pending-decisions"
+                self.assertRegex(board, rf'<a class="panels-tile" data-kind="blocked" href="{target}"><span class="panels-label">NEEDS INPUT')
+                self.assertRegex(board, rf'<a href="{target}"[^>]*>Decisions')
+                self.assertEqual(re.findall(r'id="pending-decisions"', page), ['id="pending-decisions"'])
+                heading = re.search(r'<section aria-labelledby="pending-decisions">\s*<h2 id="pending-decisions"[^>]*>PENDING', page)
+                self.assertTrue(heading, "the anchor is the PENDING heading, which labels its section")
+                self.assertRegex(page, rf'<a href="{target}"[^>]*aria-current="page"|<a [^>]*aria-current="page"[^>]*href="{target}"')
 
     def test_summary_line_counts_long_items(self) -> None:
         root = Path(tempfile.mkdtemp())
@@ -1169,6 +1204,87 @@ class DeadlineScopeTest(unittest.TestCase):
         self.assertIsNotNone(m, buf.getvalue())
 
 
+class ExpiredDeadlineClockTest(unittest.TestCase):
+    """When every configured deadline is past, the clock counts toward today's end of day, never backward."""
+
+    def setUp(self) -> None:
+        self.now = datetime(2026, 10, 18, 17, 42, tzinfo=CT)
+        self.cfg = parse_coordinator(CLAUDE_MD, today=self.now.date())
+
+    def test_every_deadline_past_selects_end_of_day(self) -> None:
+        self.assertEqual([d.name for d in self.cfg.deadlines], ["Launch", "Final"])
+        self.assertTrue(all(d.at < self.now for d in self.cfg.deadlines))
+        html = rb.render(TRACKER, self.cfg, self.now)
+        self._assert_clock(html, "2026-10-18T23:59:00-05:00", "end of day in", "6h17m00s")
+        self.assertNotIn("Final in", html)
+        self.assertNotIn("Launch in", html)
+        self.assertNotRegex(html, r'class="panels-left"[^>]*>-')
+
+    def test_no_configured_deadlines_use_the_same_fallback(self) -> None:
+        text = CLAUDE_MD.replace("- Deadlines:\n  - Launch: 2026-09-16 23:59\n  - Final: 2026-09-20 12:00\n", "")
+        cfg = parse_coordinator(text, today=self.now.date())
+        self.assertEqual(cfg.deadlines, ())
+        html = rb.render(TRACKER, cfg, self.now)
+        self._assert_clock(html, "2026-10-18T23:59:00-05:00", "end of day in", "6h17m00s")
+
+    def test_the_first_deadline_still_ahead_wins(self) -> None:
+        now = datetime(2026, 9, 17, 10, 0, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, now)
+        self._assert_clock(html, "2026-09-20T12:00:00-05:00", "Final in", None)
+        self.assertNotIn("end of day", html)
+
+    def test_a_deadline_equal_to_now_stays_and_reads_zero(self) -> None:
+        now = datetime(2026, 9, 16, 23, 59, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, now)
+        self._assert_clock(html, "2026-09-16T23:59:00-05:00", "Launch in", "0h00m00s")
+        self.assertNotIn("Launch passed", html)
+
+    def test_a_named_only_future_deadline_is_the_clock(self) -> None:
+        cfg = parse_coordinator(CLAUDE_MD_EXAM, today=SUNDAY.date())
+        html = rb.render(SUNDAY_TRACKER, cfg, SUNDAY)
+        self._assert_clock(html, "2026-09-26T23:59:00-05:00", "PCCAT 1st attempt in", None)
+        self.assertEqual(estimate.governing_deadline(cfg, SUNDAY).name, "end of day")
+        self.assertEqual(rb.horizon(cfg, SUNDAY), (datetime(2026, 9, 21, 0, 0, tzinfo=CT), "end of day"))
+
+    def test_an_expired_list_keeps_the_task_horizon(self) -> None:
+        self.assertEqual(rb.nearest_deadline(self.cfg, self.now).name, "end of day")
+        self.assertEqual(rb.nearest_deadline(self.cfg, self.now).at, datetime(2026, 10, 18, 23, 59, tzinfo=CT))
+        self.assertEqual(estimate.governing_deadline(self.cfg, self.now).at, datetime(2026, 10, 18, 23, 59, tzinfo=CT))
+        self.assertEqual(rb.horizon(self.cfg, self.now), (datetime(2026, 10, 19, 0, 0, tzinfo=CT), "end of day"))
+
+    def test_the_fallback_uses_the_workspace_zone(self) -> None:
+        zone = ZoneInfo("America/Los_Angeles")
+        now = datetime(2026, 10, 18, 17, 42, tzinfo=zone)
+        cfg = parse_coordinator(CLAUDE_MD.replace("America/Chicago", "America/Los_Angeles"), today=now.date())
+        html = rb.render(TRACKER, cfg, now)
+        self.assertIn('data-tz="America/Los_Angeles"', html)
+        self._assert_clock(html, "2026-10-18T23:59:00-07:00", "end of day in", "6h17m00s")
+
+    def test_after_2359_the_same_day_says_passed_and_the_next_day_is_new(self) -> None:
+        late = datetime(2026, 10, 18, 23, 59, 30, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, late)
+        self._assert_clock(html, "2026-10-18T23:59:00-05:00", "end of day passed", "0h00m30s ago")
+        nxt = datetime(2026, 10, 19, 0, 0, 1, tzinfo=CT)
+        html = rb.render(TRACKER, self.cfg, nxt)
+        self._assert_clock(html, "2026-10-19T23:59:00-05:00", "end of day in", "23h58m59s")
+
+    def test_a_deadline_name_is_escaped_in_the_attribute_and_the_label(self) -> None:
+        now = self.now
+        name = 'A<B>&"C"'
+        cfg = replace(self.cfg, deadlines=(Deadline(name, datetime(2026, 10, 18, 20, 0, tzinfo=CT)),))
+        html = rb.render(TRACKER, cfg, now)
+        self.assertIn('data-deadline-name="A&lt;B&gt;&amp;&quot;C&quot;"', html)
+        self.assertIn('<span class="panels-clock-name">A&lt;B&gt;&amp;&quot;C&quot; in</span>', html)
+        self.assertNotIn("A<B>", html)
+
+    def _assert_clock(self, html: str, instant: str, label: str, left: str | None) -> None:
+        self.assertIn(f'data-deadline="{instant}"', html)
+        self.assertIn(f'<span class="panels-clock-name">{label}</span>', html)
+        self.assertIn(f'<time class="panels-left" datetime="{instant}">', html)
+        if left is not None:
+            self.assertIn(f'<time class="panels-left" datetime="{instant}">{left}</time>', html)
+
+
 class DecisionDeadlineTest(unittest.TestCase):
     """A recorded deadline reaches the clock, markers and task horizon on the board."""
 
@@ -1452,13 +1568,12 @@ Coordinator: coordinator. Board: board-7.
 class SectionOrderTest(unittest.TestCase):
     """The page's sections appear in the Flow artboard's order (#259).
 
-    Tabs, header, tiles, BUILD, the MERGE ORDER / DECISIONS / WORKERS panels, then the Flow charts (this tracker
-    has no stage history, so none; test_board_flow_design.py pins their place after the panels).
+    Tabs, header, tiles, BUILD, then the Flow charts (this tracker
+    has no stage history, so none; test_board_flow_design.py pins their place after BUILD).
     Due next, Blocked, the 24-hour day strip, Lanes and Sessions are not in the design, so none is drawn.
     """
 
-    ORDER = ['<nav class="tabs"', '<header class="panels-head"', '<nav class="panels-tiles"', "<h2>Build</h2>",
-             '<div class="panels">']
+    ORDER = ['<nav class="tabs"', '<header class="panels-head"', '<nav class="panels-tiles"', "<h2>Build</h2>"]
 
     def setUp(self) -> None:
         self.cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
@@ -1473,8 +1588,8 @@ class SectionOrderTest(unittest.TestCase):
         # This tracker has no stage history, so the two Flow charts are not drawn (test_board_flow_design.py pins them).
         h2, ids, sections = outline(self.html)
         self.assertEqual(h2, ["Build"])
-        self.assertEqual(ids, ["flow", "merge", "decisions", "workers"])
-        self.assertEqual(sections, 4)
+        self.assertEqual(ids, ["flow"])
+        self.assertEqual(sections, 1)
 
 
 class InlineMarksTest(unittest.TestCase):
@@ -1642,7 +1757,7 @@ class TaskStateCarriesAShaTest(unittest.TestCase):
         """Confirmed against the rendered artifact, not the call graph: chief-of-stuff-improvements
         read the code and said the sha would show; it also said its own read was a hypothesis."""
         text = ("# T\n\n## Tasks\n\n" + LANED_HEAD
-                + f"| A oldest | A oldest | worker | done 09:00–10:00 {self.SHA} | 2026-09-15 |  | M | build | merge |  | c |\n")
+                + f"| A oldest | A oldest | worker | done 09:00–10:00 {self.SHA} | 2026-09-15 |  | M | build | main |  | c |\n")  # done draws only at main (#1153)
         cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         html = rb.render(text, cfg, NOW)
         self.assertIn(self.SHA, html)
@@ -1850,11 +1965,12 @@ class FlowRefReviewTest(unittest.TestCase):
                 self.assertEqual(set(re.findall(r'class="gantt-ref"[^>]*>([^<]*)<', flow)), {"!51"})
 
     def test_issue_key_and_issue_url_flow_refs_still_link_to_the_issue_page(self) -> None:
-        for ref in ("group/project#7", "https://forge.example/group/project/-/issues/7",
-                    "https://github.com/group/project/issues/7"):
+        for ref, identity in (("group/project#7", "github%3Agroup%2Fproject%237"),
+                              ("https://forge.example/group/project/-/issues/7", "gitlab%3Aforge.example%2Fgroup%2Fproject%237"),
+                              ("https://github.com/group/project/issues/7", "github%3Agroup%2Fproject%237")):
             with self.subTest(ref=ref):
                 flow = self.flow(ref, "Build the parser")
-                self.assertEqual(set(re.findall(r'href="(/issues/[^"]*)"', flow)), {"/issues/7"})
+                self.assertEqual(set(re.findall(r'href="(/issues/[^"]*)"', flow)), {f"/issues/{identity}"})
 
     def test_forge_issue_url_flow_labels_show_only_the_issue_number(self) -> None:
         # #459: display is #N, independent of the full key used to merge passes.
@@ -1957,7 +2073,7 @@ class LaneColumnsTest(unittest.TestCase):
         cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         html = rb.render(TRACKER_LANED, cfg, NOW, lanes=self.LANES)
         self.assertIn('<section id="flow"><h2>Build</h2>', html)
-        build = html.split('<section id="flow">')[1].split('<div class="panels">')[0]
+        build = html.split('<section id="flow">')[1].split('</figure></section>')[0]
         self.assertIn("Cut the release", build)
         self.assertNotIn("Console", build)
         self.assertNotIn("columns-foot", html)
@@ -1965,7 +2081,7 @@ class LaneColumnsTest(unittest.TestCase):
         # A tracker with no lanes has no stage columns, and its tasks are not drawn in BUILD at all.
         plain = rb.render(TRACKER, cfg, NOW)
         self.assertIn('<figure class="columns"', plain)
-        self.assertNotIn("<table", plain.split('<section id="flow">')[1].split('<div class="panels">')[0])
+        self.assertNotIn("<table", plain.split('<section id="flow">')[1].split('</figure></section>')[0])
         self.assertNotIn('class="columns-card', plain)  # the bare word is also in the page's CSS
 
 
@@ -1980,6 +2096,69 @@ class LaneColumnsTest(unittest.TestCase):
         self.assertIn('<div class="meta">1 issue · 0 merge requests</div>', html)
         self.assertNotRegex(html, r'href="[^"]*workflow')
         self.assertNotIn("#workflow", html)
+
+    def test_a_held_card_names_its_review_cause_when_present_and_plain_needs_input_otherwise(self) -> None:
+        # #203: a card waiting on the user at a non-gate stage carries `NEEDS INPUT · <cause>` when its latest Log move
+        # is a classified human-review stop, and plain `NEEDS INPUT` when class-less or without a review end.
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        tracker = (
+            "# Tracker 2026-09-16\n\nCoordinator: coordinator. Board: board-7.\n\n## Tasks\n\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Cut the release | Cut the release branch | Robin | waiting | 10:30 | 23:00 | M | build | implement | #9 | Checklist: cut |\n"
+            "| Write README | Write eval README | Robin | waiting | 09:00 | 17:00 | S | build | implement | #10 | Checklist: readme |\n"
+            "\n## Log\n\n"
+            "- 09:00 stage: Cut the release → implement\n"
+            "- 09:15 one-shot impl-1 started: codex, worktree `trees/cut`, task Cut the release branch\n"
+            "- 09:45 one-shot impl-1: HUMAN REVIEW NEEDED (worker's call) — conflicting test. Changes: none.\n"
+            "- 10:00 one-shot impl-2 started: codex, worktree `trees/readme`, task Write eval README\n"
+            "- 10:20 one-shot impl-2: HUMAN REVIEW NEEDED — old class-less line. Changes: none.\n"
+        )
+        def card_for(page: str, title: str) -> str:
+            flow = page.split('<section id="flow">')[1].split('</figure></section>')[0]
+            matches = [part for part in flow.split('<div class="columns-card')[1:] if f">{title}<" in part]
+            self.assertEqual(len(matches), 1, (title, flow))
+            return matches[0]
+
+        html = rb.render(tracker, cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        cut_card = card_for(html, "Cut the release")
+        readme_card = card_for(html, "Write README")
+        self.assertIn(">NEEDS INPUT · worker&#x27;s call<", cut_card)
+        self.assertNotIn("columns-chip", cut_card)
+        self.assertIn(">NEEDS INPUT<", readme_card)
+        self.assertNotIn("NEEDS INPUT ·", readme_card)
+        self.assertNotIn("columns-chip", readme_card)
+        # A later stage move using the task's short name clears the review cause even when the launch used the longer item.
+        cleared = rb.render(tracker + "- 10:30 stage: Cut the release → implement\n",
+                            cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        self.assertIn(">NEEDS INPUT<", card_for(cleared, "Cut the release"))
+        self.assertNotIn("NEEDS INPUT ·", card_for(cleared, "Cut the release"))
+        self.assertIn(">NEEDS INPUT<", card_for(cleared, "Write README"))
+
+    def test_short_name_beats_later_tasks_item_when_resolving_log_moves(self) -> None:
+        # #203 review R3: a task's short `name` must not be shadowed in Log resolution by a later row's `item`.
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        base_tracker = (
+            "# Tracker 2026-09-16\n\nCoordinator: coordinator. Board: board-7.\n\n## Tasks\n\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Foo | Long item A | Robin | waiting | 10:30 | 23:00 | M | build | implement | #9 | Checklist: a |\n"
+            "| Bar | Foo | Robin | waiting | 09:00 | 17:00 | S | build | implement | #10 | Checklist: b |\n"
+            "\n## Log\n\n"
+            "- 09:15 one-shot impl-1 started: codex, worktree `trees/foo`, task Long item A\n"
+            "- 09:45 one-shot impl-1: HUMAN REVIEW NEEDED (worker's call) — conflicting test. Changes: none.\n"
+        )
+        before = rb.render(base_tracker, cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        before_flow = before.split('<section id="flow">')[1].split('</figure></section>')[0]
+        before_foo = [part for part in before_flow.split('<div class="columns-card')[1:] if ">Foo<" in part]
+        self.assertEqual(len(before_foo), 1, before_flow)
+        self.assertIn(">NEEDS INPUT · worker&#x27;s call<", before_foo[0])
+        after = rb.render(base_tracker + "- 10:30 stage: Foo → implement\n", cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        after_flow = after.split('<section id="flow">')[1].split('</figure></section>')[0]
+        after_foo = [part for part in after_flow.split('<div class="columns-card')[1:] if ">Foo<" in part]
+        self.assertEqual(len(after_foo), 1, after_flow)
+        self.assertIn(">NEEDS INPUT<", after_foo[0])
+        self.assertNotIn("NEEDS INPUT ·", after_foo[0])
 
 
 class WorkflowTokenTest(unittest.TestCase):
@@ -2010,3 +2189,11 @@ class DensityTest(unittest.TestCase):
         html = rb.render(TRACER_TRACKER, cfg, NOW)
         self.assertLess(len(html), 32_000,
                         f"Board page is {len(html)} bytes, budget is 32 000")
+
+
+class BoardDocumentTest(unittest.TestCase):
+    def test_board_page_is_a_styled_standards_mode_document(self) -> None:
+        """#968: no doctype rendered the board in quirks mode. Its decision forms moved to /decisions (#895)."""
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        html = rb.render(TRACER_TRACKER, cfg, NOW)
+        self.assertTrue(html.startswith('<!doctype html>\n<html lang="en">'))

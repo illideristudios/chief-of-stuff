@@ -5,7 +5,7 @@
   "graders": [
     {
       "name": "reads the dispatch skill before the first launch, worktree, models call or tracker write",
-      "rule": "For a new interactive session, show a **dispatch proposal** and await approval.",
+      "rule": "Launch ready interactive work automatically too.",
       "type": "tool_used",
       "tool": "Read",
       "input_match": "\"file_path\": \"[^\"\\n]*skills/dispatch/SKILL\\.md\"",
@@ -31,5 +31,6 @@
     }
   ],
   "max_turns": 12,
-  "timeout_seconds": 300
+  "timeout_seconds": 300,
+  "superseded_by": "autonomy-interactive-dispatch"
 }

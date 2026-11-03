@@ -1,18 +1,17 @@
-"""A column board as an HTML fragment and its CSS: cards under column heads, with an overflow fold.
+"""A column board as an HTML fragment and its CSS: every card under its column head.
 
 Generic by design: it knows columns, cards, tags and marks, never what a column or a state means.
 Colours come from the palette passed to `css`; kinds are CSS classes a host can restyle or add to.
-No JavaScript: overflow is a native `<details>`, everything else is a class.
+No JavaScript.
 """
 
 from __future__ import annotations
 
-from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from fragment import colour as _colour, css_str as _css_str, esc as _esc, href as _href, kind as _kind
 
-LIMIT = 3
 # Okabe-Ito on parchment. (fill, ink, border): a tag's background, its text, and its border shorthand.
 PALETTE: dict[str, tuple[str, str, str]] = {
     "running": ("#0072B2", "#fbf8ef", "1px solid #0072B2"),
@@ -33,7 +32,7 @@ class Mark:
 @dataclass(frozen=True)
 class Card:
     name: str
-    kind: str  # the chip's palette key, and what overflow tallies
+    kind: str  # the chip's palette key
     refs: tuple[tuple[str, str], ...] = ()  # (text, url); a blank url draws plain text
     owner: str = ""
     state: str = ""  # the chip's text; blank draws no chip
@@ -55,42 +54,40 @@ def _tag(role: str, category: str, text: str) -> str:
     return f'<span class="columns-tag columns-{role}" data-cat="{_esc(category)}">{_esc(text)}</span>'
 
 
-def _link(text: str, url: str, cls: str = "", tag: str = "span") -> str:
+def _link(text: str, url: str, cls: str = "", tag: str = "span", prose: bool = False, inline: Callable[[str], str] = _esc) -> str:
     c = f' class="{cls}"' if cls else ""
-    return f'<a{c} {_href(url)}>{_esc(text)}</a>' if url else f"<{tag}{c}>{_esc(text)}</{tag}>"
+    body = inline(text) if prose else _esc(text)
+    # Inline Markdown can have its own links; never nest those in the card's navigation link.
+    return f'<a{c} {_href(url)}>{body}</a>' if url and '<a ' not in body else f"<{tag}{c}>{body}</{tag}>"
 
 
-def _card(c: Card) -> str:
-    chip = _tag("chip", c.kind, c.state) if c.state else ""
+def _card(c: Card, inline: Callable[[str], str] = _esc, linked_inline: Callable[[str], str] | None = None) -> str:
+    chip = _tag("chip", c.kind, c.state) if c.state and not (c.flag and c.flag.text.casefold() == c.state.casefold()) else ""
     marks = f'<div class="columns-marks">{"".join(_tag("mark", m.category, m.text) for m in c.marks)}</div>' if c.marks else ""
     head = f'<div class="columns-card columns-flagged" data-cat="{_esc(c.flag.category)}">' if c.flag else '<div class="columns-card">'
     flag = f'<div class="columns-tag columns-flag" data-cat="{_esc(c.flag.category)}">{_esc(c.flag.text)}</div>' if c.flag else ""
-    return (f'{head}{_link(c.name, c.href, "columns-card-name", "div")}'
+    name_inline = linked_inline if c.href and linked_inline else inline
+    return (f'{head}{_link(c.name, c.href, "columns-card-name", "div", True, name_inline)}'
             + (f'<div class="columns-refs">{"".join(_link(t, u) for t, u in c.refs)}</div>' if c.refs else "")
             + f'<div class="columns-who">{_link(c.owner, c.owner_href, "columns-owner")}{chip}</div>{marks}{flag}</div>')
 
 
-def tally(cards: tuple[Card, ...]) -> str:
-    """One span per kind, in order of first appearance: `2 open`, `1 done`."""
-    return "".join(f"<span>{n} {_esc(k)}</span>" for k, n in Counter(c.kind for c in cards).items())
-
-
-def _column(col: Column, limit: int) -> str:
+def _column(col: Column, inline: Callable[[str], str] = _esc,
+            linked_inline: Callable[[str], str] | None = None) -> str:
     kind = f" columns-{_kind(col.kind)}" if col.kind else ""
     note = f'<span class="columns-note">{_esc(col.note)}</span>' if col.note else ""
-    shown, rest = col.cards[:limit], col.cards[limit:]
-    more = (f'<details class="columns-more"><summary>+ {tally(rest)}</summary>{"".join(map(_card, rest))}</details>'
-            if rest else "")
+    cards = "".join(_card(c, inline, linked_inline) for c in col.cards)
     return (f'<section class="columns-col{kind}" aria-label="{_esc(col.name)}, {len(col.cards)}">'
             f'<div class="columns-head"><h3 class="columns-name">{_esc(col.name)}</h3>{note}'
-            f'<span class="columns-count">{len(col.cards)}</span></div>{"".join(map(_card, shown))}{more}</section>')
+            f'<span class="columns-count">{len(col.cards)}</span></div>{cards}</section>')
 
 
-def render(cols: list[Column], limit: int = LIMIT) -> str:
-    """The board as one `<figure>`: at most `limit` cards a column, the rest folded."""
+def render(cols: list[Column], inline: Callable[[str], str] = _esc,
+           linked_inline: Callable[[str], str] | None = None) -> str:
+    """Every card in each column; `linked_inline` renders names already inside navigation links."""
     n = sum(len(c.cards) for c in cols)
     out = [f'<figure class="columns" aria-label="{len(cols)} column{"" if len(cols) == 1 else "s"}, {n} card{"" if n == 1 else "s"}">',
-           '<div class="columns-grid">', *(_column(c, limit) for c in cols), "</div>", "</figure>"]
+           '<div class="columns-grid">', *(_column(c, inline, linked_inline) for c in cols), "</div>", "</figure>"]
     return "\n".join(out)
 
 
@@ -116,10 +113,6 @@ BASE_CSS = """\
 .columns-mark{font-size:10px;padding:0 5px;border-radius:3px}
 .columns-flagged{border:2px solid var(--c);padding-bottom:0;overflow:hidden}
 .columns-flag{margin:3px -7px 0;padding:2px 0;border:0;text-align:center;font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}
-.columns-more{font-size:11px;color:var(--columns-muted)}
-.columns-more>summary{cursor:pointer;display:flex;gap:6px;flex-wrap:wrap}
-.columns-more[open]{display:flex;flex-direction:column;gap:6px}
-.columns summary:focus-visible{outline:2px solid var(--columns-ink);outline-offset:1px}
 """
 
 

@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Epics</title>
+<script src="lib/86a3e9940611.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/ee8b56df405b.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/c271ee5c70f2.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/b80617d9b7e8.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fddc117a5ff1.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/1ca85659ab25.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/d8bf25eb11d0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/624ea7e85a53.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/bab9dc1971b0.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/261638ad9761.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/517fcb8cabb3.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/b34c10a1ffe0.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/43dc1b9a0c96.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/5be63e946cc5.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/dedb7e4dce28.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3df86f009f15.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/4bb93aca54b3.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/967b38372db4.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/9a9defceff14.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/f1c49bfd357d.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5c1cb227aa5a.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/1a2f3006ecc7.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/b3cedae80e66.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/071a53d2119e.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/455dfdb0f51a.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/50e2fc3909a0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/9777be10ff78.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5bf655ce1293.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/ea97db9e8f8b.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/156f0047d272.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3b1c199b3a86.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/aab9ff2ff8f0.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+<style>
+body{margin:0;font-family:"Alegreya Sans","Gill Sans",system-ui,sans-serif;background:#f4efe1;color:#2f2630}
+a{color:#8a6c30}a:hover{color:#6b5325}
+.chip{font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:0 6px;white-space:nowrap;justify-self:start}
+.row{display:grid;grid-template-columns:40px 290px 150px minmax(0,1fr) 108px 80px;gap:0 12px;align-items:center;padding:8px 14px}
+.row+.row{border-top:1px dotted #ddd3bd}
+.head{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6e6470;padding:0 14px 4px;align-items:end}
+.flt{font:inherit;font-size:13px;color:#2f2630;background:#fbf8ef;border:1px solid #ddd3bd;border-radius:14px;padding:3px 12px;cursor:pointer;min-height:30px}
+.flt:hover{border-color:#a7843e}
+.lane{position:relative;height:22px}
+</style>
+</helmet>
+
+<div style="width: 1280px; height: 764px; box-sizing: border-box; padding: 24px 32px 22px; background: #f4efe1; color: #2f2630; display: flex; flex-direction: column; gap: 14px; overflow: hidden; font-size: 14px; line-height: 1.45;">
+
+  <div style="margin: -12px 0 -4px;"><dc-import name="Tabs" current="Epics" hint-size="100%,34px"></dc-import></div>
+
+  <div style="display: flex; align-items: flex-end; gap: 20px; border-bottom: 1px solid #a7843e; padding-bottom: 10px;">
+    <div style="flex-grow: 1;">
+      <div style="font-size: 12.5px; color: #6e6470;">epics synced from the tracker 02:05 · 31 of 38 open issues sit in an epic</div>
+      <h1 style="margin: 2px 0 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 27px; font-weight: 600; letter-spacing: .04em;">Epics</h1>
+    </div>
+    <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 6px 12px; text-align: right;">
+      <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">now</div>
+      <div style="font-family: ui-monospace, monospace; font-size: 18px; font-variant-numeric: tabular-nums;">02:10:37</div>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 8px;">
+    <sc-for list="{{filters}}" as="f" hint-placeholder-count="4">
+      <button type="button" class="flt" sc-camel-on-click="{{f.pick}}" aria-pressed="{{f.on}}" style="{{f.style}}">{{f.label}} · {{f.count}}</button>
+    </sc-for>
+  </div>
+
+  <div style="display: flex; flex-direction: column;">
+    <div class="row head">
+      <span>epic</span><span></span><span>child issues</span>
+      <div class="lane" style="height: 14px;">
+        <sc-for list="{{days}}" as="d" hint-placeholder-count="7">
+          <span style="{{d.label}}">{{d.text}}</span>
+        </sc-for>
+      </div>
+      <span>est. work / left</span><span></span>
+    </div>
+    <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px;">
+      <sc-for list="{{rows}}" as="r" hint-placeholder-count="7">
+        <div class="row">
+          <a href="{{r.href}}" style="font-family: ui-monospace, monospace; font-size: 12px;">{{r.ref}}</a>
+          <div style="display: flex; flex-direction: column; min-width: 0;">
+            <a href="{{r.href}}" style="font-weight: 500; font-size: 14.5px; color: #2f2630; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{r.title}}</a>
+            <span style="font-size: 12px; color: #6e6470; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{r.why}}</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="font-size: 12px; font-variant-numeric: tabular-nums; width: 16px; text-align: right; color: #6e6470;">{{r.total}}</span>
+            <div title="{{r.counts}}" style="display: flex; gap: 2px; height: 12px; flex-grow: 1;">
+              <sc-for list="{{r.segs}}" as="g" hint-placeholder-count="3">
+                <span style="{{g.style}}"></span>
+              </sc-for>
+            </div>
+          </div>
+          <div class="lane">
+            <sc-for list="{{days}}" as="d" hint-placeholder-count="7">
+              <span style="{{d.line}}"></span>
+            </sc-for>
+            <span style="{{past}}"></span>
+            <sc-for list="{{r.marks}}" as="m" hint-placeholder-count="2">
+              <span title="{{m.title}}" style="{{m.style}}"></span>
+            </sc-for>
+            <span style="{{nowLine}}"></span>
+          </div>
+          <span style="{{r.workStyle}}">{{r.work}}</span>
+          <span class="chip" style="{{r.statusStyle}}">{{r.status}}</span>
+        </div>
+      </sc-for>
+      <div style="border-top: 1px solid #ddd3bd; padding: 7px 14px; font-size: 12.5px; color: #6e6470; display: flex; gap: 14px;">
+        <span style="font-family: 'Cormorant SC', Georgia, serif; letter-spacing: .08em; color: #2f2630;">CLOSED THIS WEEK · 3</span>
+        <span>&amp;7 Signup hardening · Thu</span><span>&amp;8 Timezone cleanup · Fri</span><span>&amp;10 Retry policy · Fri</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; font-size: 11px; color: #6e6470; border-top: 1px solid #ddd3bd; padding-top: 6px;">
+    <sc-for list="{{legend}}" as="l" hint-placeholder-count="5">
+      <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="{{l.style}}"></span>{{l.text}}</span>
+    </sc-for>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script="" data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:764}}">
+class Component extends DCLogic {
+  renderVals() {
+    var self = this;
+    var filter = (this.state && this.state.filter) || 'all';
+    var span = 168, now = 2 + 10 / 60;
+    var x = function (h) { return Math.max(0, Math.min(h, span)) / span * 100; };
+    var dayName = ['Sat 26', 'Sun 27', 'Mon 28', 'Tue 29', 'Wed 30', 'Thu 1', 'Fri 2'];
+    var when = function (h) {
+      var d = Math.floor(h / 24), m = Math.round((h - d * 24) * 60);
+      return (dayName[d] || 'Sat 3') + ' ' + ('0' + Math.floor(m / 60)).slice(-2) + ':' + ('0' + (m % 60)).slice(-2);
+    };
+    var hatch = function (c) { return 'repeating-linear-gradient(135deg, ' + c + ' 0 2px, transparent 2px 5px)'; };
+    var seg = {
+      merged: 'background: #4f6b3a;',
+      flight: 'background: #0072B2;',
+      held: 'background: ' + hatch('#c9533a') + '; box-shadow: inset 0 0 0 1px #c9533a;',
+      orphaned: 'border: 1px dashed #c9533a; box-sizing: border-box;',
+      queued: 'background: ' + hatch('#a39884') + '; box-shadow: inset 0 0 0 1px #a39884;'
+    };
+    var names = { merged: 'merged', flight: 'in flight', held: 'needs input', orphaned: 'orphaned', queued: 'queued' };
+    var statusStyle = {
+      'ON TRACK': 'color: #1e6b52; border: 1px solid #009E73;',
+      'AT RISK': 'color: #2f2630; background: #E69F00;',
+      'LATE': 'color: #fbf8ef; background: #c9533a;',
+      'NEEDS INPUT': 'color: #a3402b; border: 1px dashed #c9533a;'
+    };
+    // ref, title, start h, due h, children, est work min, work time left min, forecast end h, stuck, status, why, href
+    var epics = [
+      ['&14', 'Demo', -48, 11, { merged: 4, flight: 3, held: 1 }, 380, 510, 8.17, 'held', 'AT RISK', '#111 needs input on the cache warmup decision', 'Goal.dc.html'],
+      ['&15', 'Security review prep', -24, 57, { merged: 1, flight: 2, orphaned: 1, queued: 2 }, 850, 960, 52, 'orphaned', 'AT RISK', '#124 has no owner', 'Dispatch.dc.html'],
+      ['&16', 'Session cleanup', 24, 84, { held: 1, queued: 1 }, 480, 1500, null, 'held', 'NEEDS INPUT', '#107 waits on the session timeout decision', '#'],
+      ['&11', 'API v2 freeze', -120, 113, { merged: 3, flight: 2, queued: 4 }, 1080, 1800, 90, null, 'ON TRACK', '', '#'],
+      ['&13', 'Self-serve exports', 48, 138, { merged: 1, queued: 3 }, 1620, 1380, 159, null, 'LATE', 'queue puts the last child 21h past due', '#'],
+      ['&9', 'Harden uploads and rate limits', null, null, { merged: 3, flight: 2, queued: 1 }, 610, null, 88, null, 'ON TRACK', 'no due date on the epic', '#'],
+      ['&12', 'Faster cold starts', null, null, { held: 1, queued: 2 }, 540, null, null, 'held', 'NEEDS INPUT', 'no due date · #111 needs input', '#']
+    ];
+    var fmt = function (m) { return Math.floor(m / 60) + 'h' + ('0' + (m % 60)).slice(-2) + 'm'; };
+    var needsYou = function (e) { return e[8] !== null; };
+    var tests = {
+      all: function () { return true; },
+      week: function (e) { return e[3] !== null && e[3] < span; },
+      nodate: function (e) { return e[3] === null; },
+      you: needsYou
+    };
+    var labels = { all: 'All', week: 'Due this week', nodate: 'No due date', you: 'Needs input' };
+    var mark = function (a, b, style, title, top, h) {
+      return { title: title, style: 'position: absolute; top: ' + top + 'px; height: ' + h + 'px; box-sizing: border-box; border-radius: 2px; left: ' + x(a) + '%; width: ' + Math.max(x(b) - x(a), 0.4) + '%; ' + style };
+    };
+    return {
+      filters: ['all', 'week', 'nodate', 'you'].map(function (k) {
+        var on = filter === k;
+        return {
+          label: labels[k], on: on ? 'true' : 'false',
+          count: epics.filter(tests[k]).length,
+          pick: function () { self.setState({ filter: k }); },
+          style: on ? 'background: #2f2630; color: #fbf8ef; border-color: #2f2630;' : ''
+        };
+      }),
+      rows: epics.filter(tests[filter]).map(function (e) {
+        var c = e[4], order = ['merged', 'flight', 'held', 'orphaned', 'queued'];
+        var total = 0; order.forEach(function (k) { total += c[k] || 0; });
+        var start = e[2], due = e[3], fc = e[7], stuck = e[8];
+        var marks = [];
+        if (due !== null) {
+          marks.push(mark(Math.max(start, 0), due, 'background: rgba(167,132,62,.13); border-right: 2px solid #2f2630; border-radius: 2px 0 0 2px;', 'epic window · ' + (start < 0 ? 'started earlier' : 'starts ' + when(start)) + ' · due ' + when(due), 0, 22));
+        }
+        if (fc !== null) {
+          var end = due !== null ? Math.min(fc, due) : fc;
+          marks.push(mark(now, end, 'background: ' + hatch('#6f63b4') + '; box-shadow: inset 0 0 0 1px #6f63b4;', 'forecast · last child merges ' + when(fc) + (due !== null && fc <= due ? ' · ' + fmt(Math.round((due - fc) * 60)) + ' before due' : ''), 5, 12));
+          if (due !== null && fc > due) marks.push(mark(due, fc, 'background: #c9533a;', 'past due by ' + fmt(Math.round((fc - due) * 60)), 5, 12));
+        }
+        if (stuck === 'held') marks.push(mark(fc !== null ? fc : now, span, 'background: ' + hatch('#c9533a') + '; opacity: .8;', 'child needs input · no forecast until answered', 8, 6));
+        if (stuck === 'orphaned') marks.push(mark(fc, span, 'border: 1px dashed #c9533a;', 'orphaned child · no owner, no forecast', 8, 6));
+        var over = e[6] !== null && e[5] > e[6];
+        return {
+          ref: e[0], title: e[1], why: e[10] || (fc !== null ? 'last child merges ' + when(fc) : ''), href: e[11],
+          total: total,
+          counts: order.filter(function (k) { return c[k]; }).map(function (k) { return c[k] + ' ' + names[k]; }).join(' · '),
+          segs: order.filter(function (k) { return c[k]; }).map(function (k) { return { style: 'flex-grow: ' + c[k] + '; border-radius: 2px; ' + seg[k] }; }),
+          marks: marks,
+          work: e[6] === null ? fmt(e[5]) : fmt(e[5]) + ' / ' + fmt(e[6]),
+          workStyle: 'font-family: ui-monospace, monospace; font-size: 11.5px; white-space: nowrap; color: ' + (over ? '#c9533a; font-weight: 700' : '#6e6470') + ';',
+          status: e[9], statusStyle: statusStyle[e[9]]
+        };
+      }),
+      days: dayName.map(function (d, i) {
+        return { text: d,
+          line: 'position: absolute; top: -8px; bottom: -8px; width: 1px; background: #ebe3cf; left: ' + x(24 * i) + '%;',
+          label: 'position: absolute; bottom: 0; left: calc(' + x(24 * i) + '% + 3px); font-size: 10.5px; letter-spacing: 0; text-transform: none; font-family: ui-monospace, monospace;' };
+      }),
+      past: 'position: absolute; top: -8px; bottom: -8px; left: 0; background: #e9e1cc; opacity: .5; width: ' + x(now) + '%;',
+      nowLine: 'position: absolute; top: -8px; bottom: -8px; width: 2px; margin-left: -1px; background: #c9533a; left: ' + x(now) + '%;',
+      legend: [
+        ['epic window, ends at due', 'background: rgba(167,132,62,.13); border-right: 2px solid #2f2630;'],
+        ['forecast', 'background: ' + hatch('#6f63b4') + '; box-shadow: inset 0 0 0 1px #6f63b4;'],
+        ['past due', 'background: #c9533a;'],
+        ['needs input · no forecast', 'background: ' + hatch('#c9533a') + ';'],
+        ['merged', seg.merged], ['in flight', seg.flight], ['queued', seg.queued]
+      ].map(function (l) { return { text: l[0], style: 'width: 18px; height: 10px; border-radius: 2px; box-sizing: border-box; ' + l[1] }; })
+    };
+  }
+}
+</script>
+
+
+</body></html>

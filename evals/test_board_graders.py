@@ -26,10 +26,6 @@ class PagesWiringTest(unittest.TestCase):
     def test_pages_py_is_on_the_allowlist(self) -> None:
         self.assertIn(f"Bash(python3 {run.PLUGIN_ROOT / 'scripts' / 'pages.py'}:*)", run.ALLOWED)
 
-    def test_no_mock_publish_tool_is_left(self) -> None:
-        self.assertFalse(hasattr(run, "board_mcp_config"))
-        self.assertFalse((EVALS / "mock_board.py").exists())
-
     def test_each_run_gets_its_own_pages_port(self) -> None:
         a, b = run.context("America/Chicago", datetime.now(CT)), run.context("America/Chicago", datetime.now(CT))
         self.assertTrue(a["pages_port"].isdigit())
@@ -38,7 +34,8 @@ class PagesWiringTest(unittest.TestCase):
     def test_stop_pages_ends_what_a_case_started(self) -> None:
         work = Path(tempfile.mkdtemp())
         (work / "pages").mkdir()
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        (work / "pages.py").write_text("import time; time.sleep(60)\n")  # stop_pages signals only a `pages.py serve` pid
+        proc = subprocess.Popen([sys.executable, str(work / "pages.py"), "serve"], start_new_session=True)
         (work / "pages" / ".pid").write_text(str(proc.pid))
         run.stop_pages(work)
         self.assertIsNotNone(proc.wait(timeout=5))
@@ -161,17 +158,25 @@ class CaseMatchesTheRendererTest(unittest.TestCase):
     """A case's `html_match` is the renderer's markup, so the board grader fails on the agent, never on a stale pattern."""
 
     def test_the_done_card_pattern_matches_a_rendered_done_task(self) -> None:
+        # #1153: a done task leaves every Build stage column but main, so the grader looks for the
+        # audit's absence from Build (one card left; review empty), not a done chip on the card.
         case = EVALS / "cases" / "board-republish-on-task-change"
         spec = json.loads((case / "case.json").read_text())
         pattern = next(g["html_match"] for g in spec["graders"] if g.get("html_match"))
         work = Path(tempfile.mkdtemp())
         run.render_tree(case / "fixture", work, run.context(spec["tz"], datetime.now(ZoneInfo(spec["tz"]))))
         tracker = next((work / "daily").glob("*-tracker.md"))
-        tracker.write_text(tracker.read_text().replace("| Security audit | Security audit | coordinator | open |", "| Security audit | Security audit | coordinator | done 10:00 |"))
-        subprocess.run([sys.executable, str(run.PLUGIN_ROOT / "scripts" / "render_board.py"), "--root", str(work)], check=True, capture_output=True)
-        html = next((work / "pages").glob("*-board.html")).read_text()
-        self.assertRegex(html, pattern)
-        self.assertNotRegex(html.replace('columns-chip" data-cat="done">', 'columns-chip" data-cat="open">'), pattern)
+        board = run.PLUGIN_ROOT / "scripts" / "render_board.py"
+        subprocess.run([sys.executable, str(board), "--root", str(work)], check=True, capture_output=True)
+        open_html = next((work / "pages").glob("*-board.html")).read_text()
+        self.assertNotRegex(open_html, pattern)
+        tracker.write_text(tracker.read_text().replace(
+            "| Security audit | Security audit | coordinator | open |",
+            "| Security audit | Security audit | coordinator | done 10:00 |"))
+        subprocess.run([sys.executable, str(board), "--root", str(work)], check=True, capture_output=True)
+        done_html = next((work / "pages").glob("*-board.html")).read_text()
+        self.assertRegex(done_html, pattern)
+        self.assertNotIn('<div class="columns-card-name">Security audit</div>', done_html)
 
 
 if __name__ == "__main__":

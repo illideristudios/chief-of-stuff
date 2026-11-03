@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Issue</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Alegreya+Sans:wght@400;500;700&amp;family=Cormorant+SC:wght@600;700&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+
+<div style="width: 1280px; height: 1400px; box-sizing: border-box; padding: 24px 32px 22px; background: #f4efe1; color: #2f2630; display: flex; flex-direction: column; gap: 16px; overflow: hidden; font-family: 'Alegreya Sans', 'Gill Sans', system-ui, sans-serif; font-size: 14px; line-height: 1.45;">
+
+  <div style="margin: -12px 0 -4px;"><dc-import name="Tabs" current="Board" parent="true" hint-size="100%,34px"></dc-import></div>
+
+  <div style="display: flex; align-items: flex-end; gap: 20px; border-bottom: 1px solid #a7843e; padding-bottom: 10px;">
+    <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 3px;">
+      <div style="font-size: 12.5px; color: #6e6470;">Issue · epic <a href="{{i.epicHref}}" style="color: #8a6c30;">{{i.epic}}</a> · created {{i.created}}</div>
+      <div style="display: flex; align-items: baseline; gap: 12px;">
+        <h1 style="margin: 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 27px; font-weight: 600; letter-spacing: .04em;"><span style="font-family: ui-monospace, monospace; font-size: 20px; color: #8a6c30; letter-spacing: 0;">{{i.id}}</span> {{i.title}}</h1>
+        <span style="{{i.stageChip}}">{{i.stage}}</span>
+        <span style="{{i.stateChip}}">{{i.state}}</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 4px; font-size: 11px; letter-spacing: .06em; color: #6e6470;">
+        <sc-for list="{{rail}}" as="s" hint-placeholder-count="7">
+          <span style="{{s.style}}">{{s.label}}</span><span style="{{s.arrowStyle}}">→</span>
+        </sc-for>
+      </div>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: flex-end;">
+      <sc-for list="{{boxes}}" as="b" hint-placeholder-count="2">
+        <div style="{{b.style}}">
+          <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">{{b.label}}</div>
+          <div style="font-family: ui-monospace, monospace; font-size: 18px;">{{b.value}}</div>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 18px;">
+
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div style="{{next.style}}">
+        <div style="display: flex; align-items: baseline; gap: 12px;">
+          <strong style="font-size: 16px; flex-grow: 1;">{{next.head}}</strong>
+          <sc-for list="{{next.links}}" as="l" hint-placeholder-count="1"><a href="{{l.href}}" style="font-size: 13.5px; font-weight: 500; color: #8a6c30; white-space: nowrap;">{{l.t}}</a></sc-for>
+        </div>
+        <span style="font-size: 13px; color: #4a4150;">{{next.body}}</span>
+      </div>
+
+      <div>
+        <h2 style="margin: 0 0 6px; font-family: 'Cormorant SC', Georgia, serif; font-size: 16px; font-weight: 600; letter-spacing: .1em;">ACCEPTANCE <span style="font-family: 'Alegreya Sans', system-ui, sans-serif; font-size: 13px; letter-spacing: 0; color: #6e6470;">{{acceptSum}}</span></h2>
+        <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 2px 14px;">
+          <sc-for list="{{accept}}" as="a" hint-placeholder-count="3">
+            <div style="display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 0 10px; align-items: baseline; padding: 6px 0; border-top: 1px dotted #e6dcc6; font-size: 13px;">
+              <span style="{{a.box}}"></span>
+              <span>{{a.t}}</span>
+              <span style="{{a.resStyle}}">{{a.res}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <div>
+        <h2 style="margin: 0 0 6px; font-family: 'Cormorant SC', Georgia, serif; font-size: 16px; font-weight: 600; letter-spacing: .1em;">MERGE REQUEST</h2>
+        <sc-if value="{{hasMr}}" hint-placeholder-val="{{ true }}">
+          <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 4px 14px;">
+            <div style="display: flex; align-items: baseline; gap: 10px; padding: 5px 0; border-bottom: 1px solid #ddd3bd;">
+              <a href="{{mr.href}}" style="font-family: ui-monospace, monospace; font-size: 14px; color: #8a6c30;">{{mr.id}}</a>
+              <span style="{{mr.chip}}">{{mr.state}}</span>
+              <span style="font-family: ui-monospace, monospace; font-size: 12px; color: #6e6470; margin-left: auto;">{{mr.branch}}</span>
+            </div>
+            <sc-for list="{{mr.rows}}" as="m" hint-placeholder-count="4">
+              <div style="display: grid; grid-template-columns: 96px 76px minmax(0, 1fr); gap: 0 10px; align-items: baseline; padding: 5px 0; font-size: 13px; border-top: 1px dotted #e6dcc6;">
+                <span style="font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #6e6470;">{{m.k}}</span>
+                <span style="{{m.markStyle}}">{{m.mark}}</span>
+                <span>{{m.v}}</span>
+              </div>
+            </sc-for>
+          </div>
+        </sc-if>
+        <sc-if value="{{noMr}}" hint-placeholder-val="{{ false }}">
+          <div style="background: #fbf8ef; border: 1px dashed #bdb3a2; border-radius: 5px; padding: 9px 14px; font-size: 13px; color: #6e6470;">{{noMrText}}</div>
+        </sc-if>
+      </div>
+
+      <div>
+        <h2 style="margin: 0 0 6px; font-family: 'Cormorant SC', Georgia, serif; font-size: 16px; font-weight: 600; letter-spacing: .1em;">HISTORY</h2>
+        <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 2px 14px;">
+          <sc-for list="{{history}}" as="h" hint-placeholder-count="6">
+            <div style="display: grid; grid-template-columns: 70px 14px minmax(0, 1fr); gap: 0 10px; padding: 5px 0; font-size: 13px; border-top: 1px dotted #e6dcc6;">
+              <span style="font-family: ui-monospace, monospace; font-size: 12px; color: #6e6470;">{{h.t}}</span>
+              <span style="{{h.dot}}"></span>
+              <span>{{h.what}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div>
+        <h2 style="margin: 0 0 6px; font-family: 'Cormorant SC', Georgia, serif; font-size: 16px; font-weight: 600; letter-spacing: .1em;">WORKERS</h2>
+        <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 2px 14px;">
+          <sc-for list="{{workers}}" as="w" hint-placeholder-count="2">
+            <div style="display: grid; grid-template-columns: minmax(0, 1fr) 58px 76px; gap: 0 10px; align-items: baseline; padding: 6px 0; border-top: 1px dotted #e6dcc6; font-size: 13px;">
+              <span style="display: flex; flex-direction: column; min-width: 0;">
+                <a href="{{w.href}}" style="font-weight: 600; color: #2f2630;">{{w.name}}</a>
+                <span style="font-size: 12px; color: #6e6470;">{{w.what}}</span>
+              </span>
+              <span style="font-family: ui-monospace, monospace; font-size: 12px; text-align: right;">{{w.time}}</span>
+              <span style="{{w.chip}}">{{w.state}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <div>
+        <h2 style="margin: 0 0 6px; font-family: 'Cormorant SC', Georgia, serif; font-size: 16px; font-weight: 600; letter-spacing: .1em;">RELATED</h2>
+        <div style="background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px; padding: 2px 14px;">
+          <sc-for list="{{related}}" as="r" hint-placeholder-count="3">
+            <div style="display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; gap: 0 10px; align-items: baseline; padding: 6px 0; border-top: 1px dotted #e6dcc6; font-size: 13px;">
+              <span style="font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #6e6470;">{{r.k}}</span>
+              <a href="{{r.href}}" style="color: #2f2630;">{{r.v}}</a>
+              <span style="{{r.noteStyle}}">{{r.note}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <sc-if value="{{hasMetrics}}" hint-placeholder-val="{{ true }}">
+        <div>
+          <h2 style="margin: 0 0 6px; font-family: 'Cormorant SC', Georgia, serif; font-size: 16px; font-weight: 600; letter-spacing: .1em;">CODE</h2>
+          <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
+            <sc-for list="{{metrics}}" as="m" hint-placeholder-count="4">
+              <div style="{{m.style}}">
+                <span style="font-family: 'Cormorant SC', Georgia, serif; font-size: 12.5px; letter-spacing: .08em;">{{m.k}}</span>
+                <span style="display: flex; align-items: baseline; gap: 6px;"><b style="font-size: 18px;">{{m.v}}</b><span style="{{m.dStyle}}">{{m.d}}</span></span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+
+  <div>
+    <h2 style="margin: 0 0 4px; font-family: 'Cormorant SC', Georgia, serif; font-size: 16px; font-weight: 600; letter-spacing: .1em;">FLOW</h2>
+    <div style="display: flex; align-items: center; height: 15px; font-size: 10.5px; color: #6e6470; font-family: ui-monospace, monospace;">
+      <div style="width: 84px; flex: none;"></div>
+      <div style="position: relative; flex-grow: 1; height: 15px;">
+        <sc-for list="{{ticks}}" as="k" hint-placeholder-count="7"><span style="{{k.style}}">{{k.label}}</span></sc-for>
+        <span style="{{nowLabel}}">now</span>
+      </div>
+    </div>
+    <div style="position: relative; display: flex; align-items: center; height: 34px; background: #fbf8ef; border: 1px solid #ddd3bd; border-radius: 5px;">
+      <div style="width: 84px; flex: none; padding-left: 12px; box-sizing: border-box; font-size: 10.5px; letter-spacing: .08em; color: #6e6470;">STAGES</div>
+      <div style="position: relative; flex-grow: 1; height: 34px;">
+        <sc-for list="{{ticks}}" as="k" hint-placeholder-count="7"><span style="{{k.line}}"></span></sc-for>
+        <sc-for list="{{segs}}" as="g" hint-placeholder-count="5"><span title="{{g.title}}" style="{{g.style}}"></span></sc-for>
+        <span style="{{nowLine}}"></span>
+      </div>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: #6e6470; padding-top: 5px;">
+      <sc-for list="{{legend}}" as="l" hint-placeholder-count="8"><span style="display: inline-flex; align-items: center; gap: 5px;"><span style="{{l.style}}"></span>{{l.t}}</span></sc-for>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"issue":{"editor":"enum","options":["#105","#107","#124","#98"],"default":"#105"},"$preview":{"width":1280,"height":1400}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var key = this.props.issue || '#105';
+    var stageColor = { implement: '#0072B2', pr: '#56B4E9', review: '#009E73', triage: '#E69F00', fix: '#D55E00', verify: '#CC79A7', merge: '#000000' };
+    var chip = function (css) { return 'font-size: 10.5px; font-weight: 700; letter-spacing: .06em; border-radius: 3px; padding: 0 6px; white-space: nowrap; ' + css; };
+    var STATES = {
+      LOOPING: 'color: #fbf8ef; background: #c9533a;', 'NEEDS INPUT': 'color: #a3402b; border: 1px dashed #c9533a;',
+      ORPHANED: 'color: #a3402b; border: 1px dashed #c9533a;', MERGED: 'color: #fbf8ef; background: #4f6b3a;',
+      RUNNING: 'color: #fbf8ef; background: #0072B2;', DONE: 'color: #fbf8ef; background: #4f6b3a;', CRASHED: 'color: #a3402b; border: 1px dashed #c9533a;'
+    };
+    var NEXT = {
+      red: 'background: #fbf8ef; border: 1px solid #ddd3bd; border-top: 3px solid #c9533a;',
+      reddash: 'background: #fbf8ef; border: 1.5px dashed #c9533a;',
+      brass: 'background: #fbf8ef; border: 1px solid #ddd3bd; border-top: 3px solid #a7843e;',
+      green: 'background: #fbf8ef; border: 1px solid #ddd3bd; border-top: 3px solid #4f6b3a;'
+    };
+    // acceptance: [text, result, pass|fail|pending]
+    var D = {
+      '#105': { title: 'Audit log retention', epic: '&14 Demo', epicHref: 'Goal.dc.html', created: 'Thu 24 10:12', stage: 'FIX', state: 'LOOPING', railAt: 3,
+        boxes: [['age', '1d 16h', '#ddd3bd'], ['lands', '~07:30 ?', '#c9533a']],
+        next: ['red', 'Its worker has been looping for 39 minutes.', 'implementer-claude-04 failed the same test 6 times and wrote a migration outside the brief.', [['open the worker', 'Agent.dc.html']]],
+        accept: [['rows with legal_hold survive the job', 'test_retention_skips_legal_hold · failing', 'fail'], ['test_retention_* all pass', '41 of 42', 'fail'], ['no schema changes', 'migration 0042 on the branch', 'fail']],
+        mr: ['!44', 'OPEN', 'trees/audit-retention', '#', [['pipeline', 'failed', 'fail', '#8847 · Fri 23:12 · test_retention_skips_legal_hold'], ['approvals', '0 of 1', 'pending', 'reviewer-codex-02 asked for changes in round 1'], ['threads', '1 open', 'pending', 'held rows deleted after 90 days'], ['merge order', 'not queued', 'none', 'queues once the pipeline passes']]],
+        workers: [['implementer-claude-04', 'session · implement Fri 12:10, fix since 00:47', '5h23m', 'LOOPING', 'Agent.dc.html'], ['reviewer-codex-02', 'one-shot · review round 1, Fri 16:40', '1h00m', 'DONE', 'Workers.dc.html']],
+        related: [['epic', '&14 Demo', 'Goal.dc.html', 'at risk', 'a'], ['limits', 'Claude 5-hour window', 'Limits.dc.html', 'out 03:44', 'r']],
+        metrics: [['FLOG', '44.9', '+8.2', 'w'], ['FLAY', '0', '·', 'o'], ['CHURN', 'retention.py 9×', 'hot', 'w'], ['COVERAGE', '88%', '−2.1', 'w']],
+        history: [['Thu 10:12', 'created in &14 Demo', '#8a8f98'], ['Fri 12:10', 'implement · implementer-claude-04', '#0072B2'], ['Fri 16:10', '!44 opened', '#56B4E9'], ['Fri 16:40', 'review round 1 · reviewer-codex-02 · changes asked', '#009E73'], ['Fri 23:12', 'pipeline #8847 failed · back to FIX', '#c9533a'], ['00:47', 'fix started · implementer-claude-04', '#D55E00'], ['01:31', 'same failure from here on', '#c9533a']],
+        segs: [['implement', -14, -10], ['pr', -10, -9.8], ['review', -9.5, -8.5], ['fix', -1.4, 0], ['fix', 0, 1.5, 'ahead'], ['review', 2, 3, 'ahead'], ['merge', 5.2, 5.4, 'ahead']], loop: [-0.65, 0] },
+      '#107': { title: 'Session timeout', epic: '&16 Session cleanup', epicHref: 'Goals.dc.html', created: 'Fri 09:30', stage: 'TRIAGE', state: 'NEEDS INPUT', railAt: 2,
+        boxes: [['age', '16h40m', '#ddd3bd'], ['lands', 'after answer', '#a7843e']],
+        next: ['brass', 'Needs input: 30 or 60 minutes?', 'Asked 00:52. Recommended B, 60 minutes. If unanswered, 30 ships and this waits in triage.', [['answer it', 'Decisions.dc.html']]],
+        accept: [['idle sessions end at the chosen timeout', 'test_session_idle_timeout · passes for 30', 'pending'], ['users see a warning 2 minutes before', 'test_session_warning · passing', 'pass']],
+        mr: ['!46', 'APPROVED', 'trees/session-timeout', '#', [['pipeline', 'passed', 'pass', '#8820 · Fri 20:25'], ['approvals', '1 of 1', 'pass', 'reviewer-claude-01 · Fri 21:40'], ['threads', 'none open', 'pass', '2 resolved'], ['merge order', 'needs input', 'pending', 'waits on the decision']]],
+        workers: [['implementer-codex-01', 'one-shot · implement Fri 18:00', '2h10m', 'DONE', 'Workers.dc.html'], ['reviewer-claude-01', 'one-shot · review Fri 21:00', '0h40m', 'DONE', 'Workers.dc.html']],
+        related: [['epic', '&16 Session cleanup', 'Goals.dc.html', 'needs input', 'r'], ['decision', 'Session timeout: 30 or 60 minutes?', 'Decisions.dc.html', 'pending 1h18m', 'a']],
+        metrics: [['FLOG', '12.1', '+1.4', 'o'], ['FLAY', '0', '·', 'o'], ['CHURN', 'session.py 3×', '', 'o'], ['COVERAGE', '96%', '+0.8', 'g']],
+        history: [['Fri 09:30', 'created in &16 Session cleanup', '#8a8f98'], ['Fri 18:00', 'implement · implementer-codex-01', '#0072B2'], ['Fri 20:10', '!46 opened', '#56B4E9'], ['Fri 21:40', 'approved · reviewer-claude-01', '#009E73'], ['00:52', 'decision asked · needs input', '#a7843e']],
+        segs: [['implement', -8.2, -6], ['pr', -6, -5.8], ['review', -5.2, -4.5], ['triage', -1.3, 0], ['triage', 0, 8, 'hold']] },
+      '#124': { title: 'Webhook signature check', epic: '&15 Security review prep', epicHref: 'Goals.dc.html', created: 'Fri 15:00', stage: 'IMPLEMENT', state: 'ORPHANED', railAt: 0,
+        boxes: [['age', '11h10m', '#ddd3bd'], ['epic due', 'Mon 09:00', '#E69F00']],
+        next: ['reddash', 'No worker since 23:58.', 'implementer-codex-05 crashed after 1h10m with 2 commits and 5 of 9 tests passing.', [['re-dispatch', 'Dispatch.dc.html']]],
+        accept: [['unsigned requests get 401', 'test_rejects_unsigned · passing', 'pass'], ['signatures older than 5 minutes get 401', 'test_rejects_stale · failing', 'fail'], ['test_webhook_signature_* all pass', '5 of 9', 'fail']],
+        mr: null, noMr: 'No merge request yet · branch trees/webhook-sig has 2 commits, last at 23:41',
+        workers: [['implementer-codex-05', 'one-shot · implement Fri 22:48', '1h10m', 'CRASHED', 'Workers.dc.html']],
+        related: [['epic', '&15 Security review prep', 'Goals.dc.html', 'at risk', 'a'], ['queue', 'Dispatch', 'Dispatch.dc.html', 'ready to re-dispatch', 'g']],
+        metrics: null,
+        history: [['Fri 15:00', 'created in &15 Security review prep', '#8a8f98'], ['Fri 22:48', 'dispatched to implementer-codex-05', '#0072B2'], ['23:41', 'second commit · 5 of 9 passing', '#0072B2'], ['23:58', 'worker crashed · orphaned', '#c9533a']],
+        segs: [['implement', -3.4, -2.2], ['orphan', -2.2, 8]] },
+      '#98': { title: 'Locale fallback', epic: '&14 Demo', epicHref: 'Goal.dc.html', created: 'Wed 23 16:20', stage: 'MAIN', state: 'MERGED', railAt: 6,
+        boxes: [['took', '2d 8h', '#ddd3bd'], ['merged', '00:41', '#4f6b3a']],
+        next: ['green', 'Merged 00:41 as !37.', 'After the Locale fallback decision was answered B at 00:41.', [['decisions', 'Decisions.dc.html']]],
+        accept: [['unknown locales fall back to the base locale', 'test_locale_fallback · passing', 'pass'], ['no missing-key errors in the log', 'test_no_missing_keys · passing', 'pass']],
+        mr: ['!37', 'MERGED', 'trees/locale-fallback', '#', [['pipeline', 'passed', 'pass', '#8836 · 00:38'], ['approvals', '1 of 1', 'pass', 'reviewer-codex-02 · Thu 21:10'], ['threads', 'none open', 'pass', '3 resolved'], ['merge order', 'merged', 'pass', '00:41 · first of the night']]],
+        workers: [['implementer-claude-05', 'one-shot · implement Thu 16:10', '3h30m', 'DONE', 'Workers.dc.html'], ['reviewer-codex-02', 'one-shot · review Thu 20:10', '1h00m', 'DONE', 'Workers.dc.html']],
+        related: [['epic', '&14 Demo', 'Goal.dc.html', 'at risk', 'a'], ['decision', 'Locale fallback', 'Decisions.dc.html', 'answered B', 'g']],
+        metrics: [['FLOG', '6.3', '−0.4', 'g'], ['FLAY', '0', '·', 'o'], ['CHURN', 'i18n.py 2×', '', 'o'], ['COVERAGE', '100%', '+3.0', 'g']],
+        history: [['Wed 16:20', 'created in &14 Demo', '#8a8f98'], ['Thu 16:10', 'implement · implementer-claude-05', '#0072B2'], ['Thu 19:40', '!37 opened', '#56B4E9'], ['Thu 21:10', 'approved · reviewer-codex-02', '#009E73'], ['Fri 21:00', 'decision asked · needs input', '#a7843e'], ['00:41', 'answered B · merged', '#4f6b3a']],
+        segs: [['triage', -16, -3.8, 'hold'], ['triage', -3.8, -1.55], ['merge', -1.55, -1.45]] }
+    };
+    var d = D[key] || D['#105'];
+    var from = -16, to = 8;
+    var x = function (h) { return (Math.max(from, Math.min(h, to)) - from) / (to - from) * 100; };
+    var clock = function (h) { var m = ((Math.round((h + 2 + 10 / 60) * 60) % 1440) + 1440) % 1440; return ('0' + Math.floor(m / 60)).slice(-2) + ':' + ('0' + (m % 60)).slice(-2); };
+    var hatch = function (c, a) { return 'repeating-linear-gradient(135deg, ' + c + (a || '66') + ' 0 3px, transparent 3px 6px)'; };
+    var stages = ['IMPLEMENT', 'REVIEW', 'TRIAGE', 'FIX', 'VERIFY', 'MERGE', 'MAIN'];
+    var resMark = { pass: ['background: #4f6b3a;', 'color: #1e6b52;'], fail: ['border: 2px solid #c9533a;', 'color: #a3402b; font-weight: 700;'], pending: ['border: 2px solid #56B4E9;', 'color: #2c6f95;'], none: ['border: 1px solid #bdb3a2;', 'color: #6e6470;'] };
+    var passed = d.accept.filter(function (a) { return a[2] === 'pass'; }).length;
+    var tone = { a: 'color: #a8660f; font-weight: 700;', r: 'color: #a3402b; font-weight: 700;', g: 'color: #1e6b52;', o: 'color: #6e6470;', w: 'color: #a8660f;' };
+    var segs = d.segs.map(function (g) {
+      var st = g[0], kind = g[3];
+      var style;
+      if (st === 'orphan') style = 'border: 1.5px dashed #c9533a; background: transparent;';
+      else if (kind === 'ahead') style = 'background: ' + hatch(stageColor[st]) + '; box-shadow: inset 0 0 0 1px ' + stageColor[st] + ';';
+      else if (kind === 'hold') style = 'background: repeating-linear-gradient(135deg, #c9533a 0 2px, #f4efe1 2px 5px); box-shadow: inset 0 0 0 1px #c9533a;';
+      else style = 'background: ' + stageColor[st] + ';';
+      return { title: (st === 'orphan' ? 'no worker' : st) + ' ' + clock(g[1]) + '–' + clock(g[2]) + (kind ? ' · ' + (kind === 'ahead' ? 'forecast' : kind) : ''),
+        style: 'position: absolute; top: 10px; height: 14px; border-radius: 2px; box-sizing: border-box; left: ' + x(g[1]) + '%; width: ' + Math.max(x(g[2]) - x(g[1]), 0.4) + '%; ' + style };
+    });
+    if (d.loop) segs.push({ title: 'looping since 01:31', style: 'position: absolute; top: 4px; bottom: 4px; left: ' + x(d.loop[0]) + '%; width: ' + (x(d.loop[1]) - x(d.loop[0])) + '%; background: ' + hatch('#c9533a', '33') + '; box-shadow: inset 0 0 0 1.5px #c9533a; border-radius: 2px;' });
+    var ticks = [];
+    for (var h = -16; h <= 8; h += 4) { var at = h - 10 / 60; if (at < from) continue; ticks.push({ label: clock(at), style: 'position: absolute; transform: translateX(-50%); left: ' + x(at) + '%;', line: 'position: absolute; top: 0; bottom: 0; width: 1px; background: #ebe3cf; left: ' + x(at) + '%;' }); }
+    return {
+      i: { id: key, title: d.title, epic: d.epic, epicHref: d.epicHref, created: d.created, stage: d.stage, state: d.state,
+        stageChip: chip('color: #2f2630; border: 1.5px solid ' + (d.stage === 'MAIN' ? '#4f6b3a' : stageColor[d.stage.toLowerCase()]) + ';'),
+        stateChip: chip(STATES[d.state]) },
+      rail: stages.map(function (s, k) {
+        var done = k < d.railAt, now = k === d.railAt;
+        return { label: s, arrowStyle: k === stages.length - 1 ? 'display: none;' : 'color: #bdb3a2;',
+          style: 'padding: 0 6px; border-radius: 3px; ' + (now ? 'background: #2f2630; color: #fbf8ef; font-weight: 700;' : done ? 'background: #ebe4d2; color: #2f2630;' : 'border: 1px dashed #bdb3a2;') };
+      }),
+      boxes: d.boxes.map(function (b) { return { label: b[0], value: b[1], style: 'background: #fbf8ef; border: 1px solid #ddd3bd; border-top: 3px solid ' + b[2] + '; border-radius: 5px; padding: 4px 12px 6px; text-align: right;' }; }),
+      next: { style: NEXT[d.next[0]] + ' border-radius: 5px; padding: 10px 14px; display: flex; flex-direction: column; gap: 3px;', head: d.next[1], body: d.next[2], links: d.next[3].map(function (l) { return { t: l[0], href: l[1] }; }) },
+      acceptSum: passed + ' of ' + d.accept.length + ' met',
+      accept: d.accept.map(function (a) { return { t: a[0], res: a[1], box: 'width: 12px; height: 12px; border-radius: 3px; box-sizing: border-box; margin-top: 3px; ' + resMark[a[2]][0], resStyle: 'font-size: 12px; white-space: nowrap; ' + resMark[a[2]][1] }; }),
+      hasMr: !!d.mr, noMr: !d.mr, noMrText: d.noMr || '',
+      mr: d.mr ? { id: d.mr[0], state: d.mr[1], branch: d.mr[2], href: d.mr[3],
+        chip: chip(d.mr[1] === 'MERGED' ? 'color: #fbf8ef; background: #4f6b3a;' : d.mr[1] === 'APPROVED' ? 'color: #fbf8ef; background: #009E73;' : 'color: #1e6b52; border: 1px solid #009E73;'),
+        rows: d.mr[4].map(function (m) { return { k: m[0], mark: m[1], v: m[3], markStyle: 'justify-self: start; font-size: 10.5px; padding: 0 6px; border-radius: 3px; white-space: nowrap; ' + ({ pass: 'border: 1px solid #009E73; color: #1e6b52;', fail: 'border: 1px solid #c9533a; color: #a3402b; font-weight: 700;', pending: 'border: 1px solid #56B4E9; color: #2c6f95;', none: 'border: 1px solid #ddd3bd; color: #6e6470;' })[m[2]] }; }) }
+        : { id: '', state: '', branch: '', href: '#', chip: '', rows: [] },
+      workers: d.workers.map(function (w) { return { name: w[0], what: w[1], time: w[2], state: w[3], href: w[4], chip: chip(STATES[w[3]]) + ' justify-self: end;' }; }),
+      related: d.related.map(function (r) { return { k: r[0], v: r[1], href: r[2], note: r[3], noteStyle: 'font-size: 12px; white-space: nowrap; ' + tone[r[4]] }; }),
+      hasMetrics: !!d.metrics,
+      metrics: (d.metrics || []).map(function (m) { return { k: m[0], v: m[1], d: m[2], dStyle: 'font-family: ui-monospace, monospace; font-size: 12px; font-weight: 700; ' + tone[m[3]],
+        style: 'display: flex; flex-direction: column; background: #fbf8ef; border: 1px solid #ddd3bd; border-top: 3px solid ' + ({ w: '#E69F00', g: '#009E73', o: '#ddd3bd', r: '#c9533a', a: '#E69F00' })[m[3]] + '; border-radius: 5px; padding: 5px 11px;' }; }),
+      history: d.history.map(function (h) { return { t: h[0], what: h[1], dot: 'width: 9px; height: 9px; border-radius: 50%; margin-top: 5px; background: ' + h[2] + ';' }; }),
+      ticks: ticks, segs: segs,
+      nowLabel: 'position: absolute; transform: translateX(-50%); left: ' + x(0) + '%; color: #c9533a; font-weight: 600; background: #f4efe1; padding: 0 3px;',
+      nowLine: 'position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #c9533a; left: ' + x(0) + '%;',
+      legend: ['implement', 'review', 'triage', 'fix', 'merge'].map(function (s) { return { t: s, style: 'width: 18px; height: 10px; border-radius: 2px; background: ' + stageColor[s] + ';' }; })
+        .concat([{ t: 'forecast', style: 'width: 18px; height: 10px; border-radius: 2px; box-sizing: border-box; background: ' + hatch('#0072B2') + '; box-shadow: inset 0 0 0 1px #0072B2;' },
+          { t: 'needs input', style: 'width: 18px; height: 10px; border-radius: 2px; box-sizing: border-box; background: repeating-linear-gradient(135deg, #c9533a 0 2px, #f4efe1 2px 5px); box-shadow: inset 0 0 0 1px #c9533a;' },
+          { t: 'no worker', style: 'width: 18px; height: 10px; border-radius: 2px; box-sizing: border-box; border: 1.5px dashed #c9533a;' }])
+    };
+  }
+}
+</script>
+</body>
+</html>

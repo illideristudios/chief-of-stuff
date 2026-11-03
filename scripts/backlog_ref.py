@@ -146,7 +146,7 @@ def home_of(cfg: Backlog | GitHubBacklog) -> tuple[str, str]:
     """(host, repo or project): where a bare `#N` in the tracker points."""
     if isinstance(cfg, GitHubBacklog):
         return GITHUB, cfg.repo
-    return urlsplit(cfg.host).hostname or "", cfg.project
+    return urlsplit(cfg.host).netloc or "", cfg.project
 
 
 def file_with(cfg: Backlog | GitHubBacklog) -> str:
@@ -168,24 +168,56 @@ class IssueRef:
             return f"https://github.com/{self.repo}/issues/{self.number}"
         return f"https://{self.host}/{self.repo}/-/issues/{self.number}"
 
+    @property
+    def store_key(self) -> str:
+        """The full forge identity used by the store and issue routes."""
+        if self.host == GITHUB:
+            return f"github:{self.repo}#{self.number}"
+        return f"gitlab:{self.host}/{self.repo}#{self.number}"
+
     def label(self, home: Backlog | GitHubBacklog | None) -> str:
-        """`#N` in the Backlog, `owner/repo#N` on GitHub, `host/project#N` on any other GitLab: the key an issue is
+        """`#N` in the Backlog, `owner/repo#N` on GitHub, `gitlab:host/project#N` on any other GitLab: the key an issue is
         filed and read under, so a project path on two hosts is two keys."""
         if home is not None and (self.host, self.repo) == home_of(home):
             return f"#{self.number}"
-        return f"{self.repo}#{self.number}" if self.host == GITHUB else f"{self.host}/{self.repo}#{self.number}"
+        return f"{self.repo}#{self.number}" if self.host == GITHUB else f"gitlab:{self.host}/{self.repo}#{self.number}"
+
+
+_REF_STORE = re.compile(r"^(github|gitlab):(.+)#(\d+)$")
+
+
+def store_label(key: str, home: Backlog | GitHubBacklog | None) -> str:
+    """`IssueRef.label` for a store key (`github:owner/repo#N`, `gitlab:host/project#N`). Anything else is unchanged."""
+    m = _REF_STORE.match(key)
+    if not m:
+        return key
+    kind, body, number = m.group(1), m.group(2), int(m.group(3))
+    if kind == "github":
+        ref = IssueRef(body, number)
+    else:
+        host, _, repo = body.partition("/")
+        ref = IssueRef(repo, number, host)
+    return ref.label(home)
 
 
 WORKFLOW = "workflow"  # an `issue` cell naming a step the pipeline performs: no issue, never looked up
-_REF_SHORT = re.compile(r"^([\w.-]+/[\w.-]+)?#(\d+)$")
+_REF_SHORT = re.compile(r"^((?:[\w.-]+/)+[\w.-]+)?#(\d+)$")
+_REF_HOST_LABEL = re.compile(r"^([^/]+(?::\d+)?)/((?:[\w.-]+/)+[\w.-]+)#(\d+)$")
 _REF_URL = re.compile(r"^https://github\.com/([\w.-]+/[\w.-]+)/issues/(\d+)/?$")
-_REF_GITLAB = re.compile(r"^https://([\w.-]+)/((?:[\w.-]+/)+[\w.-]+)/-/(?:issues|work_items)/(\d+)/?$")
+_REF_GITLAB = re.compile(r"^https://([\w.-]+(?::\d+)?)/((?:[\w.-]+/)+[\w.-]+)/-/(?:issues|work_items)/(\d+)/?$")
 _REF_LINK = re.compile(r"^\[[^\]]*\]\((https://[^)\s]+)\)$")
 
 
+def ambiguous_gitlab_label(text: str) -> bool:
+    """An unmarked label that could name either a host or a nested project."""
+    return bool(_REF_HOST_LABEL.fullmatch(text)) and not text.startswith("gitlab:")
+
+
 def issue_ref(cell: str, home: Backlog | GitHubBacklog | None, *, any_host: bool = False) -> IssueRef | None:
-    """`#N` (in the Backlog), `owner/repo#N` (GitHub), a GitHub issue URL, a GitLab issue URL on the
-    Backlog's own host, or a markdown link to one. Anything else is None, and a bare `#N` with no Backlog to resolve it against is None too.
+    """`#N` (in the Backlog), an `owner/repo#N` GitHub shorthand, a GitHub issue URL, a GitLab issue URL on the
+    Backlog's own host, a canonical store key, or a markdown link to a URL. A GitLab shorthand with three or
+    more path components is ambiguous and must instead use a URL or canonical store key. Anything else is None,
+    and a bare `#N` with no Backlog to resolve it against is None too.
     `any_host` admits a GitLab URL on any host: for naming an issue, never for fetching one."""
     text = cell.strip()
     link = _REF_LINK.match(text)
@@ -200,13 +232,36 @@ def issue_ref(cell: str, home: Backlog | GitHubBacklog | None, *, any_host: bool
         # host would send it there (R1 on PR 14).
         own = any_host or (isinstance(home, Backlog) and m.group(1) == home_of(home)[0])
         return IssueRef(m.group(2), int(m.group(3)), m.group(1)) if own else None
+    # A store key explicitly marks the first component as a host. A bare three-or-more-component
+    # label cannot distinguish a host-qualified legacy label from a nested project on the home host.
+    m = _REF_STORE.match(text)
+    if m:
+        kind, body, number = m.groups()
+        if kind == "github":
+            return IssueRef(body, int(number)) if GH_REPO.fullmatch(body) else None
+        host, slash, repo = body.partition("/")
+        own = isinstance(home, Backlog) and host == home_of(home)[0]
+        valid = re.fullmatch(r"[\w.-]+(?::\d+)?", host) and re.fullmatch(r"(?:[\w.-]+/)+[\w.-]+", repo)
+        return IssueRef(repo, int(number), host) if slash and valid and (own or any_host) else None
+    if ambiguous_gitlab_label(text):
+        return None
     m = _REF_SHORT.match(text)
     if not m or not (m.group(1) or home):
         return None
     if m.group(1):
-        return IssueRef(m.group(1), int(m.group(2)))
+        return IssueRef(m.group(1), int(m.group(2))) if GH_REPO.fullmatch(m.group(1)) else None
     host, repo = home_of(home)
     return IssueRef(repo, int(m.group(2)), host)
+
+
+def route_identity(cell: str, home: Backlog | GitHubBacklog | None) -> str | None:
+    """Use a verified full identity, retaining the legacy numeric route for an unresolved bare ref."""
+    text = cell.strip()
+    if ref := issue_ref(text, home, any_host=True):
+        return ref.store_key
+    if re.fullmatch(r"#\d+", text):
+        return str(int(text[1:]))
+    return None
 
 
 def parse_issue_arg(arg: str, home: Backlog | GitHubBacklog | None) -> IssueRef | None:

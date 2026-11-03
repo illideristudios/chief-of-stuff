@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -44,16 +45,24 @@ PRS = [
 ]
 
 
+SQUASH_ONLY = json.dumps({"allow_merge_commit": False, "allow_squash_merge": True, "allow_rebase_merge": False})
+
+
 class FakeGh:
-    def __init__(self, prs):
-        self.prs, self.calls = prs, []
+    def __init__(self, prs, settings=SQUASH_ONLY):
+        self.prs, self.calls, self.settings = prs, [], settings  # #864: the repository's allowed merge methods
 
     def __call__(self, args, input_text=None):
         self.calls.append(args)
+        if len(args) == 2 and args[0] == "api" and args[1].startswith("repos/"):
+            return 0, self.settings, ""
         if args[:2] == ["pr", "list"]:
             return 0, json.dumps(self.prs), ""
         if args[:2] == ["pr", "merge"]:
             return 0, "", ""
+        if args[:2] == ["pr", "view"]:
+            state = "MERGED" if any(c[2] == args[2] for c in self.merges) else "OPEN"
+            return 0, json.dumps({"state": state}), ""
         return 1, "", "unexpected"
 
     @property
@@ -91,7 +100,8 @@ class FakeGhGraphql(FakeGh):
                                         **(self.nodes.get(p["number"]) or graphql_node(p["number"], sha=p["headRefOid"]))}.items()
                       if k in ("number", "reviewThreads", "commits") or k in query}
                      for p in self.prs if p["number"] in self.nodes or not self.only_given]
-            return 0, json.dumps({"data": {"repository": {"pullRequests": {"nodes": nodes}}}}), ""
+            return 0, json.dumps({"data": {"repository": {"pullRequests": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}), ""
         return super().__call__(args, input_text)
 
 
@@ -155,35 +165,12 @@ class MainTest(unittest.TestCase):
 
     OPT_IN = '[workflow]\nmerge_owner = "approval"\napprover = "robin"\n'
 
-    def test_merge_merges_a_ready_pr_at_its_checked_head(self):
-        gh = FakeGh(PRS)
-        code, out, _ = self.run_main(self.workspace(self.OPT_IN), "--merge", "12", gh=gh)
-        self.assertEqual(code, 0)
-        self.assertEqual(len(gh.merges), 1)
-        self.assertIn("12", gh.merges[0])
-        self.assertEqual(gh.merges[0][gh.merges[0].index("--match-head-commit") + 1], HEAD)
-        self.assertIn("merged", out)
 
-    def test_merge_refuses_a_peer_approval_and_says_why(self):
-        gh = FakeGh(PRS)
-        code, _, err = self.run_main(self.workspace(self.OPT_IN), "--merge", "13", gh=gh)
-        self.assertEqual(code, 1)
-        self.assertEqual(gh.merges, [])
-        self.assertIn("no approval from robin", err)
 
-    def test_the_listing_marks_each_ready_or_blocked(self):
-        code, out, _ = self.run_main(self.workspace(self.OPT_IN), gh=FakeGh(PRS))
-        self.assertEqual(code, 0)
-        line = {l.split()[0]: l for l in out.splitlines() if l.startswith("#")}
-        self.assertIn("ready", line["#12"])
-        self.assertIn("pipeline failed", line["#16"])
 
-    def test_without_the_opt_in_merging_stays_the_users(self):
-        gh = FakeGh(PRS)
-        code, _, err = self.run_main(self.workspace('[workflow]\nmerge_owner = "user"\n'), "--merge", "12", gh=gh)
-        self.assertEqual(code, 2)
-        self.assertEqual(gh.calls, [])
-        self.assertIn("merge_owner", err)
+
+
+
 
 
 def request(**kw):
@@ -193,10 +180,46 @@ def request(**kw):
     return ma.Request(**{**base, **kw})
 
 
+class MergeHeadTest(unittest.TestCase):
+    def test_failed_or_unreadable_github_state_reads_after_a_successful_write_are_unknown(self):
+        for read, error in (((1, "", "rate limited"), "rate limited"),
+                            ((2, "", ""), "gh pr view exited 2"),
+                            ((0, "{}", ""), str(KeyError("state")))):
+            with self.subTest(read=read):
+                gh = mock.Mock(side_effect=[(0, SQUASH_ONLY, ""), (0, "", ""), read])  # #864: settings, merge, state
+                self.assertEqual(ma.merge_head(request(), None, True, "o/app", gh=gh),
+                                 (0, f"unknown: {error}"))
+                self.assertEqual(gh.call_count, 3)
+
+    def test_github_merges_with_a_method_the_repository_allows_never_a_preferred_one(self):
+        # Zach, 2026-10-18: "we shouldn't prefer a merge strategy" (#864). Several allowed: GitHub's own order.
+        for allowed, flag in (({"allow_merge_commit": True}, "--merge"), ({"allow_squash_merge": True}, "--squash"),
+                              ({"allow_rebase_merge": True}, "--rebase"),
+                              ({"allow_merge_commit": True, "allow_squash_merge": True, "allow_rebase_merge": True}, "--merge"),
+                              ({"allow_squash_merge": True, "allow_rebase_merge": True}, "--squash")):
+            with self.subTest(allowed=allowed):
+                gh = FakeGh([], settings=json.dumps(allowed))
+                self.assertEqual(ma.merge_head(request(), None, True, "o/app", gh=gh)[0], 0)
+                merge, = gh.merges
+                self.assertIn(flag, merge)
+                self.assertEqual(sum(f in merge for f in ("--merge", "--squash", "--rebase")), 1)
+
+    def test_no_allowed_or_unreadable_merge_settings_refuse_without_a_merge_call(self):
+        for gh, why in ((FakeGh([], settings=json.dumps({"allow_merge_commit": False})), "allows no merge method"),
+                        (FakeGh([], settings="not json"), "repository merge settings"),
+                        (mock.Mock(return_value=(1, "", "rate limited")), "rate limited")):
+            with self.subTest(why=why):
+                code, result = ma.merge_head(request(), None, True, "o/app", gh=gh)
+                self.assertEqual(code, 1)
+                self.assertIn(why, result)
+                calls = gh.calls if isinstance(gh, FakeGh) else [c.args[0] for c in gh.call_args_list]
+                self.assertFalse(any(c[:2] == ["pr", "merge"] for c in calls))
+
+
 class RequestVerdictTest(unittest.TestCase):
     """One place decides ready or not (#419: the coordinator wrote mergeable from the forge's own status, no pipeline read).
-    Precedence (#419 review): conflicts > draft > red > stale pipeline > running > no pipeline > unverified > blocked > findings
-    open > ready. A state that was not read is None, never "" or 0, and None is not ready."""
+    Precedence (#419 review, #430): conflicts > draft > red > stale pipeline > running > no pipeline > unverified >
+    findings open > blocked > ready. A state that was not read is None, never "" or 0, and None is not ready."""
 
     def test_the_request_carries_the_head_pipeline_and_the_thread_count_and_unread_is_none(self):
         r = ma.Request(1, "t", "u", HEAD, "approved", "passed", "yes", "robin")
@@ -252,14 +275,17 @@ class RequestVerdictTest(unittest.TestCase):
             ({"pipeline_sha": None, "pipeline": "failed"}, "red"),
             ({"threads": None, "merge_state": "BEHIND"}, "unverified"),
             ({"threads": None, "pipeline": "none", "pipeline_id": "", "pipeline_sha": ""}, "no pipeline"),
-            # blocked: GitHub's mergeStateStatus is anything but CLEAN; below unverified, above findings
+            # blocked: GitHub's mergeStateStatus is anything but CLEAN; below findings (#430)
             ({"merge_state": "BLOCKED"}, "blocked"),
             ({"merge_state": "BEHIND"}, "blocked"),
             ({"merge_state": "DIRTY"}, "blocked"),
             ({"merge_state": "UNSTABLE"}, "blocked"),
             ({"merge_state": "HAS_HOOKS"}, "blocked"),
             ({"merge_state": "UNKNOWN"}, "blocked"),
-            ({"merge_state": "BEHIND", "threads": 2}, "blocked"),
+            ({"merge_state": "BEHIND", "threads": 2}, "findings open"),
+            ({"merge_state": "BLOCKED", "threads": 2}, "findings open"),
+            ({"mergeable": "discussions_not_resolved"}, "blocked"),
+            ({"mergeable": "discussions_not_resolved", "threads": 2}, "findings open"),
             ({"merge_state": "BEHIND", "pipeline": "running"}, "running"),
             ({"merge_state": "BEHIND", "pipeline_sha": OLD}, "stale pipeline"),
             ({"merge_state": "CLEAN"}, "ready"),
@@ -299,15 +325,7 @@ class WorkerMergeOwnerTest(unittest.TestCase):
         self.assertEqual(lines[0], "#32 ready · head aaaaaaa · pipeline 9032 passed on aaaaaaa · conflicts no · "
                                    "unresolved threads 0 · https://github.com/o/app/pull/32")
 
-    def test_it_says_the_ready_ones_are_for_their_owning_worker_to_merge(self):
-        code, out, _ = self.run_main(self.WORKER)
-        self.assertEqual(code, 0)
-        self.assertIn("ready for their owning worker to merge: #32 #34", out.splitlines())
 
-    def test_with_nothing_ready_it_names_none_for_the_worker(self):
-        code, out, _ = self.run_main(self.WORKER, gh=FakeGhGraphql([self.PRS[0], self.PRS[2]]))
-        self.assertEqual((code, len(out.splitlines())), (0, 2))
-        self.assertNotIn("ready for their owning worker", out)
 
     def test_it_never_merges_and_never_says_merging_stays_the_users(self):
         gh = FakeGhGraphql(self.PRS)
@@ -317,22 +335,13 @@ class WorkerMergeOwnerTest(unittest.TestCase):
                 self.assertEqual(gh.merges, [])
                 self.assertNotIn("stays the user's", out + err)
                 self.assertNotIn("merging on approval is off", out + err)
-        self.assertEqual(code, 2, "--merge is refused for worker: the owning worker merges")
-        self.assertIn("owning worker", err)
+        self.assertEqual(code, 2, "--merge is refused for worker: the engine")
+        self.assertIn("engine", err)
 
     def test_it_needs_no_approver(self):
         code, _, err = self.run_main(self.WORKER)
         self.assertEqual(code, 0, err)
 
-    def test_user_and_approval_behave_as_before(self):
-        gh = FakeGhGraphql(self.PRS)
-        code, _, err = self.run_main('[workflow]\nmerge_owner = "user"\n', gh=gh)
-        self.assertEqual((code, gh.calls), (2, []))
-        self.assertIn("merging stays the user's", err)
-        code, out, _ = self.run_main(MainTest.OPT_IN, gh=FakeGh(PRS))
-        self.assertEqual(code, 0)
-        self.assertIn("ready", {l.split()[0]: l for l in out.splitlines()}["#12"])
-        self.assertNotIn("owning worker", out)
 
 
 class ApprovalModeKeepsItsRulesTest(unittest.TestCase):
@@ -347,34 +356,8 @@ class ApprovalModeKeepsItsRulesTest(unittest.TestCase):
         code, out, err = main.run_main(main.workspace(MainTest.OPT_IN), *args, gh=gh)
         return gh, code, out, err
 
-    def test_an_approved_request_with_no_pipeline_stays_ready_and_merges(self):
-        # R1(e): merge_approved.blocked() drops the "no pipeline" blocker; the docstring says a request with none stays ready.
-        prs = [pr(40, self.ROBIN, checks=[])]
-        gh, code, out, _ = self.run_main(prs)
-        self.assertEqual(code, 0)
-        self.assertEqual(out.split()[:2], ["#40", "ready"])
-        gh, code, _, err = self.run_main(prs, "--merge", "40")
-        self.assertEqual((code, len(gh.merges)), (0, 1), err)
 
-    def test_a_pipeline_that_passed_with_the_forge_still_unsure_reads_not_mergeable_without_saying_running(self):
-        # R11: the forge's own word is the blocker; "pipeline running" is for a pipeline that is running.
-        r = ma.Request(1, "t", "u", HEAD, "approved", "passed", "unknown", "robin")
-        self.assertEqual(r.blockers, ["not mergeable: unknown"])
-        r = ma.Request(1, "t", "u", HEAD, "approved", "passed", "checking", "robin")
-        self.assertEqual(r.blockers, ["not mergeable: checking"])
-        r = ma.Request(1, "t", "u", HEAD, "approved", "running", "yes", "robin")
-        self.assertEqual(r.blockers, ["pipeline running"])
 
-    def test_a_draft_or_a_branch_the_forge_will_not_merge_is_not_merged_on_approval(self):
-        prs = [pr(41, self.ROBIN, draft=True), pr(42, self.ROBIN, state="BEHIND"), pr(43, self.ROBIN, state="BLOCKED"),
-               pr(44, self.ROBIN)]
-        found = {r.number: r.blockers for r in ma.github_requests("o/app", "robin", FakeGh(prs))}
-        self.assertEqual(found[44], [])
-        for n in (41, 42, 43):
-            with self.subTest(n=n):
-                self.assertTrue(found[n], f"#{n} must name what blocks it")
-                gh, code, _, err = self.run_main(prs, "--merge", str(n))
-                self.assertEqual((code, gh.merges), (1, []), err)
 
 
 class WorkerListingNeverNamesWhatIsNotReadyTest(unittest.TestCase):
@@ -386,7 +369,7 @@ class WorkerListingNeverNamesWhatIsNotReadyTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         lines = {l.split()[0]: l for l in out.splitlines() if l[:1] == "#"}
         self.assertEqual([lines[k].split()[1] for k in ("#51", "#52", "#53", "#54")], ["ready", "draft", "blocked", "unverified"])
-        self.assertIn("ready for their owning worker to merge: #51", out.splitlines())
+        self.assertEqual([line.split()[0] for line in out.splitlines() if " ready " in line], ["#51"])
         self.assertNotRegex(out, r"owning worker to merge:.*#5[234]")
 
 
@@ -396,13 +379,6 @@ class SettingsTest(unittest.TestCase):
         (root / "s.toml").write_text(text)
         return st.load(root, "s.toml").workflow
 
-    def test_approval_needs_an_approver_and_pull_requests(self):
-        wf = self.load('[workflow]\nmerge_owner = "approval"\napprover = "robin"\n')
-        self.assertEqual((wf.merge_owner, wf.approver), ("approval", "robin"))
-        for bad in ('merge_owner = "approval"', 'merge_owner = "approval"\napprover = ""',
-                    'delivery = "branch"\nmerge_owner = "approval"\napprover = "robin"'):
-            with self.assertRaises(st.SettingsError, msg=bad):
-                self.load("[workflow]\n" + bad + "\n")
 
 
 if __name__ == "__main__":

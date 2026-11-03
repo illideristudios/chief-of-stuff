@@ -12,10 +12,6 @@
 | time | item | Robin's words |
 |---|---|---|
 
-## File ownership
-
-- Smoke check: none (the dispatched context only replies `DONE`; use the cheapest model)
-
 ## Log
 
 - 09:00 opened the day

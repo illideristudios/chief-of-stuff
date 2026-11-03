@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -15,6 +15,12 @@ import panels  # noqa: E402
 
 CT = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 9, 26, 2, 10, 37, tzinfo=CT)
+TOKENS = {"ink": "var(--fg)", "muted": "#234567", "card": "#123456", "rule": "#345678",
+          "edge": "#456789", "link": "#56789a", "hot": "#6789ab", "hot-ink": "#789abc"}
+
+
+def _due(name: str, at: datetime, now: datetime = NOW) -> str:
+    return panels.header(panels.Header("B", (), now, name, at))
 
 
 class Header(unittest.TestCase):
@@ -32,9 +38,61 @@ class Header(unittest.TestCase):
         self.assertIn('<span class="panels-clock-name">demo in</span>', self.html)
         self.assertRegex(self.html, r'class="panels-left"[^>]*datetime="2026-09-26T11:00:00-05:00"[^>]*>8h49m23s<')
 
-    def test_a_past_deadline_counts_negative(self) -> None:
-        html = panels.header(panels.Header("B", (), NOW, "x", datetime(2026, 9, 26, 1, 40, 37, tzinfo=CT)))
-        self.assertRegex(html, r'class="panels-left"[^>]*>-0h30m00s<')
+    def test_a_past_deadline_says_passed(self) -> None:
+        html = _due("x", datetime(2026, 9, 26, 1, 40, 37, tzinfo=CT))
+        self.assertIn('<span class="panels-clock-name">x passed</span>', html)
+        self.assertRegex(html, r'class="panels-left"[^>]*datetime="2026-09-26T01:40:37-05:00"[^>]*>0h30m00s ago<')
+        self.assertNotIn("x in", html)
+        self.assertNotIn("-0h", html)
+
+    def test_an_exact_deadline_is_zero_and_still_ahead(self) -> None:
+        html = _due("demo", NOW)
+        self.assertIn('<span class="panels-clock-name">demo in</span>', html)
+        self.assertRegex(html, r'class="panels-left"[^>]*>0h00m00s<')
+        self.assertNotIn("ago", html)
+
+    def test_a_subsecond_expiry_says_passed_without_a_negative_zero(self) -> None:
+        now = datetime(2026, 9, 26, 2, 10, 37, 400_000, tzinfo=CT)
+        html = _due("demo", datetime(2026, 9, 26, 2, 10, 37, tzinfo=CT), now)
+        self.assertIn('<span class="panels-clock-name">demo passed</span>', html)
+        self.assertRegex(html, r'class="panels-left"[^>]*>0h00m00s ago<')
+        self.assertNotIn("-0h", html)
+        self.assertNotIn("demo in", html)
+
+    def test_hours_may_pass_24(self) -> None:
+        html = _due("demo", NOW - timedelta(hours=25, minutes=3, seconds=4))
+        self.assertIn('<span class="panels-clock-name">demo passed</span>', html)
+        self.assertRegex(html, r'class="panels-left"[^>]*>25h03m04s ago<')
+
+    def test_a_name_that_needs_escaping_stays_text_after_it_passes(self) -> None:
+        html = _due("<x>", NOW - timedelta(seconds=5))
+        self.assertIn('<span class="panels-clock-name">&lt;x&gt; passed</span>', html)
+        self.assertRegex(html, r'class="panels-left"[^>]*>0h00m05s ago<')
+        self.assertNotIn("<x>", html)
+
+    def test_the_final_minute_after_2359_says_passed(self) -> None:
+        day = datetime(2026, 10, 18, 23, 59, tzinfo=CT)
+        at_cutoff = _due("end of day", day, day)
+        self.assertIn('<span class="panels-clock-name">end of day in</span>', at_cutoff)
+        self.assertRegex(at_cutoff, r'class="panels-left"[^>]*>0h00m00s<')
+        after = _due("end of day", day, day.replace(second=40))
+        self.assertIn('<span class="panels-clock-name">end of day passed</span>', after)
+        self.assertRegex(after, r'class="panels-left"[^>]*>0h00m40s ago<')
+
+    def test_elapsed_time_follows_the_utc_instant_across_an_offset_change(self) -> None:
+        # Wall subtraction says 2h across the spring gap and 0h across the fall overlap.
+        # The clock counts the UTC instant, which is 1h either way.
+        spring_now = datetime(2026, 3, 8, 1, 30, tzinfo=CT)
+        spring = _due("gap", datetime(2026, 3, 8, 3, 30, tzinfo=CT), spring_now)
+        self.assertIn('<span class="panels-clock-name">gap in</span>', spring)
+        self.assertRegex(spring, r'class="panels-left"[^>]*>1h00m00s<')
+        self.assertRegex(spring, r'class="panels-now"[^>]*>01:30:00<')
+        earlier = datetime(2026, 11, 1, 1, 30, tzinfo=CT)
+        later = earlier.replace(fold=1)
+        fall = _due("overlap", earlier, later)
+        self.assertIn('<span class="panels-clock-name">overlap passed</span>', fall)
+        self.assertRegex(fall, r'class="panels-left"[^>]*>1h00m00s ago<')
+        self.assertRegex(fall, r'class="panels-now"[^>]*>01:30:00<')
 
     def test_warnings_show_and_escape(self) -> None:
         self.assertIn('<div class="panels-warn">merge requests: token expired</div>', self.html)
@@ -101,20 +159,47 @@ class Panel(unittest.TestCase):
 
 class Css(unittest.TestCase):
     def test_one_rule_per_kind_from_the_palette(self) -> None:
-        css = panels.css({"merge": "var(--stage-review)", "hot": "#c9533a"})
+        css = panels.css({"merge": "var(--stage-review)", "hot": "#c9533a"}, TOKENS)
         self.assertIn('[data-kind="merge"]{--k:var(--stage-review)}', css)
         self.assertIn('[data-kind="hot"]{--k:#c9533a}', css)
 
     def test_a_value_cannot_escape_its_declaration(self) -> None:
         with self.assertRaises(ValueError):
-            panels.css({"x": "red;}body{display:none"})
+            panels.css({"x": "red;}body{display:none"}, TOKENS)
 
-    def test_the_default_palette_covers_the_six_tiles_and_three_panels(self) -> None:
-        self.assertLessEqual({"blocked", "decisions", "approved", "running", "drift", "orphaned", "merge", "workers"},
-                             set(panels.PALETTE))
+    def test_colours_and_tokens_must_both_come_from_the_host(self) -> None:
+        self.assertIsNone(panels.css.__defaults__)
+        for kwargs in ({}, {"colors": {}}, {"tokens": {}}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(TypeError):
+                panels.css(**kwargs)
+
+    def test_tokens_come_from_the_host(self) -> None:
+        css = panels.css({}, TOKENS)
+        for name, value in TOKENS.items():
+            with self.subTest(token=name):
+                self.assertIn(f"--panels-{name}:{value}", css)
+
+    def test_every_required_token_must_be_supplied(self) -> None:
+        for name in TOKENS:
+            with self.subTest(token=name), self.assertRaisesRegex(ValueError, f"Missing panel tokens: {name}$"):
+                panels.css({}, {k: v for k, v in TOKENS.items() if k != name})
+
+    def test_empty_tokens_lists_all_missing_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Missing panel tokens: " + ", ".join(sorted(TOKENS)) + "$"):
+            panels.css({}, {})
+
+    def test_a_misspelling_does_not_supply_the_required_token(self) -> None:
+        tokens = {k: v for k, v in TOKENS.items() if k != "hot-ink"}
+        for typo in ("hotink", "hot_ink"):
+            with self.subTest(typo=typo), self.assertRaisesRegex(ValueError, "Missing panel tokens: hot-ink$"):
+                panels.css({}, {**tokens, typo: "#123456"})
+
+    def test_a_token_value_cannot_escape_its_declaration(self) -> None:
+        with self.assertRaises(ValueError):
+            panels.css({}, {**TOKENS, "ink": "red;}body{display:none"})
 
     def test_the_layout_wraps_on_a_phone(self) -> None:
-        css = panels.css()
+        css = panels.css({}, TOKENS)
         self.assertRegex(css, r"\.panels-tiles\{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(")
         self.assertRegex(css, r"\.panels\{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(")
         self.assertRegex(css, r"\.panels-head\{[^}]*flex-wrap:wrap")

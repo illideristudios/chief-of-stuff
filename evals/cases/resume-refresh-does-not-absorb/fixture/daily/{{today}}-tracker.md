@@ -32,8 +32,6 @@ Coordinator: gauntlet-85. Board: board-known.
 | a1b2c3 | 4821-arch | working | the upload audit | | 11:00 | | none | 09:31 |
 | d4e5f6 | 7719-impl-1 | working | trace instrumentation | | 11:30 | | none | 09:45 |
 
-## File ownership
-
 ## Log
 
 - 09:00 opened the day

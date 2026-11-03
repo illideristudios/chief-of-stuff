@@ -13,9 +13,6 @@
 | time | item | Robin's words |
 |---|---|---|
 
-## File ownership
-
-
 ## Log
 
 - 09:00 opened the day

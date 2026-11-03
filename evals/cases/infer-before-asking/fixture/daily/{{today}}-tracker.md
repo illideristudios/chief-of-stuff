@@ -21,10 +21,6 @@ Coordinator: coordinator. Board: none.
 | a1b2c3 | 4821-audit | | security audit of the upload endpoint | none | 11:00 | none | 09:30 | |
 | d4e5f6 | 7719-notes | | idle | none | now | none | 09:05 | |
 
-## File ownership
-
-- Security audit: src/a/
-
 ## Log
 
 - 09:00 opened the day

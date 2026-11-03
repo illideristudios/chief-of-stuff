@@ -12,14 +12,14 @@ from evals.skill_fixtures import AGENT, write_plugin, write_skill
 
 NON_CLAUDE = ("codex", "cursor", "agy")
 READ_POINTER_GUIDANCE = 'A rule that says "Read <path>" means open that file with your host\'s read tool or `cat`.'
-# No-skills baseline from AGENT in skill_fixtures, refreshed for main's Check adaptation.
+# No-skills baseline from AGENT in skill_fixtures, refreshed for store-backed reconciliation.
 # Only temporary paths and the new non-Claude Read guidance are normalized;
 # whitespace, substitutions, other adapter text and START all remain byte-sensitive.
 LEGACY_SHA256 = {
     "claude": "e03c9850cccd6c80db8e038cf10672f1c54afc1c48945098d958e958d6b1000d",
-    "codex": "48a70f8f6a8d00c9cbfe6952ff35e60ffd431ba32416be5a0d300ff2ec8a44ec",
-    "cursor": "6e7f042830d9a7d29f6add33c0e2716fbbb6cd323bd8cd540267b782248c2145",
-    "agy": "67088fed19c833b0bbe77e57d2a3e0de6b82748dfa74f64f2ba4d76e7ccee5fa",
+    "codex": "4b2ad78a30248bc2aaa64146e125ba1f191224e0eb646ed1076fd2ec1cddf8ee",
+    "cursor": "54c4d22b2c45959c5b2da27db098a5dde76a73e50abe5619bb700d1fdfcdd4f8",
+    "agy": "606445eef43ba1d8c4b8eb6cecb6bf967b05e31ec6b2108e23933a29a9ef64f3",
 }
 
 
@@ -172,7 +172,8 @@ class SkillsPlumbingTest(unittest.TestCase):
             "tracker-rows": "Never set the cell by hand or write that line as free text.",
             "review-pipeline": "A verify pass with nothing open moves the task to `merge`.",
             "coordinator-sessions": "When a session's state is in question, poll it; do not ask the user.",
-            "dispatch": "Those two rows are the dispatch.",
+            "dispatch": "That row is the dispatch.",
+            "architect-signals": "you never edit `architecture/compliance.md` to mark a row assigned.",
         }
         release = start.install(root, self.base / "install")
         agent = (release / "agents" / "chief-of-stuff.md").read_text()
@@ -220,7 +221,7 @@ class SkillsPlumbingTest(unittest.TestCase):
         for runtime in (*NON_CLAUDE, "claude"):
             with self.subTest(runtime=runtime):
                 self.assert_pinned_skill_pointers(runtime, release,
-                                                  {"decision-page", "optional-features", "tracker-rows", "review-pipeline", "coordinator-sessions", "dispatch"})
+                                                  {"decision-page", "optional-features", "tracker-rows", "review-pipeline", "coordinator-sessions", "dispatch", "architect-signals"})
 
     def test_review_pipeline_description_names_every_read_moment(self):
         from evals.test_agent_budget import DESCRIPTION_CAP, description

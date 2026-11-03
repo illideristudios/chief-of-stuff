@@ -31,8 +31,6 @@ Coordinator: gauntlet-85. Board: board-known.
 |---|---|---|---|---|---|---|---|---|
 | 4821 | 4821-audit | working | the upload audit | | 11:00 | | none | 09:31 |
 
-## File ownership
-
 ## Log
 
 - 09:00 opened the day
