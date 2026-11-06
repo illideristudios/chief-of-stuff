@@ -484,7 +484,7 @@ DISPATCH_RULES = {
         'Do not edit the workspace TOML to satisfy a task-specific request.',
         'Choose `--runtime claude|agy|codex|cursor` as usual.',
         'One-shot runs one CLI turn in the worktree, and the launcher returns when it exits.',
-        'It does not open a terminal tab, register a continuing session, poll a mailbox, or ask for plan approval inside the worker.',
+        'It does not open a terminal tab, register a continuing session, or ask for plan approval inside the worker.',
         'The workspace setting authorizes routine launches without per-task approval; a task-specific one-shot request authorizes that launch.',
         "The launcher writes the tracker itself, under the lock `chief-of-stuff log` takes: when it starts, the task's owner becomes the worker's name and its state `running HH:MM`, and a Log line names the runtime, model, tree and task.",
         'Write none of these yourself, before or during the run; it changes the row again when it returns.',
@@ -503,7 +503,6 @@ DISPATCH_RULES = {
         "That is not a held or failed task and not the user's to decide: relaunch it now in a fresh worktree from current main, without asking, and log why.",
         'A second stop on the same task comes back as human review.',
         'Read and reconcile any errors in the report; a failed issue update is not a successful hold.',
-        'No coordinator or worker mailbox messages are part of this mode.',
         'The default time limit is 60 minutes; `--timeout-minutes N` changes it.',
     ),
     'After launch': (

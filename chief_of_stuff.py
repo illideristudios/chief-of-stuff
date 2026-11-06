@@ -70,7 +70,7 @@ COMMAND_REGISTRY = {
 # Preserve the public name-to-path lookup used by existing routing callers.
 COMMANDS = {name: script for name, (script, _) in COMMAND_REGISTRY.items() if script is not None}
 # Commands whose scripts import store (SQLAlchemy/Alembic).
-STORE_BACKED = frozenset({"adopt", "board", "decision", "decisions", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
+STORE_BACKED = frozenset({"adopt", "board", "decisions", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
 
 
 # Runs a script's main() only as far as argument parsing: argparse exits 0 for help and 2 for bad

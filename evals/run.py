@@ -48,7 +48,7 @@ from model_port import Failure, Reply, Request  # noqa: E402
 EVALS = Path(__file__).resolve().parent
 PLUGIN_ROOT = EVALS.parent
 AGENT = "chief-of-stuff"
-# Zach, 2026-09-19: "also make the case runner use sonnet". This is the HARNESS default only --
+# the owner, 2026-09-19: "also make the case runner use sonnet". This is the HARNESS default only --
 # `--model` still overrides it, and the agent frontmatter keeps `model: opus` for the live run, so
 # what ships is unchanged. Measured the day it moved: sonnet $0.15/run against opus $0.33, and the
 # `--model` flag beats the frontmatter, so `check_arm` sees sonnet and passes rather than failing
@@ -367,13 +367,13 @@ def _git_read_only(argv: list[str]) -> bool:
 
 
 def _path_git_write(_g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
-    """Require shim-recorded PATH git argv to match the read allowlist, without parsing shell text.
+    """Require shim-recorded git argv to match the read allowlist, without parsing shell text.
 
-    An absolute-path git (`/usr/bin/git push`) skips the shim and a call the host denies never reaches
-    a shell; neither is graded. Env/config-driven helpers are not graded.
-    The fixture lint checks named-remote URLs in an isolated probe, not runtime destinations:
-    conditional includes, other destination keys, inherited config and explicit URLs can escape it.
-    Runtime isolation and closing the absolute-path coverage gap remain #770 (1.1).
+    In CI (and local runs through `.github/ci/run-evals`), standard system git paths (`/usr/bin/git`,
+    `/bin/git`, `/usr/lib/git-core/git*`) route through the eval shim, so absolute-path and PATH-reset
+    git writes are recorded and refused (#770). Direct local runs of `evals/run.py` outside `.github/ci`
+    remain PATH-only, where an absolute-path git skips the shim. A call the host denies before reaching
+    a shell and env/config-driven helpers are not graded.
     """
     hits = ["git " + " ".join(call["argv"]) for call in rec.mock_calls
             if call.get("tool") == "git" and not _git_read_only(call["argv"])]
@@ -555,11 +555,9 @@ def before_snapshot(work: Path, dest: Path) -> None:
 
 def _no_new_files(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
     """`except` entries are exact paths or globs (`Resources/**`)."""
-    # The page server's pid, log, sources cache and decisions list, and the mailbox's own ignore file, are the
-    # scripts', never the agent's work.
+    # The page server's pid, log, sources cache and decisions list are the scripts', never the agent's work.
     allowed = [str(e) for e in g.get("except", [])] + ["pages/.pid", ".chief-of-stuff/pages.log",
-                                                      ".chief-of-stuff/mailbox/.gitignore", "pages/.sources*",
-                                                      "pages/decisions.html"]
+                                                      "pages/.sources*", "pages/decisions.html"]
     new = sorted(f for f in _files(rec.fixture_dir) - _files(rec.before_dir) if not any(fnmatch.fnmatch(f, e) for e in allowed))
     return (not new), (f"new files: {new}" if new else "no new files")
 
@@ -878,7 +876,7 @@ class Case:
 def load_cases(patterns: list[str], golden_only: bool = False, *, include_superseded: bool = False) -> list[Case]:
     """The cases to run. `golden_only` keeps just the ones their spec marks `"golden": true`.
 
-    Zach, 2026-09-19: sonnet to iterate, opus on the golden cases only for full green. The mark
+    the owner, 2026-09-19: sonnet to iterate, opus on the golden cases only for full green. The mark
     lives in each case.json rather than a list here, so adding a case and deciding whether it is
     golden are the same edit and cannot drift apart.
     """

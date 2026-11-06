@@ -1,6 +1,6 @@
 """Unit tests for scripts/policy.py and `settings.load_policy`: policy and workflow as data (design decisions 12 and 13).
 
-Zach, 2026-10-10: "everything is policy driven. We have default policies, and based on personas. This is all
+the owner, 2026-10-10: "everything is policy driven. We have default policies, and based on personas. This is all
 configurable at a stage / room level." Plan M4 exit: a gate turned on for one stage or room holds only there, and an
 exception with no expiry is refused.
 """
@@ -97,9 +97,9 @@ class ShippedPolicyTest(unittest.TestCase):
         for name in ("reviewer", "architect"):
             self.assertIn("PLACEHOLDER", settings.load_policy().personas[name].role, name)
 
-    def test_the_shipped_base_needs_no_word_from_zach_and_has_no_limits(self):
+    def test_the_shipped_base_has_no_owner_gate_and_no_limits(self):
         base = settings.load_policy().resolve()
-        self.assertEqual(base.zach_gates, ())
+        self.assertNotIn("zach_gates", vars(base))
         self.assertEqual(base.retry_limit, 3)
         self.assertEqual(base.launch, "adapter")
         self.assertEqual((base.spend_usd, base.quota_percent, base.time_minutes), (None, None, None))
@@ -123,7 +123,7 @@ class LoadTest(unittest.TestCase):
 class DefaultsTest(unittest.TestCase):
     def test_the_code_defaults(self):
         got = policy.Policy()
-        self.assertEqual(got.zach_gates, ())  # decision 6: no gate needs Zach's word by default
+        self.assertNotIn("zach_gates", vars(got))
         self.assertEqual(got.blocking_severity, "minor")  # burn down to no open findings
         self.assertEqual(got.retry_limit, 3)
         self.assertEqual(got.launch, "adapter")
@@ -136,15 +136,15 @@ class ResolveTest(unittest.TestCase):
     def setUp(self):
         self.p = parse()
 
-    def test_a_gate_turned_on_for_one_stage_holds_only_there(self):
-        self.assertEqual(self.p.resolve("reviewer", "review", "lab").zach_gates, ("merge",))
-        self.assertEqual(self.p.resolve("reviewer", "implement", "lab").zach_gates, ())
-        self.assertEqual(self.p.resolve("implementer", "merge").zach_gates, ())
+    def test_legacy_stage_gates_are_absent_from_resolved_policy(self):
+        self.assertNotIn("zach_gates", vars(self.p.resolve("reviewer", "review", "lab")))
+        self.assertNotIn("zach_gates", vars(self.p.resolve("reviewer", "implement", "lab")))
+        self.assertNotIn("zach_gates", vars(self.p.resolve("implementer", "merge")))
 
-    def test_a_gate_turned_on_for_one_room_holds_only_there(self):
-        self.assertEqual(self.p.resolve("implementer", "implement", "ops").zach_gates, ("plan",))
-        self.assertEqual(self.p.resolve("implementer", "implement", "lab").zach_gates, ())
-        self.assertEqual(self.p.resolve("implementer", "implement").zach_gates, ())
+    def test_legacy_room_gates_are_absent_from_resolved_policy(self):
+        self.assertNotIn("zach_gates", vars(self.p.resolve("implementer", "implement", "ops")))
+        self.assertNotIn("zach_gates", vars(self.p.resolve("implementer", "implement", "lab")))
+        self.assertNotIn("zach_gates", vars(self.p.resolve("implementer", "implement")))
 
     def test_the_retry_limit_is_adjustable_per_room(self):
         self.assertEqual(self.p.resolve("implementer", "implement", "ops").retry_limit, 5)
@@ -153,7 +153,7 @@ class ResolveTest(unittest.TestCase):
     def test_room_overrides_stage_overrides_persona_overrides_base(self):
         self.assertEqual(self.p.resolve("architect").blocking_severity, "important")
         self.assertEqual(self.p.resolve("reviewer").blocking_severity, "minor")
-        self.assertEqual(self.p.resolve("architect", "review", "ops").zach_gates, ("plan",))
+        self.assertNotIn("zach_gates", vars(self.p.resolve("architect", "review", "ops")))
         self.assertTrue(self.p.resolve("implementer", "review").architect)
         self.assertFalse(self.p.resolve("implementer", "implement").architect)
 
@@ -194,7 +194,6 @@ class FieldTest(unittest.TestCase):
             ('blocking_severity = "nit"', "blocking_severity"),
             ('launch = "tmux"', "launch"),
             ('architect = "yes"', "architect"),
-            ('zach_gates = [1]', "list of names"),
             ('spend_usd = -1', "spend_usd"),
             ('time_minutes = "1h"', "time_minutes"),
             ('colour = "red"', "colour"),
@@ -361,7 +360,7 @@ class OverlayTest(unittest.TestCase):
         merged = policy.overlay(self.shipped(), {"stages": {"review": {"policy": {"architect": False}}}})
         got = policy.parse(merged)
         self.assertFalse(got.resolve("reviewer", "review").architect)
-        self.assertEqual(got.resolve("reviewer", "review").zach_gates, ("merge",))  # a sibling key is kept
+        self.assertNotIn("zach_gates", vars(got.resolve("reviewer", "review")))
         self.assertTrue(parse().resolve("reviewer", "review").architect)  # the shipped data is not changed
 
     def test_a_field_is_replaced_whole(self):

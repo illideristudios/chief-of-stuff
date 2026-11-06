@@ -120,7 +120,7 @@ def write_engine_status(
         "pid": os.getpid() if pid is None else pid,
         "release": release,
     }
-    _swap_in(state_dir / ENGINE_STATUS_FILE, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    swap_in(state_dir / ENGINE_STATUS_FILE, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def read_engine_status(root: Path) -> EngineStatus | None:
@@ -438,11 +438,20 @@ def pages_address(root: Path) -> tuple[Path, int]:
 LAST_LOOKED, LOOKED_BEFORE = ".last-looked", ".looked-before"
 
 
-def _swap_in(path: Path, text: str) -> None:
+def swap_in(path: Path, text: str, *, mode: int | None = None) -> None:
     """Atomically, through a temporary file of its own: the threaded page server may record two looks at once."""
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f"{path.name}-", delete=False) as out:
-        out.write(text)
-    os.replace(out.name, path)
+    name = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent,
+                                         prefix=f"{path.name}-", delete=False) as out:
+            name = out.name
+            out.write(text)
+        if mode is not None:
+            os.chmod(name, mode)
+        os.replace(name, path)
+    finally:
+        if name is not None:
+            Path(name).unlink(missing_ok=True)
 
 
 def record_look(pages_dir: Path, now: datetime) -> dict[str, str | None]:
@@ -455,8 +464,8 @@ def record_look(pages_dir: Path, now: datetime) -> dict[str, str | None]:
         except FileNotFoundError:
             prior[name] = None  # a first look: nothing before it
     if prior[LAST_LOOKED] is not None:
-        _swap_in(pages_dir / LOOKED_BEFORE, prior[LAST_LOOKED])
-    _swap_in(pages_dir / LAST_LOOKED, now.isoformat())
+        swap_in(pages_dir / LOOKED_BEFORE, prior[LAST_LOOKED])
+    swap_in(pages_dir / LAST_LOOKED, now.isoformat())
     return prior
 
 
@@ -466,7 +475,7 @@ def unrecord_look(pages_dir: Path, prior: dict[str, str | None]) -> None:
         if text is None:
             (pages_dir / name).unlink(missing_ok=True)
         else:
-            _swap_in(pages_dir / name, text)
+            swap_in(pages_dir / name, text)
 
 
 def looked_before(pages_dir: Path) -> datetime | None:

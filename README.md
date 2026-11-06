@@ -66,7 +66,9 @@ An optional `[workflow] reviewer_session = "<session-name>"` routes pull request
 
 Every reviewer reports in one shape, [`skills/review-pipeline/review-report.md`](skills/review-pipeline/review-report.md), whatever its runtime, because Triage reads each finding's axis, severity, confidence and suggestion off it. Every worker assignment points a reviewing worker at it.
 
-`[workflow] delivery = "pull-request"` remains the default. The engine owns merges through its automated review and CI gate. Legacy `merge_owner = "user"`, `"approval"` and `"worker"` values normalize to `"coordinator"`; none waits on the owner. `approver` is an optional review-thread filter. `merge-approved` is a compatibility readiness listing; run the engine to execute a merge. Set `delivery = "branch"` for branch handoff. Code tasks finish only after integration into main and a green suite there.
+`[workflow] delivery = "pull-request"` remains the default. The engine owns merges through its automated review and CI gate. Legacy `merge_owner` settings are accepted as a no-op with a warning that they are ignored. `approver` is an optional review-thread filter. `merge-approved` is a compatibility readiness listing; run the engine to execute a merge. Set `delivery = "branch"` for branch handoff. Code tasks finish only after integration into main and a green suite there.
+
+The retired policy key `zach_gates` is also accepted as a no-op with a warning that it is ignored, including in persona, stage and room overrides. It creates no runtime policy field or owner wait.
 
 ## Runtime limits
 
@@ -94,6 +96,8 @@ rules = ["Never skip or weaken tests."] # optional: standing rules for every one
 [workers.t3_providers] # optional, T3 launcher only: the T3 provider instance each claude_as_profile runs as
 secondary = "cl2"
 ```
+
+`[workers] fix_round_limit = 3` sets how many completed fix rounds with findings still open park an issue. It must be a positive whole number and defaults to 3. Each fix returns to review before the limit is checked. This is independent of `[workers] failure_limit` (failed attempts) and policy `retry_limit` (launcher-hold release failures).
 
 The engine retains Claude CLI worker transcripts in its ORM store, keyed by issue, stage and attempt. Ordered worker, tool, user, error and gap events remain readable after the worker exits, the engine restarts or the original log disappears. `Store.transcript(issue_key, stage, attempt)` reads that retained history without accessing the runtime or its files; it returns `None` before capture. T3 thread transcripts and other runtimes are not captured yet.
 

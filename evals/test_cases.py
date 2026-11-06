@@ -177,7 +177,7 @@ class CaseLintTest(unittest.TestCase):
             root = Path(d)
             for rel in ("README.md", "docs/guide.md", "evals/results/PROGRESS.md",
                         "docs/archive/old.md", "evals/results/20260101-000000/out.txt",
-                        ".chief-of-stuff/mailbox/note.md", ".venv/lib/mod.py", "node_modules/pkg/index.js",
+                        ".chief-of-stuff/cache/note.md", ".venv/lib/mod.py", "node_modules/pkg/index.js",
                         ".git", "local.log", "pyproject.toml"):
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_text(f"mentions {RETIRED_PROVIDER.title()}\n")
@@ -209,7 +209,8 @@ class CaseLintTest(unittest.TestCase):
         remote.*.url/pushurl (including URL rewrites) relative to the fixture checkout and require
         containment in root. Includes are evaluated in the probe's gitdir, not the fixture's.
         It does not inspect branch.*.remote/pushRemote, remote.pushDefault, host/environment config,
-        or command-line URLs. It does not prove runtime confinement (#770).
+        or command-line URLs. Runtime confinement of standard git paths holds in CI via `.github/ci` (#770);
+        this static lint checks fixture remote URLs independently.
         """
         configs = [p for p in root.rglob("config") if p.parent.name == ".git" or p.parent.suffix == ".git"]
         if not configs:
@@ -2155,8 +2156,8 @@ class CaseLintTest(unittest.TestCase):
                         "find . -name '*.toon' -exec cat {} +", "find trees -name '*.toon' | xargs cat", "cat reports/rate-limit.toon"):
             self.assertTrue(hit(shell, command), command)
         for command in ("chief-of-stuff result --root . --task 'Rate limit headers'", "cat daily/tracker.md", "chief-of-stuff tracker tasks --not done",
-                        "cat trees/rate-limit/src/a/headers.py", "ls trees", "cat .chief-of-stuff/mailbox/notes.md", "git -C trees/rate-limit status",
-                        "chief-of-stuff processes --root .", "cat chief-of-stuff.toml", "ls .chief-of-stuff/mailbox/*.md",
+                        "cat trees/rate-limit/src/a/headers.py", "ls trees", "cat .chief-of-stuff/cache/notes.md", "git -C trees/rate-limit status",
+                        "chief-of-stuff processes --root .", "cat chief-of-stuff.toml", "ls .chief-of-stuff/cache/*.md",
                         "chief-of-stuff tracker --root . tasks"):
             self.assertFalse(hit(shell, command), command)
         for path in ("/w/trees/rate-limit/.chief-of-stuff/one-shot-report.toon", "trees/rate-limit/.chief-of-stuff/worker-stdout.log",
@@ -2172,10 +2173,10 @@ class CaseLintTest(unittest.TestCase):
                            {"pattern": "reason", "glob": "*.toon"}, {"pattern": "reason", "path": "trees/*/.chief*"},
                            {"pattern": "reason", "path": "/w", "glob": "**/.chief-of-stuff/**"}):
             self.assertTrue(grader_hits(files, "Grep", **tool_input), tool_input)
-        for tool_input in ({"pattern": "reason", "path": ".chief-of-stuff/mailbox"}, {"pattern": "reason", "glob": "*.md"},
+        for tool_input in ({"pattern": "reason", "path": ".chief-of-stuff/cache"}, {"pattern": "reason", "glob": "*.md"},
                            {"pattern": "reason", "path": "daily"}):
             self.assertFalse(grader_hits(files, "Grep", **tool_input), tool_input)
-        for path in ("daily/2026-10-06-tracker.md", "trees/rate-limit/src/a/headers.py", ".chief-of-stuff/mailbox/a.md", "CLAUDE.md"):
+        for path in ("daily/2026-10-06-tracker.md", "trees/rate-limit/src/a/headers.py", ".chief-of-stuff/cache/a.md", "CLAUDE.md"):
             self.assertFalse(grader_hits(files, "Read", file_path=path), path)
         self.assertFalse(grader_hits(files, "Edit", file_path="trees/rate-limit/.chief-of-stuff/one-shot-report.toon"))  # tool name must match
 

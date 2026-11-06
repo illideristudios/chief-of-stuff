@@ -192,7 +192,7 @@ class MergeHeadTest(unittest.TestCase):
                 self.assertEqual(gh.call_count, 3)
 
     def test_github_merges_with_a_method_the_repository_allows_never_a_preferred_one(self):
-        # Zach, 2026-10-18: "we shouldn't prefer a merge strategy" (#864). Several allowed: GitHub's own order.
+        # the owner, 2026-10-18: "we shouldn't prefer a merge strategy" (#864). Several allowed: GitHub's own order.
         for allowed, flag in (({"allow_merge_commit": True}, "--merge"), ({"allow_squash_merge": True}, "--squash"),
                               ({"allow_rebase_merge": True}, "--rebase"),
                               ({"allow_merge_commit": True, "allow_squash_merge": True, "allow_rebase_merge": True}, "--merge"),

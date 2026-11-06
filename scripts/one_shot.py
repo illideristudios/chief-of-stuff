@@ -43,7 +43,7 @@ BOOTSTRAP = ("Read {dispatch} first. It is your entire one-shot assignment. Work
 
 def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type: str | None,
             model: str, effort: str, lead: list[str] = (), expected_common: Path | None = None) -> list[str]:
-    """A single foreground CLI invocation, without interactive plan or mailbox modes."""
+    """A single foreground CLI invocation, without interactive plan approval."""
     prompt = BOOTSTRAP.format(dispatch=dispatch, cwd=cwd)
     tail: list[str] = []
     if runtime == "claude":

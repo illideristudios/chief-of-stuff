@@ -25,7 +25,7 @@ SAMPLE_CLAUDE_MD = """# Workspace
 
 ## Coordinator
 
-- User: Zach
+- User: the owner
 - Timezone: America/Chicago
 - Daily log dir: daily/
 - Tracker: `daily/<date>-tracker.md`

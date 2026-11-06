@@ -214,7 +214,7 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(len(self.db.asks(KEY)), 1)
 
     def test_a_deny_a_person_gave_stays_denied_on_the_next_attempt(self):
-        self.denied_ask("zach")
+        self.denied_ask("owner")
         self.env["CHIEF_ATTEMPT"] = "3"
         self.permission(command="touch /outside/file")
         self.assertEqual(len(self.db.asks(KEY)), 1)

@@ -1867,7 +1867,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.tracker.read_text(), TRACKER)
 
     def test_claude_as_profile_runs_the_one_shot_through_claude_as(self):
-        # Zach, 2026-10-08 20:50: Claude workers launch through `claude-as run <profile>`, not a bare `claude`.
+        # the owner, 2026-10-08 20:50: Claude workers launch through `claude-as run <profile>`, not a bare `claude`.
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `chief-of-stuff.toml`\n")
         (self.root / "chief-of-stuff.toml").write_text('[workers]\nclaude_as_profile = "secondary"\n')
         for runtime, program in (("claude", "claude-as"), ("codex", "codex")):
@@ -1967,8 +1967,8 @@ class RunTest(unittest.TestCase):
         self.assertEqual(got, one_shot.backlog.GitHubBacklog("team/app"))
 
 
-# #365: several launches at once. Each launch is its own process: spawned children wait at one Barrier and go together, the
-# way test_inbox_adversarial.py starts its writers. The child functions are module level so a spawned child can import them.
+# #365: several launches at once. Each launch is its own process: spawned children wait at one Barrier and go together.
+# The child functions are module level so a spawned child can import them.
 LAUNCHERS = 6
 _MP = multiprocessing.get_context("spawn")
 WIDEN = 0.05  # seconds a child lingers inside the locked region, so a missing lock loses a write every run, not now and then

@@ -51,14 +51,12 @@ def consultations(forge: Any, store: Any, actions: Sequence[reconcile.Action], a
     return reviews
 
 
-def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies, inputs: dict,
-            hold_stages: Sequence[str]) -> bool:
+def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies, inputs: dict) -> bool:
     """Re-plan with shared store inputs and current policies, then log one attempt without retrying.
 
     Resume data holds issue_type and room; findings come from the latest review's report, and without one they
     remain unknown.
-    `inputs` is the same issue context `engine._planning_inputs` builds for the pass; `hold_stages` is the
-    board's stages that wait for a human.
+    `inputs` is the same issue context `engine._planning_inputs` builds for the pass.
     """
     try:
         request = forge.closing_request(action.issue_key)
@@ -85,8 +83,7 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
         checks = {**inputs, "architect_reviews": {}}
 
         def plan():
-            return reconcile.plan([item], policies=policies, free_slots=1, now=store.clock(),
-                                  hold_stages=hold_stages, **checks)
+            return reconcile.plan([item], policies=policies, free_slots=1, now=store.clock(), **checks)
 
         planned = plan()
         if planned == [reconcile.Wait(action.issue_key, "architect consultation is required")]:

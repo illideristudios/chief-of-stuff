@@ -222,7 +222,7 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
     return []
 
 
-# Section 4 circle table. Split modules (audit_tasks, inbox, flow) sit in the outermost circle
+# Section 4 circle table. Split modules (audit_tasks, flow) sit in the outermost circle
 # they occupy until the §8 split lands. Root launchers are Drivers.
 CIRCLES: dict[str, frozenset[str]] = {
     "entities": frozenset({
@@ -280,7 +280,6 @@ MODULE_CIRCLE = {name: circle for circle, names in CIRCLES.items() for name in n
 # Section 5: inward→outward imports known today. The set may only shrink; each entry is a compliance gap.
 OUTWARD_IMPORTS = frozenset({
     "board_sources→process_status",
-    "decision_page→notify_service",
     "dispatch_prompt→backlog_ref",
     "dispatch_prompt→settings",
     "dispatch_prompt→workspace",
@@ -403,6 +402,13 @@ class DependencyRuleTest(unittest.TestCase):
         import chief_of_stuff
         for rel in chief_of_stuff.COMMANDS.values():
             self.assertTrue((ROOT / rel).is_file(), f"COMMANDS routes to missing file {rel}")
+
+    def test_heartbeat_uses_public_workspace_io_and_shared_page_helpers(self) -> None:
+        self.assertNotIn("decision_page", imports(SCRIPTS / "heartbeat_page.py"))
+        tree = ast.parse((SCRIPTS / "heartbeat_store.py").read_text())
+        self.assertEqual([alias.name for node in ast.walk(tree)
+                          if isinstance(node, ast.ImportFrom) and node.module == "workspace"
+                          for alias in node.names if alias.name.startswith("_")], [])
 
     def test_every_script_launcher_and_hook_is_in_exactly_one_circle(self) -> None:
         hooks = discovered_hooks()

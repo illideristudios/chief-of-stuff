@@ -16,7 +16,7 @@ A versioned coordinator for Claude Code, Codex CLI, Cursor CLI, and Antigravity 
 
 Read by `claude --agent frank-lloyd-aight`. Every path, name, and tool the architecture session uses comes from this block.
 
-- User: Zach, he/him
+- User: the owner, he/him
 - Project: chief-of-stuff
 - Architecture directory: `architecture/`
 - Canonical document: `architecture/ARCHITECTURE.md`. Kept canonical by this session, never moved, never renumbered.

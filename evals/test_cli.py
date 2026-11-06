@@ -99,7 +99,7 @@ class CommandHelpTest(unittest.TestCase):
 
     def test_retiring_commands_are_routable_but_not_discoverable(self):
         retired = {"install", "start", "models", "worker", "result", "adopt", "processes",
-                   "inbox", "log", "tracker", "tick", "audit", "notify", "decision", "sources",
+                   "log", "tracker", "tick", "audit", "notify", "decision", "sources",
                    "merge-approved", "merge-ready", "review-threads"}
         self.assertTrue(all(cli.COMMAND_REGISTRY[name][1] is None
                             for name in retired & cli.COMMAND_REGISTRY.keys()))
@@ -397,7 +397,7 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
 
     def test_bad_arguments_of_store_backed_commands_exit_2_without_bootstrapping(self):
         bad = {"pages": ["serve"], "performance": [], "limits": ["--root"], "work": [],
-               "engine": ["--interval", "soon"], "decision": [], "adopt": ["--bogus"]}
+               "engine": ["--interval", "soon"], "adopt": ["--bogus"]}
         self.assertLessEqual(set(bad), cli.STORE_BACKED)
         for name, argv in bad.items():
             with self.subTest(command=name), \
@@ -429,6 +429,26 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
             sys.executable,
             [sys.executable, str(ROOT / "scripts/install_model_guidance.py"), "--help"],
         )
+
+    def test_decision_page_is_plain_but_decision_graph_uses_the_pinned_venv(self):
+        venv_python = Path("/pin/venv/bin/python")
+        for command, args, backed in (
+            ("decision", ["--root", "/workspace", "--name", "release-cut"], False),
+            ("decisions", ["--root", "/workspace", "leaves"], True),
+        ):
+            with self.subTest(command=command), \
+                 mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+                 mock.patch.object(supervisor, "data_dir", return_value=Path("/pin/data")), \
+                 mock.patch.object(supervisor, "ensure_venv", return_value=venv_python) as ensure, \
+                 mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+                with self.assertRaises(SystemExit):
+                    cli.main([command, *args])
+                if backed:
+                    ensure.assert_called_once_with(Path("/pin/data"))
+                else:
+                    ensure.assert_not_called()
+                python = str(venv_python) if backed else sys.executable
+                execv.assert_called_once_with(python, [python, str(ROOT / cli.COMMANDS[command]), *args])
 
     def test_work_routes_to_the_store_backed_driver_and_forwards_intake_options(self):
         venv_python = Path("/pin/venv/bin/python")
@@ -567,7 +587,9 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
         reaching = {name for name, target in cli.COMMANDS.items()
                     if target.startswith("scripts/") and target.count("/") == 1
                     and forbidden_reach(scripts, Path(target).stem, set(), frozenset({"sqlalchemy", "alembic"}))}
-        self.assertEqual(reaching, set(cli.STORE_BACKED))
+        self.assertEqual(reaching, set(cli.STORE_BACKED),
+                         f"Computed store-backed commands: {sorted(reaching)}; "
+                         f"declared STORE_BACKED commands: {sorted(cli.STORE_BACKED)}")
 
 
 def _help_section(help_text: str, heading: str) -> str:

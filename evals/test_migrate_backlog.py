@@ -2,7 +2,7 @@
 
 The tracker's `## Issues` rows are six hours stale by the time they are read — several closed
 themselves and at least two were wrong about their own state when the coordinator audited at 04:00.
-So nothing here decides. It proposes, Zach corrects, and only what he approves is created.
+So nothing here decides. It proposes, the owner corrects, and only what he approves is created.
 
 The row's own key is a hash of its text, which makes the report and the migration agree about
 *which row* even after the tracker moves — and makes a row that changed since the report
@@ -21,7 +21,7 @@ HEAD = "| item | owner | state | since | due | size | checklist |\n|---|---|---|
 
 
 def tracker(*rows: str) -> Path:
-    body = "# Tracker\n\n## Tasks\n\n" + HEAD + "| a task | Zach | open | 2026-09-19 |  | M | — |\n"
+    body = "# Tracker\n\n## Tasks\n\n" + HEAD + "| a task | the owner | open | 2026-09-19 |  | M | — |\n"
     body += "\n## Issues\n\n" + HEAD + "".join(rows) + "\n## Decisions\n\n"
     path = Path(tempfile.mkdtemp()) / "2026-09-19-tracker.md"
     path.write_text(body)
@@ -69,7 +69,7 @@ class ProposeTest(unittest.TestCase):
         self.assertIn("prose", got.why)
 
     def test_an_owned_running_row_is_not_backlog(self):
-        """Zach, 22:43: what is being worked stays in the tracker. Only what is parked moves."""
+        """the owner, 22:43: what is being worked stays in the tracker. Only what is parked moves."""
         one = mb.issue_rows(tracker(row("a defect", owner="openemr-impl-1", state="running 03:20")))[0]
         self.assertEqual(mb.propose(one).disposition, mb.KEEP)
 
@@ -101,7 +101,7 @@ class ReportTest(unittest.TestCase):
 
 
 class DriftTest(unittest.TestCase):
-    """The tracker moves while Zach reads the report. Per-row keys catch a changed row; the file
+    """The tracker moves while the owner reads the report. Per-row keys catch a changed row; the file
     hash catches the case where he is reading a report of a tracker that has since moved on."""
 
     def test_the_report_records_the_tracker_it_read(self):

@@ -11,7 +11,7 @@ from typing import Any
 
 import heartbeat
 from heartbeat import Facts
-from workspace import ENGINE_STATE_DIR, _swap_in
+from workspace import ENGINE_STATE_DIR, swap_in
 
 HEARTBEAT_FILE = "heartbeat.json"
 THREAD_LINK = "t3code://threads/"
@@ -45,7 +45,7 @@ def facts(db: Any) -> list[Facts]:
             trio_decided=any(d.decided_by == "trio" and d.answer for d in mine),
             park=str(park.get("reason", "")) if isinstance(park, dict) else "",
             # shortcut: a "split trio" is an owner decision the trio did not agree on and nobody has answered; the store has no other marker
-            split_trio=any(d.decided_by == "zach" and not d.answer and isinstance(d.record, dict)
+            split_trio=any(d.decided_by == "owner" and not d.answer and isinstance(d.record, dict)
                            and d.record.get("unanimous") is False for d in mine),
             started_at=_when(running[item.issue_key]) if item.issue_key in running else None,
             thread_link=_thread_link(resume)))
@@ -61,7 +61,7 @@ class FileSink:
 
     def deliver(self, status: heartbeat.Status) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        _swap_in(self.path, json.dumps({"line": status.line, "summary": status.summary,
+        swap_in(self.path, json.dumps({"line": status.line, "summary": status.summary,
                                         "now": status.now.isoformat(), "tick": status.tick.isoformat() if status.tick else None,
                                         "entries": [asdict(e) for e in status.entries]}, indent=2) + "\n")
 
