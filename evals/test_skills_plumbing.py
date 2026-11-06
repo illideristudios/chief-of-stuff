@@ -12,14 +12,14 @@ from evals.skill_fixtures import AGENT, write_plugin, write_skill
 
 NON_CLAUDE = ("codex", "cursor", "agy")
 READ_POINTER_GUIDANCE = 'A rule that says "Read <path>" means open that file with your host\'s read tool or `cat`.'
-# No-skills baseline from AGENT in skill_fixtures, refreshed for main's Check adaptation.
+# No-skills baseline from AGENT in skill_fixtures, refreshed for store-backed reconciliation.
 # Only temporary paths and the new non-Claude Read guidance are normalized;
 # whitespace, substitutions, other adapter text and START all remain byte-sensitive.
 LEGACY_SHA256 = {
     "claude": "e03c9850cccd6c80db8e038cf10672f1c54afc1c48945098d958e958d6b1000d",
-    "codex": "a72ab08727fe458c98e0f13ffb93d9fb488a25c5f62056171afe381a28989127",
-    "cursor": "80f49eca00fd50f71c2baf27f851c7b7d92c5f65f0d908d34a43fb7d038c57d9",
-    "agy": "a8b70e313642177dcce856455ada746b977300946bcdb64862a34436bf24aadf",
+    "codex": "4b2ad78a30248bc2aaa64146e125ba1f191224e0eb646ed1076fd2ec1cddf8ee",
+    "cursor": "54c4d22b2c45959c5b2da27db098a5dde76a73e50abe5619bb700d1fdfcdd4f8",
+    "agy": "606445eef43ba1d8c4b8eb6cecb6bf967b05e31ec6b2108e23933a29a9ef64f3",
 }
 
 

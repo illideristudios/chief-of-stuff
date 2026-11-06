@@ -68,10 +68,10 @@ SPAWN_SESSION = PLUGIN_ROOT / "scripts" / "spawn_session.py"
 # The plugin's own scripts are the only ones the agent may run: html, health and merge state come
 # from code, never from the agent. git and curl stay off the allowlist — the scripts call them.
 SCRIPTS = ("render_board.py", "pages.py", "probe_health.py", "audit_tasks.py", "make_worktree.py",
-           "spawn_session.py", "notify.py", "inbox.py", "backlog.py", "kanban_cli.py", "process_status.py",
+           "spawn_session.py", "notify.py", "backlog.py", "kanban_cli.py", "process_status.py",
            "decision_page.py", "tracker_write.py", "merge_approved.py", "merge_ready.py", "review_threads.py", "install_model_guidance.py",
            "board_sources.py", "tracker_read.py", "one_shot_result.py", "flow.py")
-OPERATIONS = ("board", "pages", "health", "audit", "worktree", "worker", "notify", "inbox",
+OPERATIONS = ("board", "pages", "health", "audit", "worktree", "worker", "notify",
               "backlog", "kanban", "processes", "decision", "log", "merge-approved", "merge-ready", "review-threads", "models", "sources",
               "tracker", "result", "tick")
 
@@ -555,11 +555,9 @@ def before_snapshot(work: Path, dest: Path) -> None:
 
 def _no_new_files(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
     """`except` entries are exact paths or globs (`Resources/**`)."""
-    # The page server's pid, log, sources cache and decisions list, and the mailbox's own ignore file, are the
-    # scripts', never the agent's work.
+    # The page server's pid, log, sources cache and decisions list are the scripts', never the agent's work.
     allowed = [str(e) for e in g.get("except", [])] + ["pages/.pid", ".chief-of-stuff/pages.log",
-                                                      ".chief-of-stuff/mailbox/.gitignore", "pages/.sources*",
-                                                      "pages/decisions.html"]
+                                                      "pages/.sources*", "pages/decisions.html"]
     new = sorted(f for f in _files(rec.fixture_dir) - _files(rec.before_dir) if not any(fnmatch.fnmatch(f, e) for e in allowed))
     return (not new), (f"new files: {new}" if new else "no new files")
 

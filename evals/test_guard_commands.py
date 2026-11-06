@@ -506,11 +506,10 @@ class DecisionHistoryBypassTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(denial_reason(command, ("main",)), HISTORY)
 
-    def test_inbox_and_other_chief_commands_remain_available(self):
+    def test_other_chief_commands_remain_available(self):
         for command in (
-            'chief-of-stuff inbox wait --recipient worker --timeout 300',
-            'chief-of-stuff inbox list --recipient worker --unread',
             'chief-of-stuff performance --since 2026-10-01',
+            'chief-of-stuff health --root .',
         ):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main",)))

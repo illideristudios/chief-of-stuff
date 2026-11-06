@@ -9,7 +9,7 @@ Advance stages when their work and automated checks finish. No lane gate, plan a
 
 ### Triage
 
-Use the policy review panel. A configured reviewer session receives the request URL and head sha; otherwise launch reviewers under the policy without asking the owner how to review. Reviewers report findings and never fix. Read `review-report.md` for the report shape. In one-shot mode use scoped review and fix Tasks rows and fresh workers; include the request, findings and dispositions.
+Use the policy review panel. A configured reviewer session receives the request URL and head sha; otherwise launch reviewers under the policy without asking the owner how to review. Reviewers report findings with the engine MCP tool `report` when native messaging is unavailable and never fix. Read `review-report.md` for the report shape. In one-shot mode use scoped review and fix Tasks rows and fresh workers; include the request, findings and dispositions.
 
 Burn findings down to none. Send concrete fixes to the owning worker immediately, including critical and security defects; no owner triage yes is needed. The architect disposes of findings when policy requires it. Architectural decisions go to the owner and the architect; when unsure whether a choice is architectural, ask the architect. Answer scheduling, priority and dispatch as coordinator; other non-architectural choices go to the engine's independent read-only decision trio. A split trio or exhausted trio retry waits on the owner. Use a sensible cheap-to-undo default on separable work and log the assumption.
 

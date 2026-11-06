@@ -498,7 +498,7 @@ class NoShellEditsTest(unittest.TestCase):
         return run.grade({"type": "no_shell_edits"}, rec)[0]
 
     def test_pinned_helpers_are_allowed(self) -> None:
-        for command in ("python3 /installed/scripts/inbox.py list --recipient coordinator",
+        for command in ("python3 /installed/scripts/tracker_read.py --root . section Resume",
                         "python3 /installed/chief_of_stuff.py board --root .",
                         "python3 /installed/scripts/render_board.py --root .", "mkdir -p Resources && mv receipt.txt Resources/",
                         "python3 /installed/chief_of_stuff.py tracker --root . tasks --not done",
@@ -844,6 +844,14 @@ class FileGraderTest(unittest.TestCase):
         self.assertNotIn("receipt.txt", detail)
         (self.after / "stray.md").unlink()
         self.assertTrue(self.grade({"type": "no_new_files", "except": ["Resources/**"]})[0])
+
+    def test_no_new_files_rejects_the_retired_mailbox_ignore_file(self) -> None:
+        path = self.after / ".chief-of-stuff/mailbox/.gitignore"
+        path.parent.mkdir(parents=True)
+        path.write_text("*\n")
+        ok, detail = self.grade({"type": "no_new_files"})
+        self.assertFalse(ok)
+        self.assertIn(".chief-of-stuff/mailbox/.gitignore", detail)
 
     def test_file_moved(self) -> None:
         # Fixture: notes.md at the root before; the agent moves it under Resources/ (any subfolder).
@@ -1299,7 +1307,7 @@ class GitIsNotANewFileTest(unittest.TestCase):
 class AllowedToolsTest(unittest.TestCase):
     def test_pinned_coordinator_scripts_are_runnable(self) -> None:
         allowed = " ".join(run.ALLOWED)
-        for script in ("probe_health.py", "audit_tasks.py", "backlog.py", "inbox.py", "kanban_cli.py", "process_status.py"):
+        for script in ("probe_health.py", "audit_tasks.py", "backlog.py", "kanban_cli.py", "process_status.py"):
             self.assertIn(script, allowed)
         self.assertNotIn("Bash(git", allowed)
         self.assertNotIn("Bash(curl", allowed)

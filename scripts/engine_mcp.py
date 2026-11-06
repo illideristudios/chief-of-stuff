@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 import decision_history
 from guard_binding import Binding
-import inbox
 from policy import SEVERITIES
 from store import Store, verdict_fifo_path
 
@@ -244,36 +243,9 @@ class EngineTools:
             return {"status": "refused", "kind": data.action, "message": refusal}
 
         row = self.store.submit_history_request(req, stage=b.stage, attempt=b.attempt)
-        # Open the wakeup FIFO (`O_RDWR | O_NONBLOCK`) BEFORE posting to the coordinator mailbox so a fast
-        # coordinator cannot signal an unopened FIFO (`ENXIO`) while `inbox.send_message` is still finishing.
+        # The persisted request is the coordinator's queue. A verdict committed before the FIFO
+        # opens is found by the waiter's store check; later verdicts signal the open FIFO.
         with _VerdictWaiter(b.root, row.id) as waiter:
-            mailbox_dir = b.root / ".chief-of-stuff" / "mailbox"
-            inbox.send_message(
-                recipient="coordinator",
-                sender=b.session_id,
-                msg_type="ask",
-                task=b.issue_key,
-                mailbox_dir=mailbox_dir,
-                body=(
-                    f"Decision history request #{row.id} ({row.kind}) from {b.session_id} on {b.issue_key}: "
-                    f"{row.justification}"
-                ),
-                payload={
-                    "kind": "decision_history_request",
-                    "request_id": row.id,
-                    "request_kind": row.kind,
-                    "issue_key": b.issue_key,
-                    "stage": b.stage,
-                    "attempt": b.attempt,
-                    "session_id": b.session_id,
-                    "leaf_id": row.leaf_id,
-                    "other_leaf_id": row.other_leaf_id,
-                    "requested_depth": row.requested_depth,
-                    "approach": row.approach,
-                    "justification": row.justification,
-                    "evidence": row.evidence,
-                },
-            )
             await self._await_verdict(
                 row.id,
                 waiter=waiter,

@@ -1,38 +1,13 @@
 {
   "tz": "America/Chicago",
   "peers": "sessions.json",
-  "description": "#454: a scheduled check and a mailbox check that find nothing new end with the single line `.` and nothing else, though the Resume block holds a standing waiting-on entry. The same entry is given when Robin asks for it and when Robin speaks to the coordinator.",
+  "description": "#454: a scheduled check that finds nothing new ends with the single line `.` and nothing else, though the Resume block holds a standing waiting-on entry. The same entry is given when Robin asks for it and when Robin speaks to the coordinator.",
   "turns": [
     {
       "prompt": "[Scheduled check] chief-of-stuff: check the day",
       "graders": [
         {
-          "name": "the check looked at the mailbox",
-          "type": "tool_used",
-          "tool": "Bash",
-          "input_match": "inbox list",
-          "min": 1
-        },
-        {
           "name": "a quiet scheduled check replies with nothing, or exactly `.`",
-          "type": "regex",
-          "pattern": "\\A\\s*\\.?\\s*\\Z",
-          "rule": "A check that finds nothing ends with the single line `.` and nothing else."
-        }
-      ]
-    },
-    {
-      "prompt": "[Mailbox check] chief-of-stuff: run chief-of-stuff inbox list --recipient coordinator --unread; process new worker messages",
-      "graders": [
-        {
-          "name": "the check looked at the mailbox",
-          "type": "tool_used",
-          "tool": "Bash",
-          "input_match": "inbox list",
-          "min": 1
-        },
-        {
-          "name": "a quiet mailbox check replies with nothing, or exactly `.`",
           "type": "regex",
           "pattern": "\\A\\s*\\.?\\s*\\Z",
           "rule": "A check that finds nothing ends with the single line `.` and nothing else."

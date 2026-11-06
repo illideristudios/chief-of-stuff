@@ -686,7 +686,6 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
         import asyncio
         from unittest import mock
         import decision_history as dh
-        import inbox
 
         justification = (
             f"Decision #{self.d4.id} requires the engine MCP tool to serve leaves, "
@@ -713,19 +712,18 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
         )
         self.assertEqual(self.db.fulfill_history_request(pre_row.id)["status"], "approved")
 
-        # Race 2: Coordinator records verdict while `inbox.send_message` is still in flight (before wait() suspends),
-        # with fallback polling disabled so wakeup relies strictly on the pre-opened FIFO + pre-check.
-        orig_send = inbox.send_message
+        # Race 2: Coordinator records a verdict as soon as the store publishes the request,
+        # before the worker opens its FIFO. The durable verdict must prevent a lost wakeup.
+        orig_submit = self.db.submit_history_request
 
-        def fast_coordinator_during_send(*args, **kwargs):
-            result = orig_send(*args, **kwargs)
-            req_id = kwargs["payload"]["request_id"]
-            self.db.judge_history_request(req_id)
-            return result
+        def fast_coordinator_during_submit(*args, **kwargs):
+            row = orig_submit(*args, **kwargs)
+            self.db.judge_history_request(row.id)
+            return row
 
         self.tools._verdict_fallback_interval = None
         try:
-            with mock.patch.object(inbox, "send_message", side_effect=fast_coordinator_during_send):
+            with mock.patch.object(self.db, "submit_history_request", side_effect=fast_coordinator_during_submit):
                 mid_payload = asyncio.run(
                     asyncio.wait_for(
                         self.tools.decisions(
@@ -776,12 +774,10 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
     def _run_stdio_ancestors_round_trip(self, server_env: dict[str, str]) -> dict:
         import asyncio
         import json
-        import inbox
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
         mailbox_dir = self.root / ".chief-of-stuff" / "mailbox"
-        coord_incoming = mailbox_dir / "coordinator" / "incoming"
 
         async def run() -> dict:
             params = StdioServerParameters(
@@ -796,18 +792,21 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
 
                     async def coordinator_side() -> None:
                         pending = []
-                        msg_files: list[Path] = []
                         for _ in range(300):
                             pending = self.db.pending_history_requests()
-                            msg_files = list(coord_incoming.glob("msg_*"))
-                            if pending and msg_files:
+                            if pending:
                                 break
                             await asyncio.sleep(0.02)
                         self.assertEqual(len(pending), 1)
-                        # Verify request reached coordinator mailbox without any ancestor history attached.
-                        self.assertEqual(len(msg_files), 1)
-                        msg = inbox.Message.from_file(msg_files[0])
-                        self.assertNotIn("Keep decisions in markdown tables", repr(msg.to_dict()))
+                        # The coordinator sees durable request metadata, never ancestor history.
+                        row = pending[0]
+                        self.assertEqual((row.issue_key, row.stage, row.attempt, row.session_id),
+                                         (self.issue_key, "implement", 1, "worker-1181"))
+                        self.assertEqual((row.kind, row.leaf_id, row.requested_depth),
+                                         ("ancestors", self.d4.id, 1))
+                        self.assertIn("scripts/engine_mcp.py:20", row.justification)
+                        self.assertNotIn("Keep decisions in markdown tables", repr(row.__dict__))
+                        self.assertFalse(mailbox_dir.exists())
                         # Coordinator CLI judges pending requests without reading history.
                         rc = await asyncio.to_thread(
                             self._run_coordinator_cli, ["--root", str(self.root), "judge"]
@@ -842,11 +841,14 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
         self.assertEqual([a["id"] for a in payload["ancestors"]], [self.d2.id, self.d3.id])
         self.assertEqual(len(self.db.history_grants()), 1)
 
-        # Code mismatch was also reported to the architect mailbox.
-        arch_files = list((mailbox_dir / "architect" / "incoming").glob("msg_*"))
-        self.assertEqual(len(arch_files), 1)
+        # Mismatch notices use the existing durable architect log, once per verdict.
+        notices = [entry for entry in self.db.engine_log() if entry.kind == "architect_mismatch"]
+        self.assertEqual(len(notices), 1)
+        self.assertIn(f"Decision #{self.d4.id}", notices[0].message)
+        self.assertIn(self.issue_key, notices[0].message)
+        self.assertFalse(mailbox_dir.exists())
 
-    def test_stdio_mcp_survives_slow_mailbox_fsync_without_losing_coordinator_or_timing_out(self) -> None:
+    def test_stdio_mcp_survives_slow_fsync_without_losing_coordinator_or_timing_out(self) -> None:
         import os
 
         with tempfile.TemporaryDirectory() as shim:
@@ -957,6 +959,33 @@ class DecisionGraphMCPAndCLITest(unittest.TestCase):
         self.assertIn("context", denied["reason"].lower())
         # Only the 1 approved grant was logged; the denied request logged no grant.
         self.assertEqual(len(self.db.history_grants()), 1)
+
+    def test_cli_mismatch_verdicts_use_store_log_once_without_a_mailbox(self) -> None:
+        import decision_history as dh
+
+        justification = (
+            f"Decision #{self.d4.id} requires the engine MCP tool to serve leaves, "
+            "which does not match what the code shows in scripts/engine_mcp.py:20."
+        )
+        for command in ("judge", "decide"):
+            with self.subTest(command=command):
+                row = self.db.submit_history_request(dh.HistoryRequest(
+                    kind="ancestors", leaf_id=self.d4.id, requested_depth=1,
+                    issue_key=self.issue_key, worker_id="worker-1181",
+                    justification=justification, evidence="scripts/engine_mcp.py:20"),
+                    stage="implement", attempt=1)
+                argv = ["--root", str(self.root), command, "--request", str(row.id)]
+                if command == "decide":
+                    argv += ["--approve", "--reason", "Confirmed code mismatch.", "--report-mismatch"]
+                for _ in range(2):
+                    self.assertEqual(self._run_coordinator_cli(argv), 0)
+                self.assertEqual(self.db.history_request(row.id).status, "approved")
+        notices = [entry for entry in self.db.engine_log() if entry.kind == "architect_mismatch"]
+        self.assertEqual(len(notices), 2)
+        for notice in notices:
+            self.assertIn(self.issue_key, notice.message)
+            self.assertIn(justification, notice.message)
+        self.assertFalse((self.root / ".chief-of-stuff" / "mailbox").exists())
 
     def test_decisions_cli_allows_free_readers_and_refuses_worker_bound_shell(self) -> None:
         import io

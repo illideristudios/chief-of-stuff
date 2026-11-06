@@ -1967,8 +1967,8 @@ class RunTest(unittest.TestCase):
         self.assertEqual(got, one_shot.backlog.GitHubBacklog("team/app"))
 
 
-# #365: several launches at once. Each launch is its own process: spawned children wait at one Barrier and go together, the
-# way test_inbox_adversarial.py starts its writers. The child functions are module level so a spawned child can import them.
+# #365: several launches at once. Each launch is its own process: spawned children wait at one Barrier and go together.
+# The child functions are module level so a spawned child can import them.
 LAUNCHERS = 6
 _MP = multiprocessing.get_context("spawn")
 WIDEN = 0.05  # seconds a child lingers inside the locked region, so a missing lock loses a write every run, not now and then

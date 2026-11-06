@@ -56,7 +56,6 @@
       "except": [
         "Areas/daily/{{today}}.md",
         "Areas/daily/{{today}}-tracker.md",
-        ".chief-of-stuff/mailbox/.gitignore",
         ".chief-of-stuff/.gitignore",
         "Resources/**",
         "Archives/**"

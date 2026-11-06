@@ -32,7 +32,7 @@ DRAWS_NOTHING = (
     "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "forge_review",
     "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "kanban_cli", "pipeline_cli", "audit_tasks",
     "one_shot", "spawn_session", "session_exec", "shell_setup", "process_status", "one_shot_result", "adopt_one_shots", "merge_approved", "merge_ready",
-    "merge_order", "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog", "inbox",
+    "merge_order", "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog",
     "probe_health", "runtimes", "estimate", "task_forge", "tracker_log", "findings", "tree_state", "orphans",
     "git_trees", "git_view", "tree_claims", "notify_service", "tracker_read",
     "one_shot_report", "flow", "sync_page_theme", "store", "store_access", "private_state",
@@ -87,6 +87,8 @@ DRAWS_NOTHING = (
     "decision_actions",  # Use Cases: pure decision lifecycle transitions.
     "decision_escalation",  # Use Cases: pure trio-retry, owner-wait and ask-link judgements.
 )
+
+REMOVED = ("inbox",)
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
 
@@ -220,7 +222,7 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
     return []
 
 
-# Section 4 circle table. Split modules (audit_tasks, inbox, flow) sit in the outermost circle
+# Section 4 circle table. Split modules (audit_tasks, flow) sit in the outermost circle
 # they occupy until the §8 split lands. Root launchers are Drivers.
 CIRCLES: dict[str, frozenset[str]] = {
     "entities": frozenset({
@@ -268,7 +270,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
         "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
-        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "bake", "architect_signals_cli", "decisions_cli",
+        "audit_tasks", "flow", "limits_probe", "limits_cli", "bake", "architect_signals_cli", "decisions_cli",
         "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }
@@ -386,6 +388,21 @@ def outward_imports(graph: dict[str, set[str]] | None = None) -> set[str]:
 
 
 class DependencyRuleTest(unittest.TestCase):
+    def test_a_removed_script_is_gone_and_no_file_imports_it(self) -> None:
+        search_roots = (SCRIPTS, ROOT, ROOT / "evals", ROOT / "hooks")
+        py_files = [p for root in search_roots if root.is_dir() for p in root.rglob("*.py")]
+        for name in REMOVED:
+            with self.subTest(removed=name):
+                self.assertFalse((SCRIPTS / f"{name}.py").is_file(), f"scripts/{name}.py should be deleted")
+                importers = sorted({str(path.relative_to(ROOT)) for path in py_files
+                                    if script(name) in {script(n) for n in imports(path)}})
+                self.assertEqual(importers, [], f"{name} is still imported from {importers}")
+
+    def test_every_command_routes_to_a_script_that_exists(self) -> None:
+        import chief_of_stuff
+        for rel in chief_of_stuff.COMMANDS.values():
+            self.assertTrue((ROOT / rel).is_file(), f"COMMANDS routes to missing file {rel}")
+
     def test_heartbeat_uses_public_workspace_io_and_shared_page_helpers(self) -> None:
         self.assertNotIn("decision_page", imports(SCRIPTS / "heartbeat_page.py"))
         tree = ast.parse((SCRIPTS / "heartbeat_store.py").read_text())

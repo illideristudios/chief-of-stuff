@@ -99,7 +99,7 @@ class CommandHelpTest(unittest.TestCase):
 
     def test_retiring_commands_are_routable_but_not_discoverable(self):
         retired = {"install", "start", "models", "worker", "result", "adopt", "processes",
-                   "inbox", "log", "tracker", "tick", "audit", "notify", "decision", "sources",
+                   "log", "tracker", "tick", "audit", "notify", "decision", "sources",
                    "merge-approved", "merge-ready", "review-threads"}
         self.assertTrue(all(cli.COMMAND_REGISTRY[name][1] is None
                             for name in retired & cli.COMMAND_REGISTRY.keys()))

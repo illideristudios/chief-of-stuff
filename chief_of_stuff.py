@@ -46,7 +46,6 @@ COMMAND_REGISTRY = {
     "result": ("scripts/one_shot_result.py", None),
     "adopt": ("scripts/adopt_one_shots.py", None),
     "board": ("scripts/pages.py", None),
-    "inbox": ("scripts/inbox.py", None),
     "backlog": ("scripts/backlog.py", "intake"),
     "kanban": ("scripts/kanban_cli.py", "forge"),
     "pipeline": ("scripts/pipeline_cli.py", "forge"),

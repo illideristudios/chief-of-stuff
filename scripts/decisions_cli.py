@@ -19,7 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _vendor.toon_format import encode as toon_encode
 import decision_graph
 import decision_history
-import inbox
 import precedent_source
 import store
 import store_access
@@ -73,32 +72,6 @@ def _serialize_grant(row: store.DecisionHistoryGrant) -> dict[str, Any]:
         "matched_approach": row.matched_approach,
         "granted_at": row.granted_at,
     }
-
-
-def _notify_architect_mismatch(root: Path, row: store.DecisionHistoryRequest) -> None:
-    if not row.report_to_architect:
-        return
-    mailbox_dir = Path(root) / ".chief-of-stuff" / "mailbox"
-    inbox.send_message(
-        recipient="architect",
-        sender=row.decided_by or "coordinator",
-        msg_type="report",
-        task=row.issue_key or None,
-        mailbox_dir=mailbox_dir,
-        body=(
-            f"Decision #{row.leaf_id} code mismatch reported on history request #{row.id} "
-            f"({row.issue_key or 'workspace'}): {row.justification}"
-        ),
-        payload={
-            "kind": "decision_code_mismatch",
-            "request_id": row.id,
-            "leaf_id": row.leaf_id,
-            "issue_key": row.issue_key,
-            "session_id": row.session_id,
-            "justification": row.justification,
-            "evidence": row.evidence,
-        },
-    )
 
 
 def _parse_rejected_pair(spec: str) -> decision_graph.RejectedAlternative:
@@ -228,22 +201,13 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cmd == "judge":
             if args.request is not None:
-                prior = st.history_request(args.request)
-                was_pending = prior is not None and prior.status == "pending"
                 decided_rows = [st.judge_history_request(args.request)]
-                if was_pending and decided_rows[0].report_to_architect:
-                    _notify_architect_mismatch(root, decided_rows[0])
             else:
                 decided_rows = st.judge_pending_history_requests()
-                for row in decided_rows:
-                    if row.report_to_architect:
-                        _notify_architect_mismatch(root, row)
             _emit([_serialize_request(r) for r in decided_rows], as_json=args.as_json)
             return 0
 
         if args.cmd == "decide":
-            prior = st.history_request(args.request)
-            was_pending = prior is not None and prior.status == "pending"
             decided = st.decide_history_request(
                 args.request,
                 approved=bool(args.approve),
@@ -252,8 +216,6 @@ def main(argv: list[str] | None = None) -> int:
                 approved_depth=args.depth,
                 report_to_architect=args.report_mismatch,
             )
-            if was_pending and decided.report_to_architect:
-                _notify_architect_mismatch(root, decided)
             _emit(_serialize_request(decided), as_json=args.as_json)
             return 0
 

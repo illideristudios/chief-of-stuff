@@ -666,8 +666,8 @@ class TaskFlagTest(unittest.TestCase):
 
 
 class AgyTest(unittest.TestCase):
-    """the owner, 2026-09-23 18:42: "within the next hour I need agy instances going"; registration and reporting
-    through the mailbox only. agy has no `--agent` and no `--name`; `--mode plan` is its plan-first gate."""
+    """The owner, 2026-09-23 18:42: "within the next hour I need agy instances going"; registration and reporting
+    through the engine store when IPC is unavailable. agy has no `--agent` and no `--name`; `--mode plan` is its plan-first gate."""
 
     AGY = Path("/opt/homebrew/bin/agy")
 
@@ -1682,7 +1682,7 @@ with open({str(self.log)!r}, 'a') as log:
                 self.assertEqual([call["argv"] for call in self.calls()],
                                  [self.session_list_argv(), self.tab_argv(title),
                                   self.pane_argv(title=title, runtime="codex")])
-                self.assertIn(f"name `{title}`;", self.dispatch.read_text())
+                self.assertIn(f"You are `{title}`.", self.dispatch.read_text())
                 start = shlex.split(" ".join(self.calls()[2]["argv"][5:]))
                 # session_exec registers this --name; do not execute the worker in the fake.
                 registry = start.index("--registry")
